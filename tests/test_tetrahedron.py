@@ -3,9 +3,12 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+from sympy import simplify, Rational, Matrix
+
 from src.tetrahedron import (
     verify_unit_vectors, verify_centroid, verify_dot_products,
     verify_isotropy, isotropy_tensor, vertices,
+    directions_after_path, position_after_path, reflect_directions,
 )
 
 
@@ -27,3 +30,59 @@ def test_dot_products():
 
 def test_isotropy():
     assert verify_isotropy(), "Isotropy tensor is not (4/3) delta_{ij}"
+
+
+def _dirs_equal(d1, d2):
+    return all(
+        (a - b).applyfunc(simplify) == Matrix([0, 0, 0])
+        for a, b in zip(d1, d2)
+    )
+
+
+def test_empty_path():
+    assert _dirs_equal(directions_after_path([]), vertices)
+
+
+def test_step_and_back():
+    """Stepping out and back recovers original tetrahedron."""
+    for a in range(4):
+        assert _dirs_equal(directions_after_path([a, a]), vertices)
+
+
+def test_reflected_directions_form_tetrahedron():
+    """After any single step, new directions form a regular tetrahedron."""
+    for a in range(4):
+        dirs = directions_after_path([a])
+        # Unit vectors
+        for d in dirs:
+            assert simplify(d.dot(d) - 1) == 0
+        # Dot products -1/3
+        for i in range(4):
+            for j in range(i + 1, 4):
+                assert simplify(dirs[i].dot(dirs[j])) == Rational(-1, 3)
+
+
+def test_step_reverses_direction():
+    """After stepping in e_a, the a-th direction at new site is -e_a."""
+    for a in range(4):
+        dirs = directions_after_path([a])
+        assert (dirs[a] + vertices[a]).applyfunc(simplify) == Matrix([0, 0, 0])
+
+
+def test_coplanarity():
+    """e_i, e_step, w_i are coplanar for i != step."""
+    for step in range(4):
+        dirs = directions_after_path([step])
+        for i in range(4):
+            if i == step:
+                continue
+            M = vertices[i].row_join(vertices[step]).row_join(dirs[i])
+            assert simplify(M.det()) == 0
+
+
+def test_position_tracking():
+    pos, dirs = position_after_path([0])
+    assert pos.applyfunc(simplify) == vertices[0]
+
+    pos, dirs = position_after_path([0, 0])
+    assert pos.applyfunc(simplify) == Matrix([0, 0, 0])
