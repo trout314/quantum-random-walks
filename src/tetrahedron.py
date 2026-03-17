@@ -151,6 +151,70 @@ def position_after_path(path):
 
 
 # ---------------------------------------------------------------------------
+# Boerdijk-Coxeter helix
+# ---------------------------------------------------------------------------
+
+# The BC helix is formed by face-stacking regular tetrahedra.  Stepping
+# through face a (opposite vertex a) displaces the walker by -(2/3) e_a
+# and reflects the local directions through the plane perpendicular to e_a.
+#
+# In our walker model with directions {e_0, e_1, e_2, e_3} at the start,
+# the face-exit index sequence [1, 3, 0, 2] repeated generates a
+# right-handed BC helix, and [2, 0, 3, 1] a left-handed one.
+# (Which is "right" vs "left" depends on the initial tet orientation.)
+#
+# BC helix parameters (for unit edge length):
+#   vertex radius r = 3√3 / 10
+#   pitch per vertex h = 1 / √10
+#   rotation per vertex θ = arccos(-2/3) ≈ 131.81°
+#
+# Key property: all spirals with the same pattern starting from
+# different sites are DISJOINT (no shared sites).
+
+BC_HELIX_R = [1, 3, 0, 2]
+BC_HELIX_L = [2, 0, 3, 1]
+
+
+def bc_helix_path(n_steps, chirality='R', start_dirs=None, start_pos=None):
+    """
+    Generate a Boerdijk-Coxeter helix walker path.
+
+    Each step exits through a face, displacing by -(2/3) e_a and
+    reflecting directions through the plane perpendicular to e_a.
+
+    Parameters
+    ----------
+    n_steps : int
+        Number of steps to take.
+    chirality : 'R' or 'L'
+        Right-handed or left-handed helix.
+    start_dirs : list of 4 sympy Matrix, optional
+        Starting directions. Defaults to the standard tetrahedron.
+    start_pos : sympy Matrix (3×1), optional
+        Starting position. Defaults to the origin.
+
+    Returns
+    -------
+    positions : list of sympy Matrix (3×1)
+        Walker positions (length n_steps + 1).
+    final_dirs : list of 4 sympy Matrix (3×1)
+        Directions at the final site.
+    """
+    pattern = BC_HELIX_R if chirality == 'R' else BC_HELIX_L
+    dirs = list(start_dirs) if start_dirs is not None else list(vertices)
+    pos = start_pos if start_pos is not None else Matrix([0, 0, 0])
+    positions = [pos]
+
+    for i in range(n_steps):
+        idx = pattern[i % 4]
+        pos = (pos - Rational(2, 3) * dirs[idx]).applyfunc(simplify)
+        dirs = reflect_directions(dirs, idx)
+        positions.append(pos)
+
+    return positions, dirs
+
+
+# ---------------------------------------------------------------------------
 # Numpy versions for numerical work
 # ---------------------------------------------------------------------------
 

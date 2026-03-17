@@ -9,6 +9,7 @@ from src.tetrahedron import (
     verify_unit_vectors, verify_centroid, verify_dot_products,
     verify_isotropy, isotropy_tensor, vertices,
     directions_after_path, position_after_path, reflect_directions,
+    bc_helix_path, BC_HELIX_R, BC_HELIX_L,
 )
 
 
@@ -86,3 +87,27 @@ def test_position_tracking():
 
     pos, dirs = position_after_path([0, 0])
     assert pos.applyfunc(simplify) == Matrix([0, 0, 0])
+
+
+def test_bc_helix_step_size():
+    """BC helix steps have constant magnitude 2/3."""
+    positions, _ = bc_helix_path(8, chirality='R')
+    for i in range(8):
+        step = (positions[i + 1] - positions[i]).applyfunc(simplify)
+        mag_sq = simplify(step.dot(step))
+        assert mag_sq == Rational(4, 9), f"Step {i} magnitude^2 = {mag_sq}"
+
+
+def test_bc_helix_directions_valid():
+    """Directions at each BC helix site form a regular tetrahedron."""
+    dirs = list(vertices)
+    pattern = BC_HELIX_R
+    for step in range(8):
+        idx = pattern[step % 4]
+        dirs = [(d - 2 * d.dot(dirs[idx]) * dirs[idx]).applyfunc(simplify)
+                for d in dirs]
+        for i in range(4):
+            assert simplify(dirs[i].dot(dirs[i]) - 1) == 0
+        for i in range(4):
+            for j in range(i + 1, 4):
+                assert simplify(dirs[i].dot(dirs[j])) == Rational(-1, 3)
