@@ -216,33 +216,77 @@ numerically along the R-spiral for the first 16 sites. Results:
 - This failure occurs for **all separations** k = 1, 2, ..., 8, not just
   k = 2. No pair of τ operators at any two sites on the helix are equal.
 
-## Summary of Where We Stand
+## Step 8: Frame Transport Resolution
+
+The fix: include a unitary frame transport U_{n,n+1} in the shift that
+maps the ±1 eigenspaces of τ_{a(n)}^(n) to those of τ_{a(n+1)}^(n+1).
+
+### Construction
+
+At each site n on the spiral, let V_n be the matrix whose columns are
+an orthonormal eigenbasis of τ_{a(n)}^(n) (first two columns: +1 eigenspace,
+last two: -1 eigenspace). Then:
+
+    U_{n,n+1} = V_{n+1} V_n†
+
+This satisfies:
+- U is unitary: U U† = V_{n+1} V_n† V_n V_{n+1}† = I
+- U intertwines projectors: U P_{a(n)}^(n),± = P_{a(n+1)}^(n+1),± U
+
+### Modified shift operator
+
+    S_R = Σ_n [U_{n,n+1} P_{a(n)}^(n),+ ⊗ |n+1⟩⟨n|
+             + U_{n,n-1} P_{a(n)}^(n),- ⊗ |n-1⟩⟨n|]
+
+### Unitarity proof
+
+Computing S_R† S_R, the off-diagonal terms become:
+
+    P_{a(n)}^(n),+ U_{n,n+1}† U_{n+2,n+1} P_{a(n+2)}^(n+2),-
+
+Using the intertwining property:
+- P_{a(n)}^+ U_{n,n+1}† = U_{n,n+1}† P_{a(n+1)}^+   (maps back to site n+1 frame)
+- U_{n+2,n+1} P_{a(n+2)}^- = P_{a(n+1)}^- U_{n+2,n+1}   (maps to site n+1 frame)
+
+So the product factorizes as:
+
+    U_{n,n+1}† · P_{a(n+1)}^(n+1),+ · P_{a(n+1)}^(n+1),- · U_{n+2,n+1} = 0
+
+since P^+ P^- = 0 at the SAME site (n+1). **The frame transport reduces
+the unitarity condition to projector orthogonality at a single site.** ✓
+
+### Verified numerically
+
+- All U_{n,n+1} are unitary ✓
+- All intertwining relations hold ✓
+- All off-diagonal products vanish ✓
+
+### Structure of the frame transport
+
+Each U_{n,n+1} has the block form (in the eigenbasis of τ_{a(n)}^(n)):
+
+    U = [[I_2,  0 ],
+         [ 0,  R_n]]
+
+where I_2 is the 2×2 identity (the +1 eigenspace is FIXED) and R_n is
+an SU(2) rotation acting on the -1 eigenspace. The rotation angle varies
+from step to step and does not repeat (due to the irrational BC helix angle).
+
+### Open question: continuum limit
+
+The modified shift S_R includes both the conditional translation AND the
+frame transport U_{n,n+1}. In the continuum limit, U ≈ I + δA for some
+operator A (a "gauge connection"). The question is whether the additional
+gauge connection term preserves the Dirac equation or introduces unwanted
+corrections.
+
+## Summary
 
 | Aspect                    | 1D case              | 3D tetrahedral case              |
 |---------------------------|----------------------|----------------------------------|
 | Coin space                | 2D (Pauli matrices)  | 4D (Dirac matrices)              |
-| Shift operator            | S = P₊T₊ + P₋T₋     | S_R, S_L along BC helices        |
-| Projectors                | Same at every site    | Position-dependent (τ_a changes) |
-| Unitarity of shift        | Automatic (P₊P₋=0)   | Fails: τ_{a(n)}^(n) ≠ τ_{a(n+2)}^(n+2) |
+| Shift operator            | S = P₊T₊ + P₋T₋     | S_R with frame transport         |
+| Projectors                | Same at every site    | Position-dependent, transported  |
+| Unitarity of shift        | Automatic (P₊P₋=0)   | ✓ via frame transport            |
 | Walk operator             | U = S · C            | U = S_R · S_L · C (proposed)     |
-| Continuum limit           | Dirac equation ✓     | Dirac equation (if unitary)      |
-
-The central obstacle is the **position-dependence of the τ operators**,
-which breaks the orthogonality argument that makes S unitary in the 1D case.
-The irrational rotation angle of the BC helix guarantees that no two sites
-share the same orientation, so the naive shift is never unitary.
-
-### Possible resolutions
-
-1. **Frame transport:** Include a unitary U_{n→n+1} in the shift that
-   "rotates" the coin state from site n's frame to site n+1's frame.
-   If U maps the eigenspaces of τ^(n) to those of τ^(n+1), the
-   orthogonality structure could be restored.
-
-2. **Different Hamiltonian splitting:** Instead of splitting H into
-   individual τ_a D_a terms, find a decomposition aligned with the spiral
-   structure where the shift operators are naturally unitary.
-
-3. **Modified projectors:** Use projectors that are constant along the
-   spiral (not tied to the local τ operators), while still reproducing
-   the correct continuum limit.
+| Continuum limit           | Dirac equation ✓     | To be checked                    |
