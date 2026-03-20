@@ -579,50 +579,127 @@ int main(int argc, char **argv) {
         if (assigned_l == 0 && assigned_r == 0) break;
     }
 
-    /* Count interior */
-    int nboth = 0, ninterior = 0;
+    /* ---- Phase 3: Restrict to dual-covered sites ---- */
+    /* Only keep sites that have BOTH R and L membership.
+     * Remap site IDs, rebuild chains with only dual-covered sites. */
+
+    /* Build old-to-new ID mapping */
+    int *old_to_new = malloc(nsites * sizeof(int));
+    int n_dual = 0;
     for (int s = 0; s < nsites; s++) {
-        if (allsites[s].r_chain >= 0 && allsites[s].l_chain >= 0) {
-            nboth++;
-            int ri = allsites[s].r_pos, li = allsites[s].l_pos;
-            int rlen = rchains[allsites[s].r_chain].len;
-            int llen = lchains[allsites[s].l_chain].len;
-            if (ri > 0 && ri < rlen-1 && li > 0 && li < llen-1)
-                ninterior++;
+        if (allsites[s].r_chain >= 0 && allsites[s].l_chain >= 0)
+            old_to_new[s] = n_dual++;
+        else
+            old_to_new[s] = -1;
+    }
+    fprintf(stderr, "\nDual-covered sites: %d / %d (%.1f%%)\n",
+            n_dual, nsites, 100.0*n_dual/nsites);
+
+    /* Rebuild chains: strip out sites without dual coverage.
+     * A chain may split into multiple segments. Each segment
+     * with length >= 2 becomes a new chain. */
+    chain_t *new_rchains = malloc(MAX_CHAINS * sizeof(chain_t));
+    chain_t *new_lchains = malloc(MAX_CHAINS * sizeof(chain_t));
+    int new_nrch = 0, new_nlch = 0;
+
+    /* Also need to reset membership since chain IDs will change */
+    int *new_r_chain = malloc(nsites * sizeof(int));
+    int *new_r_pos   = malloc(nsites * sizeof(int));
+    int *new_l_chain = malloc(nsites * sizeof(int));
+    int *new_l_pos   = malloc(nsites * sizeof(int));
+    for (int s = 0; s < nsites; s++) {
+        new_r_chain[s] = new_l_chain[s] = -1;
+        new_r_pos[s] = new_l_pos[s] = -1;
+    }
+
+    for (int pass = 0; pass < 2; pass++) {
+        int nch_in = (pass == 0) ? nrch : nlch;
+        chain_t *chains_in = (pass == 0) ? rchains : lchains;
+        chain_t *chains_out = (pass == 0) ? new_rchains : new_lchains;
+        int *nch_out = (pass == 0) ? &new_nrch : &new_nlch;
+        int *mem_chain = (pass == 0) ? new_r_chain : new_l_chain;
+        int *mem_pos   = (pass == 0) ? new_r_pos : new_l_pos;
+
+        for (int c = 0; c < nch_in; c++) {
+            /* Walk through chain, splitting at non-dual sites */
+            chain_t seg; seg.len = 0;
+            for (int i = 0; i < chains_in[c].len; i++) {
+                int sid = chains_in[c].ids[i];
+                if (old_to_new[sid] < 0) {
+                    /* Not dual-covered: flush current segment */
+                    if (seg.len >= 2 && *nch_out < MAX_CHAINS) {
+                        memcpy(&chains_out[*nch_out], &seg, sizeof(chain_t));
+                        for (int j = 0; j < seg.len; j++) {
+                            int s = seg.ids[j];
+                            if (mem_chain[s] == -1) {
+                                mem_chain[s] = *nch_out;
+                                mem_pos[s] = j;
+                            }
+                        }
+                        (*nch_out)++;
+                    }
+                    seg.len = 0;
+                } else {
+                    seg.ids[seg.len] = sid;
+                    seg.faces[seg.len] = chains_in[c].faces[i];
+                    seg.len++;
+                }
+            }
+            /* Flush final segment */
+            if (seg.len >= 2 && *nch_out < MAX_CHAINS) {
+                memcpy(&chains_out[*nch_out], &seg, sizeof(chain_t));
+                for (int j = 0; j < seg.len; j++) {
+                    int s = seg.ids[j];
+                    if (mem_chain[s] == -1) {
+                        mem_chain[s] = *nch_out;
+                        mem_pos[s] = j;
+                    }
+                }
+                (*nch_out)++;
+            }
         }
     }
-    fprintf(stderr, "\nSites: %d, Both: %d, Interior: %d\n", nsites, nboth, ninterior);
 
-    /* Build sparse operators using stitched mega-loops.
-     * All R-chains are cyclically stitched into one big loop,
-     * and all L-chains into another. The frame transport at
-     * each stitch point handles the mismatch automatically. */
-    fprintf(stderr, "Building S_R (stitched, %d chains)...\n", nrch);
-    build_stitched_shift(rchains, nrch, 1, sr_entries, &sr_nnz);
+    /* Update allsites membership with new chain IDs */
+    for (int s = 0; s < nsites; s++) {
+        allsites[s].r_chain = new_r_chain[s];
+        allsites[s].r_pos = new_r_pos[s];
+        allsites[s].l_chain = new_l_chain[s];
+        allsites[s].l_pos = new_l_pos[s];
+    }
+
+    /* Count sites that still have both after chain splitting */
+    int n_final_both = 0;
+    for (int s = 0; s < nsites; s++)
+        if (old_to_new[s] >= 0 && new_r_chain[s] >= 0 && new_l_chain[s] >= 0)
+            n_final_both++;
+
+    fprintf(stderr, "After restriction: %d R-chains, %d L-chains, %d sites with both\n",
+            new_nrch, new_nlch, n_final_both);
+
+    /* Build stitched operators on the RESTRICTED chains */
+    fprintf(stderr, "Building S_R (stitched, %d chains)...\n", new_nrch);
+    build_stitched_shift(new_rchains, new_nrch, 1, sr_entries, &sr_nnz);
     fprintf(stderr, "S_R: %d nonzeros\n", sr_nnz);
 
-    fprintf(stderr, "Building S_L (stitched, %d chains)...\n", nlch);
-    build_stitched_shift(lchains, nlch, 0, sl_entries, &sl_nnz);
+    fprintf(stderr, "Building S_L (stitched, %d chains)...\n", new_nlch);
+    build_stitched_shift(new_lchains, new_nlch, 0, sl_entries, &sl_nnz);
     fprintf(stderr, "S_L: %d nonzeros\n", sl_nnz);
 
-    /* Binary output */
-    int header[4] = {nsites, ninterior, sr_nnz, sl_nnz};
+    /* Binary output — use ORIGINAL site IDs (Python will handle the mapping) */
+    int header[4] = {nsites, n_final_both, sr_nnz, sl_nnz};
     fwrite(header, sizeof(int), 4, stdout);
 
-    /* Positions */
     for (int s = 0; s < nsites; s++) {
         double xyz[3] = {allsites[s].pos.x, allsites[s].pos.y, allsites[s].pos.z};
         fwrite(xyz, sizeof(double), 3, stdout);
     }
 
-    /* Membership */
     for (int s = 0; s < nsites; s++) {
-        int mem[4] = {allsites[s].r_chain, allsites[s].r_pos,
-                      allsites[s].l_chain, allsites[s].l_pos};
+        int mem[4] = {new_r_chain[s], new_r_pos[s], new_l_chain[s], new_l_pos[s]};
         fwrite(mem, sizeof(int), 4, stdout);
     }
 
-    /* S_R entries */
     for (int i = 0; i < sr_nnz; i++) {
         int rc[2] = {sr_entries[i].row, sr_entries[i].col};
         fwrite(rc, sizeof(int), 2, stdout);
@@ -632,7 +709,6 @@ int main(int argc, char **argv) {
         fwrite(ri, sizeof(double), 2, stdout);
     }
 
-    /* S_L entries */
     for (int i = 0; i < sl_nnz; i++) {
         int rc[2] = {sl_entries[i].row, sl_entries[i].col};
         fwrite(rc, sizeof(int), 2, stdout);
@@ -641,6 +717,10 @@ int main(int argc, char **argv) {
         double ri[2] = {sl_entries[i].re, sl_entries[i].im};
         fwrite(ri, sizeof(double), 2, stdout);
     }
+
+    free(old_to_new); free(new_r_chain); free(new_r_pos);
+    free(new_l_chain); free(new_l_pos);
+    free(new_rchains); free(new_lchains);
 
     free(htab); free(allsites); free(rchains); free(lchains);
     free(sr_entries); free(sl_entries);
