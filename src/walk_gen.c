@@ -223,6 +223,19 @@ static unsigned hfn(long kx, long ky, long kz) {
     return (unsigned)(h & HASH_MASK);
 }
 
+/* Find a site by position, return id or -1 if not found */
+static int site_find(vec3 pos) {
+    long kx, ky, kz; poskey(pos, &kx, &ky, &kz);
+    unsigned h = hfn(kx, ky, kz);
+    for (int probe = 0; probe < HASH_SIZE; probe++) {
+        unsigned idx = (h + probe) & HASH_MASK;
+        if (htab[idx].id == -1) return -1;
+        if (htab[idx].kx==kx && htab[idx].ky==ky && htab[idx].kz==kz)
+            return htab[idx].id;
+    }
+    return -1;
+}
+
 static int site_insert(vec3 pos, vec3 dirs[4]) {
     long kx, ky, kz; poskey(pos, &kx, &ky, &kz);
     unsigned h = hfn(kx, ky, kz);
@@ -416,12 +429,63 @@ static void build_stitched_shift(chain_t *chains, int nch, int is_r,
     free(loop_faces);
 }
 
+/* Trace a chain through EXISTING sites only (no new site creation).
+ * Follows the pattern from start_id, stopping when it hits a site
+ * not in the hash table. Returns chain length. */
+static void trace_chain_existing(int start_id, const int pat[4],
+                                  int max_fwd, int max_bwd, chain_t *ch) {
+    ch->len = 0;
+
+    /* Backward */
+    int rev[4] = {pat[3], pat[2], pat[1], pat[0]};
+    int bwd_ids[MAX_CLEN]; int nb = 0;
+    {
+        vec3 pos = allsites[start_id].pos;
+        vec3 d[4]; memcpy(d, allsites[start_id].dirs, sizeof(d));
+        for (int i = 0; i < max_bwd && nb < MAX_CLEN/2; i++) {
+            helix_step(&pos, d, rev[i%4]);
+            if ((i+1)%8==0) reorth(d);
+            int sid = site_find(pos);  /* find only, don't insert */
+            if (sid < 0) break;        /* left the known region */
+            bwd_ids[nb++] = sid;
+        }
+    }
+    for (int i = nb-1; i >= 0; i--) {
+        ch->ids[ch->len] = bwd_ids[i];
+        ch->len++;
+    }
+    ch->ids[ch->len] = start_id;
+    ch->len++;
+
+    /* Forward */
+    {
+        vec3 pos = allsites[start_id].pos;
+        vec3 d[4]; memcpy(d, allsites[start_id].dirs, sizeof(d));
+        for (int i = 0; i < max_fwd && ch->len < MAX_CLEN; i++) {
+            int face = pat[i%4];
+            helix_step(&pos, d, face);
+            if ((i+1)%8==0) reorth(d);
+            int sid = site_find(pos);
+            if (sid < 0) break;
+            ch->ids[ch->len] = sid;
+            ch->len++;
+        }
+    }
+
+    /* Compute faces */
+    for (int i = 0; i < ch->len; i++) {
+        int offset = i - nb;
+        ch->faces[i] = pat[((offset % 4) + 4) % 4];
+    }
+}
+
 /* ========== Main ========== */
 
 int main(int argc, char **argv) {
-    int chain_len = 15, ngen = 1;
+    int chain_len = 15, ngen = 1, nfill = 5;
     if (argc > 1) chain_len = atoi(argv[1]);
     if (argc > 2) ngen = atoi(argv[2]);
+    if (argc > 3) nfill = atoi(argv[3]);
 
     init_dirac();
     htab_init();
@@ -435,14 +499,14 @@ int main(int argc, char **argv) {
     vec3 origin = {0,0,0};
     int oid = site_insert(origin, d0);
 
-    /* Gen 0: R₀ */
+    /* ---- Phase 1: Expand the lattice (creates new sites) ---- */
     trace_chain(oid, PAT_R, chain_len, chain_len, &rchains[0]);
     assign_membership(&rchains[0], 0, 1);
     nrch = 1;
     fprintf(stderr, "Gen 0: %d sites, 1 R-chain\n", nsites);
 
     for (int gen = 0; gen < ngen; gen++) {
-        /* L-chains from R-sites */
+        /* L-chains from R-sites without L */
         int snap = nsites;
         int *seeds = malloc(snap * sizeof(int));
         int ns = 0;
@@ -458,7 +522,7 @@ int main(int argc, char **argv) {
         free(seeds);
         fprintf(stderr, "Gen %d L: %d sites, %d R, %d L\n", gen, nsites, nrch, nlch);
 
-        /* R-chains from L-sites */
+        /* R-chains from L-sites without R */
         snap = nsites;
         seeds = malloc(snap * sizeof(int));
         ns = 0;
@@ -473,6 +537,46 @@ int main(int argc, char **argv) {
         }
         free(seeds);
         fprintf(stderr, "Gen %d R: %d sites, %d R, %d L\n", gen, nsites, nrch, nlch);
+    }
+
+    /* ---- Phase 2: Fill coverage gaps (no new sites) ---- */
+    /* Repeatedly trace chains through existing sites to assign
+     * R/L membership to sites that were created but not covered. */
+    for (int fill = 0; fill < nfill; fill++) {
+        int assigned_r = 0, assigned_l = 0;
+
+        /* L-chains through existing sites without L-membership */
+        for (int s = 0; s < nsites; s++) {
+            if (allsites[s].l_chain >= 0) continue;
+            if (nlch >= MAX_CHAINS) break;
+            trace_chain_existing(s, PAT_L, chain_len, chain_len, &lchains[nlch]);
+            if (lchains[nlch].len < 2) continue;
+            assign_membership(&lchains[nlch], nlch, 0);
+            nlch++;
+            assigned_l++;
+        }
+
+        /* R-chains through existing sites without R-membership */
+        for (int s = 0; s < nsites; s++) {
+            if (allsites[s].r_chain >= 0) continue;
+            if (nrch >= MAX_CHAINS) break;
+            trace_chain_existing(s, PAT_R, chain_len, chain_len, &rchains[nrch]);
+            if (rchains[nrch].len < 2) continue;
+            assign_membership(&rchains[nrch], nrch, 1);
+            nrch++;
+            assigned_r++;
+        }
+
+        int nboth_now = 0;
+        for (int s = 0; s < nsites; s++)
+            if (allsites[s].r_chain >= 0 && allsites[s].l_chain >= 0)
+                nboth_now++;
+
+        fprintf(stderr, "Fill %d: +%d L-chains, +%d R-chains, both=%d/%d (%.1f%%)\n",
+                fill, assigned_l, assigned_r, nboth_now, nsites,
+                100.0*nboth_now/nsites);
+
+        if (assigned_l == 0 && assigned_r == 0) break;
     }
 
     /* Count interior */
