@@ -326,17 +326,49 @@ static void add_entry(sparse_entry *entries, int *nnz, int row, int col, double 
     (*nnz)++;
 }
 
-/* Build shift operator entries for one chain */
-static void build_shift_entries(chain_t *ch, sparse_entry *entries, int *nnz) {
-    for (int i = 0; i < ch->len; i++) {
-        int sid = ch->ids[i];
-        int face = ch->faces[i];
+/* Build shift entries for a stitched mega-loop.
+ * chains[0..nch-1] are stitched end-to-start cyclically.
+ * IMPORTANT: only include each site ONCE (via its assigned chain).
+ * Sites that appear in a chain but are assigned to a different chain
+ * are skipped (they'll be included when their own chain is processed).
+ * is_r: 1 for R-chains, 0 for L-chains (determines which membership to check). */
+static void build_stitched_shift(chain_t *chains, int nch, int is_r,
+                                  sparse_entry *entries, int *nnz) {
+    /* Flatten chains, deduplicating: only include site if it's assigned to this chain */
+    int max_total = 0;
+    for (int c = 0; c < nch; c++) max_total += chains[c].len;
+
+    int *loop_ids = malloc(max_total * sizeof(int));
+    int *loop_faces = malloc(max_total * sizeof(int));
+    int total_len = 0;
+
+    for (int c = 0; c < nch; c++) {
+        for (int i = 0; i < chains[c].len; i++) {
+            int sid = chains[c].ids[i];
+            /* Only include if this chain is the site's assigned chain */
+            int assigned_chain = is_r ? allsites[sid].r_chain : allsites[sid].l_chain;
+            if (assigned_chain != c) continue;
+            loop_ids[total_len] = sid;
+            loop_faces[total_len] = chains[c].faces[i];
+            total_len++;
+        }
+    }
+
+    fprintf(stderr, "  Stitched loop: %d unique sites (from %d total in %d chains)\n",
+            total_len, max_total, nch);
+
+    /* Build shift entries with periodic (modular) indexing */
+    for (int i = 0; i < total_len; i++) {
+        int i_next = (i + 1) % total_len;
+        int i_prev = (i - 1 + total_len) % total_len;
+
+        int sid = loop_ids[i];
+        int face = loop_faces[i];
         vec3 d = allsites[sid].dirs[face];
 
         c4x4 tau;
         make_tau(tau, d);
 
-        /* P+ = (I + tau)/2 */
         c4x4 Pp, Pm;
         c4_eye(Pp); c4_eye(Pm);
         for (int a=0;a<4;a++)
@@ -345,10 +377,10 @@ static void build_shift_entries(chain_t *ch, sparse_entry *entries, int *nnz) {
                 Pm[a][b] = 0.5*(Pm[a][b] - tau[a][b]);
             }
 
-        /* Forward: i -> i+1 with frame transport */
-        if (i < ch->len - 1) {
-            int sid_next = ch->ids[i+1];
-            int face_next = ch->faces[i+1];
+        /* Forward: i -> i_next */
+        {
+            int sid_next = loop_ids[i_next];
+            int face_next = loop_faces[i_next];
             vec3 d_next = allsites[sid_next].dirs[face_next];
             c4x4 tau_next;
             make_tau(tau_next, d_next);
@@ -362,10 +394,10 @@ static void build_shift_entries(chain_t *ch, sparse_entry *entries, int *nnz) {
                     add_entry(entries, nnz, sid_next*4+a, sid*4+b, block[a][b]);
         }
 
-        /* Backward: i -> i-1 with frame transport */
-        if (i > 0) {
-            int sid_prev = ch->ids[i-1];
-            int face_prev = ch->faces[i-1];
+        /* Backward: i -> i_prev */
+        {
+            int sid_prev = loop_ids[i_prev];
+            int face_prev = loop_faces[i_prev];
             vec3 d_prev = allsites[sid_prev].dirs[face_prev];
             c4x4 tau_prev;
             make_tau(tau_prev, d_prev);
@@ -379,6 +411,9 @@ static void build_shift_entries(chain_t *ch, sparse_entry *entries, int *nnz) {
                     add_entry(entries, nnz, sid_prev*4+a, sid*4+b, block[a][b]);
         }
     }
+
+    free(loop_ids);
+    free(loop_faces);
 }
 
 /* ========== Main ========== */
@@ -454,15 +489,16 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "\nSites: %d, Both: %d, Interior: %d\n", nsites, nboth, ninterior);
 
-    /* Build sparse operators */
-    fprintf(stderr, "Building S_R...\n");
-    for (int c = 0; c < nrch; c++)
-        build_shift_entries(&rchains[c], sr_entries, &sr_nnz);
+    /* Build sparse operators using stitched mega-loops.
+     * All R-chains are cyclically stitched into one big loop,
+     * and all L-chains into another. The frame transport at
+     * each stitch point handles the mismatch automatically. */
+    fprintf(stderr, "Building S_R (stitched, %d chains)...\n", nrch);
+    build_stitched_shift(rchains, nrch, 1, sr_entries, &sr_nnz);
     fprintf(stderr, "S_R: %d nonzeros\n", sr_nnz);
 
-    fprintf(stderr, "Building S_L...\n");
-    for (int c = 0; c < nlch; c++)
-        build_shift_entries(&lchains[c], sl_entries, &sl_nnz);
+    fprintf(stderr, "Building S_L (stitched, %d chains)...\n", nlch);
+    build_stitched_shift(lchains, nlch, 0, sl_entries, &sl_nnz);
     fprintf(stderr, "S_L: %d nonzeros\n", sl_nnz);
 
     /* Binary output */
