@@ -107,10 +107,10 @@ static void frame_transport(const c4x4 tf, const c4x4 tt, c4x4 U) {
 }
 
 /* ========== Hash table and sites ========== */
-#define HASH_BITS 22
+#define HASH_BITS 24
 #define HASH_SIZE (1<<HASH_BITS)
 #define HASH_MASK (HASH_SIZE-1)
-#define MAX_SITES 5000000
+#define MAX_SITES 10000000
 
 typedef struct { long kx,ky,kz; int id; } hentry;
 static hentry *htab;
@@ -350,15 +350,22 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
     *n_created = 0;
     *prob_absorbed = 0;
 
+    /* Norm accounting */
+    double norm_in = 0, norm_identity = 0, norm_fwd = 0, norm_bwd = 0;
+
     /* Zero tmp for all current sites */
     memset(tmp, 0, 4 * (size_t)ns * sizeof(double complex));
 
     for (int s = 0; s < ns; s++) {
         int face = is_r ? sites[s].r_face : sites[s].l_face;
 
+        /* Accumulate input norm */
+        for (int a = 0; a < 4; a++) norm_in += creal(psi[4*s+a]*conj(psi[4*s+a]));
+
         if (face < 0) {
             /* Not on a chain of this type — identity */
             for (int a = 0; a < 4; a++) tmp[4*s+a] = psi[4*s+a];
+            for (int a = 0; a < 4; a++) norm_identity += creal(psi[4*s+a]*conj(psi[4*s+a]));
             continue;
         }
 
@@ -383,11 +390,26 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
 
             if (nb >= 0) {
                 int fn = is_r ? sites[nb].r_face : sites[nb].l_face;
-                vec3 dn = sites[nb].dirs[fn];
+                if (fn < 0) {
+                    fprintf(stderr, "BUG: nb=%d has no face for %s chain (from fwd extend of s=%d)\n",
+                            nb, is_r?"R":"L", s);
+                }
+                vec3 dn = sites[nb].dirs[fn >= 0 ? fn : 0];
                 c4x4 tn; make_tau(tn, dn);
                 c4x4 U, bl; frame_transport(tau, tn, U); c4_mul(bl, U, Pp);
+                /* Check: ||bl·psi||² should equal ||Pp·psi||² since U is unitary */
+                double complex result[4] = {0};
                 for (int a=0;a<4;a++) for(int b=0;b<4;b++)
-                    tmp[4*nb+a] += bl[a][b] * psi[4*s+b];
+                    result[a] += bl[a][b] * psi[4*s+b];
+                double nr = 0;
+                for (int a=0;a<4;a++) nr += creal(result[a]*conj(result[a]));
+                double ns2 = 0;
+                for (int a=0;a<4;a++) ns2 += creal(shifted[a]*conj(shifted[a]));
+                if (fabs(nr - ns2) > 1e-10)
+                    fprintf(stderr, "NORM MISMATCH fwd s=%d nb=%d: ||bl·psi||²=%.10f ||Pp·psi||²=%.10f diff=%.2e\n",
+                            s, nb, nr, ns2, nr-ns2);
+                for (int a=0;a<4;a++) tmp[4*nb+a] += result[a];
+                norm_fwd += ns2;
                 if (nb >= ns) (*n_created)++;
             } else {
                 /* Absorbed */
@@ -413,6 +435,7 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
                 c4x4 U, bl; frame_transport(tau, tp, U); c4_mul(bl, U, Pm);
                 for (int a=0;a<4;a++) for(int b=0;b<4;b++)
                     tmp[4*nb+a] += bl[a][b] * psi[4*s+b];
+                for (int a=0;a<4;a++) norm_bwd += creal(shifted[a]*conj(shifted[a]));
                 if (nb >= ns) (*n_created)++;
             } else {
                 for (int a=0;a<4;a++)
@@ -420,6 +443,22 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
             }
         }
     }
+
+    /* Compute output norm, separating old vs new sites */
+    double norm_out = 0, norm_out_old = 0, norm_out_new = 0;
+    for (int s = 0; s < nsites; s++) {
+        double sn = 0;
+        for (int a = 0; a < 4; a++)
+            sn += creal(tmp[4*s+a]*conj(tmp[4*s+a]));
+        norm_out += sn;
+        if (s < ns) norm_out_old += sn;
+        else norm_out_new += sn;
+    }
+
+    if (fabs(norm_out/norm_in - 1.0) > 0.001)
+        fprintf(stderr, "    %s shift: ratio=%.6f (in=%.6f out=%.6f old=%.6f new=%.6f)\n",
+                is_r?"R":"L", norm_out/norm_in, norm_in, norm_out,
+                norm_out_old, norm_out_new);
 
     /* Copy tmp to psi (including any new sites created beyond ns) */
     memcpy(psi, tmp, 4 * (size_t)nsites * sizeof(double complex));
@@ -451,16 +490,23 @@ static void apply_coin(int is_r, double ct, double st) {
 
 /* ========== Main ========== */
 int main(int argc, char **argv) {
-    int seed_depth = 6;
+    int seed_depth = 0;  /* 0 = auto from sigma */
     double theta = 0.5, sigma = 3.0, threshold = 1e-10;
     int n_steps = 50;
-    if (argc > 1) seed_depth = atoi(argv[1]);
-    if (argc > 2) theta = atof(argv[2]);
-    if (argc > 3) sigma = atof(argv[3]);
-    if (argc > 4) n_steps = atoi(argv[4]);
-    if (argc > 5) threshold = atof(argv[5]);
+    if (argc > 1) theta = atof(argv[1]);
+    if (argc > 2) sigma = atof(argv[2]);
+    if (argc > 3) n_steps = atoi(argv[3]);
+    if (argc > 4) threshold = atof(argv[4]);
+    if (argc > 5) seed_depth = atoi(argv[5]);
     double thresh2 = threshold * threshold;
     double ct = cos(theta), st = sin(theta);
+
+    /* Auto seed depth: ensure Gaussian has decayed to < exp(-8) ~ 3e-4
+     * at the boundary. Need r > 4σ, and r ~ depth * 2/3 (step length). */
+    if (seed_depth <= 0) {
+        seed_depth = (int)(4.0 * sigma / (2.0/3.0)) + 2;
+        if (seed_depth < 4) seed_depth = 4;
+    }
 
     fprintf(stderr, "=== walk_adaptive: seed=%d theta=%.3f sigma=%.1f steps=%d thresh=%.1e ===\n",
             seed_depth, theta, sigma, n_steps, threshold);
@@ -470,25 +516,44 @@ int main(int argc, char **argv) {
     init_storage();
 
     /* ---- Phase 1: BFS seed ball ---- */
-    fprintf(stderr, "\n--- Phase 1: BFS seed (depth %d) ---\n", seed_depth);
+    /* Grow until the Gaussian amplitude at boundary sites is negligible.
+     * Use radial pruning (prune_ratio=0.7) to prevent exponential blowup,
+     * but keep the interior dense (no pruning below min_prune_depth=6).
+     * Only expand sites where exp(-r²/2σ²) > seed_threshold. */
+    double seed_thresh = 1e-4;
+    double prune_ratio = 0.7;
+    int min_prune_depth = 6;
+    double step_len = 2.0/3.0;
+    fprintf(stderr, "\n--- Phase 1: BFS seed (Gaussian > %.1e, prune=%.2f) ---\n",
+            seed_thresh, prune_ratio);
     vec3 d0[4]; init_tet(d0);
     site_insert((vec3){0,0,0}, d0);
     int *queue = malloc(MAX_SITES * sizeof(int));
     int qh=0, qt=0; queue[qt++] = 0;
-    int *depth = calloc(MAX_SITES, sizeof(int));
+    int *sdepth = calloc(MAX_SITES, sizeof(int));
     while (qh < qt) {
         int s = queue[qh++];
-        if (depth[s] >= seed_depth) continue;
+        double r2 = v3dot(sites[s].pos, sites[s].pos);
+        double r = sqrt(r2);
+        /* Stop expanding if Gaussian is negligible */
+        if (exp(-r2 / (2*sigma*sigma)) < seed_thresh) continue;
+        /* Radial pruning for efficiency */
+        if (sdepth[s] >= min_prune_depth) {
+            double max_r = sdepth[s] * step_len;
+            if (r < prune_ratio * max_r) continue;
+        }
         for (int f = 0; f < 4; f++) {
             vec3 p = sites[s].pos, dd[4];
             memcpy(dd, sites[s].dirs, sizeof(dd));
             helix_step(&p, dd, f); reorth(dd);
             int old_n = nsites;
             int nid = site_insert(p, dd);
-            if (nid >= old_n) { depth[nid] = depth[s]+1; queue[qt++] = nid; }
+            if (nid >= old_n) { sdepth[nid] = sdepth[s]+1; queue[qt++] = nid; }
         }
+        if (nsites % 500000 == 0)
+            fprintf(stderr, "  BFS: %d sites, depth ~%d\n", nsites, sdepth[s]);
     }
-    free(queue); free(depth);
+    free(queue); free(sdepth);
     int n_seed = nsites;
     fprintf(stderr, "Seed: %d sites\n", n_seed);
 
