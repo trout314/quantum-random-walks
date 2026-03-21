@@ -107,10 +107,10 @@ static void frame_transport(const c4x4 tf, const c4x4 tt, c4x4 U) {
 }
 
 /* ========== Hash table and sites ========== */
-#define HASH_BITS 24
+#define HASH_BITS 25
 #define HASH_SIZE (1<<HASH_BITS)
 #define HASH_MASK (HASH_SIZE-1)
-#define MAX_SITES 10000000
+#define MAX_SITES 20000000
 
 typedef struct { long kx,ky,kz; int id; } hentry;
 static hentry *htab;
@@ -529,8 +529,8 @@ int main(int argc, char **argv) {
      * Don't expand from a site if its cell already has >= max_per_cell sites.
      * This gives dense coverage near the origin (where BFS fills cells early)
      * and sparse coverage at large r (where only efficient paths reach). */
-    double cell_size = 1.0;  /* ~1.5 step lengths */
-    int max_per_cell = 50;   /* target density per cell */
+    double cell_size = 1.0;
+    int max_per_cell = 20;
     /* Grid: centered at origin, covering [-grid_half, grid_half]³ */
     double grid_half = seed_depth * step_len + 5.0;
     int grid_n = (int)(2.0 * grid_half / cell_size) + 1;
