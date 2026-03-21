@@ -328,9 +328,11 @@ static void build_shift(int is_r, sparse_entry *ent, int *nnz) {
 /* ========== Main ========== */
 int main(int argc, char **argv) {
     int seed_depth = 3;
+    double prune_ratio = 0.0;  /* 0 = no pruning, 0.5 = moderate, 0.8 = aggressive */
     if (argc > 1) seed_depth = atoi(argv[1]);
+    if (argc > 2) prune_ratio = atof(argv[2]);
 
-    fprintf(stderr,"=== walk_gen: seed_depth=%d ===\n", seed_depth);
+    fprintf(stderr,"=== walk_gen: seed_depth=%d prune_ratio=%.2f ===\n", seed_depth, prune_ratio);
     long avail0 = get_avail_mb();
     fprintf(stderr,"Memory available: %ld MB\n", avail0);
 
@@ -353,17 +355,30 @@ int main(int argc, char **argv) {
     sr_entries = safe_malloc(max_nnz*sizeof(sparse_entry), "sr_entries");
     sl_entries = safe_malloc(max_nnz*sizeof(sparse_entry), "sl_entries");
 
-    /* ---- Phase 1: BFS seed ball ---- */
-    fprintf(stderr,"\n--- Phase 1: BFS seed (depth %d) ---\n", seed_depth);
+    /* ---- Phase 1: BFS seed ball with radial pruning ---- */
+    /* A site at BFS depth D and radial distance R from origin has displacement
+     * efficiency R/D. The max is 2/3 (step length). Sites with R/D < prune_ratio * 2/3
+     * are on zigzagging paths and won't be expanded further.
+     * A minimum depth before pruning kicks in avoids killing sites near the origin. */
+    int min_prune_depth = 4;
+    double step_len = 2.0/3.0;
+    fprintf(stderr,"\n--- Phase 1: BFS seed (depth %d, prune=%.2f) ---\n", seed_depth, prune_ratio);
     mem_check("Phase 1", 500);
     vec3 d0[4]; init_tet(d0);
     site_insert((vec3){0,0,0}, d0);
     int *queue = malloc(MAX_SITES*sizeof(int));
     int qh=0, qt=0; queue[qt++] = 0;
     int *depth = calloc(MAX_SITES, sizeof(int));
+    int npruned = 0;
     while (qh < qt) {
         int s = queue[qh++];
         if (depth[s] >= seed_depth) continue;
+        /* Pruning: don't expand sites that reached their position inefficiently */
+        if (prune_ratio > 0 && depth[s] >= min_prune_depth) {
+            double r = v3norm(sites[s].pos);
+            double max_r = depth[s] * step_len;
+            if (r < prune_ratio * max_r) { npruned++; continue; }
+        }
         for (int f = 0; f < 4; f++) {
             vec3 p = sites[s].pos, dd[4];
             memcpy(dd, sites[s].dirs, sizeof(dd));
@@ -372,10 +387,14 @@ int main(int argc, char **argv) {
             int nid = site_insert(p, dd);
             if (nid >= old_n) { depth[nid] = depth[s]+1; queue[qt++] = nid; }
         }
+        if (nsites % 1000000 == 0)
+            fprintf(stderr,"  BFS: %d sites, depth frontier ~%d, pruned %d\n",
+                    nsites, depth[s], npruned);
     }
     free(queue); free(depth);
     int n_seed = nsites;
-    fprintf(stderr,"Phase 1: BFS seed depth %d -> %d sites\n", seed_depth, n_seed);
+    fprintf(stderr,"Phase 1: depth %d, prune=%.2f -> %d sites (%d pruned)\n",
+            seed_depth, prune_ratio, n_seed, npruned);
 
     /* ---- Phase 2: Thread unique R and L chains through seed ball ---- */
     fprintf(stderr,"\n--- Phase 2: Threading chains through %d seed sites ---\n", n_seed);
