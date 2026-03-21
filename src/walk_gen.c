@@ -153,7 +153,7 @@ static int site_insert(vec3 pos,vec3 dirs[4]){
 
 /* ========== Chain storage ========== */
 static const int PAT_R[4]={1,3,0,2}, PAT_L[4]={0,1,2,3};
-#define MAX_CHAINS 500000
+#define MAX_CHAINS 2000000
 #define MAX_CLEN 200
 typedef struct { int ids[MAX_CLEN]; int faces[MAX_CLEN]; int len; } chain_t;
 static chain_t *rchains, *lchains;
