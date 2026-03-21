@@ -273,39 +273,29 @@ static int try_extend_fwd(int s, int is_r, const int pat[4],
 
     /* Find or create */
     int nb = site_find(p);
-    if (nb < 0) {
-        reorth(d);
-        nb = site_insert(p, d);
+    if (nb >= 0) {
+        /* Site already exists — it's either on this chain already (gap from
+         * thread_chain stopping early) or a site created by BFS/other chain.
+         * Don't send amplitude to it — it's already handled by its own chain
+         * segment. Link for future steps but return -1 to absorb this step. */
+        if (is_r) { sites[s].r_next = nb; if (sites[nb].r_prev<0) { sites[nb].r_prev=s; sites[nb].r_face=nf; } }
+        else      { sites[s].l_next = nb; if (sites[nb].l_prev<0) { sites[nb].l_prev=s; sites[nb].l_face=nf; } }
+        return -1;  /* absorb this step's amplitude */
     }
 
-    /* Link */
-    if (is_r) {
-        sites[s].r_next = nb;
-        if (sites[nb].r_prev < 0) {
-            sites[nb].r_prev = s;
-            sites[nb].r_face = nf;
-        }
-    } else {
-        sites[s].l_next = nb;
-        if (sites[nb].l_prev < 0) {
-            sites[nb].l_prev = s;
-            sites[nb].l_face = nf;
-        }
-    }
+    /* Genuinely new site */
+    reorth(d);
+    nb = site_insert(p, d);
+    if (is_r) { sites[s].r_next = nb; sites[nb].r_prev = s; sites[nb].r_face = nf; }
+    else      { sites[s].l_next = nb; sites[nb].l_prev = s; sites[nb].l_face = nf; }
     return nb;
 }
 
 /* Same for backward (-) direction.
  *
- * The predecessor of s in the chain is the site that stepped with
- * prev_face(pat, s->face) to reach s. To find its position:
- *
- * If A does helix_step(f) to get B, then from B, helix_step(f)
- * returns to A (since reflection is involutory and the displacement
- * reverses: B.dirs[f] = -A.dirs[f]).
- *
  * The predecessor stepped with face pf = prev_face(pat, face) to reach s.
- * So from s, helix_step(pf) goes back to the predecessor. */
+ * From s, helix_step(pf) goes back to the predecessor (since the step
+ * is its own inverse when using the same face). */
 static int try_extend_bwd(int s, int is_r, const int pat[4],
                            double complex shifted[4], double thresh2) {
     double amp2 = 0;
@@ -315,30 +305,22 @@ static int try_extend_bwd(int s, int is_r, const int pat[4],
     int face = is_r ? sites[s].r_face : sites[s].l_face;
     int pf = prev_face(pat, face);
 
-    /* Step with pf (the predecessor's face) to reach the predecessor */
     vec3 p = sites[s].pos;
     vec3 dd[4]; memcpy(dd, sites[s].dirs, sizeof(dd));
     helix_step(&p, dd, pf);
 
     int nb = site_find(p);
-    if (nb < 0) {
-        reorth(dd);
-        nb = site_insert(p, dd);
+    if (nb >= 0) {
+        /* Existing site — link for future but absorb this step */
+        if (is_r) { sites[s].r_prev = nb; if (sites[nb].r_next<0) { sites[nb].r_next=s; sites[nb].r_face=pf; } }
+        else      { sites[s].l_prev = nb; if (sites[nb].l_next<0) { sites[nb].l_next=s; sites[nb].l_face=pf; } }
+        return -1;
     }
 
-    if (is_r) {
-        sites[s].r_prev = nb;
-        if (sites[nb].r_next < 0) {
-            sites[nb].r_next = s;
-            sites[nb].r_face = pf;
-        }
-    } else {
-        sites[s].l_prev = nb;
-        if (sites[nb].l_next < 0) {
-            sites[nb].l_next = s;
-            sites[nb].l_face = pf;
-        }
-    }
+    reorth(dd);
+    nb = site_insert(p, dd);
+    if (is_r) { sites[s].r_prev = nb; sites[nb].r_next = s; sites[nb].r_face = pf; }
+    else      { sites[s].l_prev = nb; sites[nb].l_next = s; sites[nb].l_face = pf; }
     return nb;
 }
 
@@ -444,6 +426,26 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
         }
     }
 
+    /* Check: how many new sites received from 2 sources? */
+    {
+        int double_recv = 0;
+        char *recv_count = calloc(nsites, 1);
+        /* Re-scan: not ideal but diagnostic only */
+        for (int s = 0; s < ns; s++) {
+            int face = is_r ? sites[s].r_face : sites[s].l_face;
+            if (face < 0) continue;
+            int nb_fwd = is_r ? sites[s].r_next : sites[s].l_next;
+            int nb_bwd = is_r ? sites[s].r_prev : sites[s].l_prev;
+            if (nb_fwd >= ns) recv_count[nb_fwd]++;
+            if (nb_bwd >= ns) recv_count[nb_bwd]++;
+        }
+        for (int s = ns; s < nsites; s++)
+            if (recv_count[s] > 1) double_recv++;
+        if (double_recv > 0)
+            fprintf(stderr, "    %d new sites received from 2+ sources\n", double_recv);
+        free(recv_count);
+    }
+
     /* Compute output norm, separating old vs new sites */
     double norm_out = 0, norm_out_old = 0, norm_out_new = 0;
     for (int s = 0; s < nsites; s++) {
@@ -524,8 +526,8 @@ int main(int argc, char **argv) {
     double prune_ratio = 0.7;
     int min_prune_depth = 6;
     double step_len = 2.0/3.0;
-    fprintf(stderr, "\n--- Phase 1: BFS seed (Gaussian > %.1e, prune=%.2f) ---\n",
-            seed_thresh, prune_ratio);
+    fprintf(stderr, "\n--- Phase 1: BFS seed (depth %d, Gaussian > %.1e, prune=%.2f) ---\n",
+            seed_depth, seed_thresh, prune_ratio);
     vec3 d0[4]; init_tet(d0);
     site_insert((vec3){0,0,0}, d0);
     int *queue = malloc(MAX_SITES * sizeof(int));
@@ -533,6 +535,7 @@ int main(int argc, char **argv) {
     int *sdepth = calloc(MAX_SITES, sizeof(int));
     while (qh < qt) {
         int s = queue[qh++];
+        if (sdepth[s] >= seed_depth) continue;
         double r2 = v3dot(sites[s].pos, sites[s].pos);
         double r = sqrt(r2);
         /* Stop expanding if Gaussian is negligible */
