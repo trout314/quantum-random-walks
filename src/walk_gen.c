@@ -356,11 +356,17 @@ int main(int argc, char **argv) {
     sl_entries = safe_malloc(max_nnz*sizeof(sparse_entry), "sl_entries");
 
     /* ---- Phase 1: BFS seed ball with radial pruning ---- */
-    /* A site at BFS depth D and radial distance R from origin has displacement
-     * efficiency R/D. The max is 2/3 (step length). Sites with R/D < prune_ratio * 2/3
-     * are on zigzagging paths and won't be expanded further.
-     * A minimum depth before pruning kicks in avoids killing sites near the origin. */
-    int min_prune_depth = 4;
+    /* Two pruning criteria (both checked against prune_ratio):
+     *   Global: R/D < prune_ratio * step_len  (path from origin is inefficient)
+     *   Local:  dR/dD < prune_ratio * step_len  (path has stalled recently)
+     *
+     * BFS runs in rounds of `round_size` depth steps. At round boundaries,
+     * we snapshot each site's radius. The local criterion checks displacement
+     * since the last round start.
+     *
+     * No pruning below min_prune_depth to keep the interior dense. */
+    int min_prune_depth = 6;
+    int round_size = 4;
     double step_len = 2.0/3.0;
     fprintf(stderr,"\n--- Phase 1: BFS seed (depth %d, prune=%.2f) ---\n", seed_depth, prune_ratio);
     mem_check("Phase 1", 500);
@@ -369,15 +375,28 @@ int main(int argc, char **argv) {
     int *queue = malloc(MAX_SITES*sizeof(int));
     int qh=0, qt=0; queue[qt++] = 0;
     int *depth = calloc(MAX_SITES, sizeof(int));
-    int npruned = 0;
+    /* radius_at_round_start[s]: radial distance of site s when the current
+     * pruning round began. Used for local displacement check. */
+    float *round_radius = NULL;
+    if (prune_ratio > 0) round_radius = calloc(MAX_SITES, sizeof(float));
+    int npruned_global = 0, npruned_local = 0;
     while (qh < qt) {
         int s = queue[qh++];
         if (depth[s] >= seed_depth) continue;
-        /* Pruning: don't expand sites that reached their position inefficiently */
+        /* Pruning checks */
         if (prune_ratio > 0 && depth[s] >= min_prune_depth) {
             double r = v3norm(sites[s].pos);
             double max_r = depth[s] * step_len;
-            if (r < prune_ratio * max_r) { npruned++; continue; }
+            /* Global: overall displacement efficiency */
+            if (r < prune_ratio * max_r) { npruned_global++; continue; }
+            /* Local: displacement since round start */
+            int round_start_depth = (depth[s] / round_size) * round_size;
+            int steps_in_round = depth[s] - round_start_depth;
+            if (steps_in_round > 0) {
+                double dr = r - round_radius[s];
+                double max_dr = steps_in_round * step_len;
+                if (dr < prune_ratio * max_dr) { npruned_local++; continue; }
+            }
         }
         for (int f = 0; f < 4; f++) {
             vec3 p = sites[s].pos, dd[4];
@@ -385,16 +404,29 @@ int main(int argc, char **argv) {
             helix_step(&p, dd, f); reorth(dd);
             int old_n = nsites;
             int nid = site_insert(p, dd);
-            if (nid >= old_n) { depth[nid] = depth[s]+1; queue[qt++] = nid; }
+            if (nid >= old_n) {
+                depth[nid] = depth[s]+1;
+                queue[qt++] = nid;
+                if (round_radius) {
+                    /* Inherit round_radius from parent if same round,
+                     * or snapshot current radius if new round */
+                    int parent_round = depth[s] / round_size;
+                    int child_round = depth[nid] / round_size;
+                    if (child_round == parent_round)
+                        round_radius[nid] = round_radius[s];
+                    else
+                        round_radius[nid] = (float)v3norm(sites[nid].pos);
+                }
+            }
         }
         if (nsites % 1000000 == 0)
-            fprintf(stderr,"  BFS: %d sites, depth frontier ~%d, pruned %d\n",
-                    nsites, depth[s], npruned);
+            fprintf(stderr,"  BFS: %d sites, depth frontier ~%d, pruned %d+%d\n",
+                    nsites, depth[s], npruned_global, npruned_local);
     }
-    free(queue); free(depth);
+    free(queue); free(depth); free(round_radius);
     int n_seed = nsites;
-    fprintf(stderr,"Phase 1: depth %d, prune=%.2f -> %d sites (%d pruned)\n",
-            seed_depth, prune_ratio, n_seed, npruned);
+    fprintf(stderr,"Phase 1: depth %d, prune=%.2f -> %d sites (pruned: %d global, %d local)\n",
+            seed_depth, prune_ratio, n_seed, npruned_global, npruned_local);
 
     /* ---- Phase 2: Thread unique R and L chains through seed ball ---- */
     fprintf(stderr,"\n--- Phase 2: Threading chains through %d seed sites ---\n", n_seed);
