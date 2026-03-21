@@ -18,6 +18,48 @@
 #include <math.h>
 #include <complex.h>
 
+/* ========== Memory guard (Linux /proc/meminfo) ========== */
+static long get_avail_mb(void) {
+    FILE *f = fopen("/proc/meminfo","r");
+    if (!f) return -1;
+    char line[256]; long avail = -1;
+    while (fgets(line,sizeof(line),f)) {
+        if (sscanf(line,"MemAvailable: %ld kB",&avail)==1) { avail /= 1024; break; }
+    }
+    fclose(f);
+    return avail;
+}
+/* Abort if available memory drops below threshold (MB) */
+static void mem_check(const char *label, long reserve_mb) {
+    long avail = get_avail_mb();
+    if (avail < 0) return;  /* can't read, skip check */
+    if (avail < reserve_mb) {
+        fprintf(stderr,"\n*** ABORT at %s: only %ld MB available (need > %ld MB). ***\n"
+                        "*** Reduce seed_depth, chain_len, or fill_passes. ***\n",
+                label, avail, reserve_mb);
+        exit(2);
+    }
+}
+/* malloc with memory guard */
+static void *safe_malloc(size_t bytes, const char *label) {
+    long need_mb = (long)(bytes / (1024*1024)) + 1;
+    long avail = get_avail_mb();
+    if (avail > 0 && avail < need_mb + 500) {
+        fprintf(stderr,"\n*** ABORT before %s: need ~%ld MB but only %ld MB available. ***\n"
+                        "*** Reduce seed_depth, chain_len, or fill_passes. ***\n",
+                label, need_mb, avail);
+        exit(2);
+    }
+    void *p = malloc(bytes);
+    if (!p) {
+        fprintf(stderr,"*** malloc failed for %s (%zu bytes) ***\n", label, bytes);
+        exit(2);
+    }
+    fprintf(stderr,"  alloc %s: %.1f MB (avail: %ld MB)\n", label,
+            (double)bytes/(1024*1024), avail>0?avail:-1);
+    return p;
+}
+
 /* ========== 3D vector ========== */
 typedef struct { double x, y, z; } vec3;
 static inline vec3 v3add(vec3 a, vec3 b) { return (vec3){a.x+b.x,a.y+b.y,a.z+b.z}; }
@@ -102,10 +144,10 @@ static void frame_transport(const c4x4 tf, const c4x4 tt, c4x4 U) {
 }
 
 /* ========== Hash table ========== */
-#define HASH_BITS 23
+#define HASH_BITS 25
 #define HASH_SIZE (1<<HASH_BITS)
 #define HASH_MASK (HASH_SIZE-1)
-#define MAX_SITES 4000000
+#define MAX_SITES 20000000
 
 typedef struct { long kx,ky,kz; int id; } hentry;
 static hentry *htab;
@@ -119,9 +161,15 @@ static site_t *sites;
 static int nsites=0;
 
 static void htab_init(void){
+    fprintf(stderr,"Allocating hash table (%.0f MB) and sites (%.0f MB)...\n",
+            (double)HASH_SIZE*sizeof(hentry)/(1024*1024),
+            (double)MAX_SITES*sizeof(site_t)/(1024*1024));
+    mem_check("htab_init", 500);
     htab=calloc(HASH_SIZE,sizeof(hentry));
+    if(!htab){fprintf(stderr,"Failed to alloc hash table\n");exit(2);}
     for(int i=0;i<HASH_SIZE;i++)htab[i].id=-1;
     sites=malloc(MAX_SITES*sizeof(site_t));
+    if(!sites){fprintf(stderr,"Failed to alloc sites\n");exit(2);}
 }
 static void poskey(vec3 p,long*kx,long*ky,long*kz){
     const double tol=1e-7;
@@ -153,11 +201,11 @@ static int site_insert(vec3 pos,vec3 dirs[4]){
 
 /* ========== Chain storage ========== */
 static const int PAT_R[4]={1,3,0,2}, PAT_L[4]={0,1,2,3};
-#define MAX_CHAINS 2000000
-#define MAX_CLEN 200
+#define MAX_CLEN 600
 typedef struct { int ids[MAX_CLEN]; int faces[MAX_CLEN]; int len; } chain_t;
 static chain_t *rchains, *lchains;
 static int nrch=0, nlch=0;
+static int max_chains=0;  /* set dynamically in main */
 
 /* Trace chain creating new sites */
 static void trace_chain(int start, const int pat[4], int nfwd, int nbwd, chain_t *ch) {
@@ -205,10 +253,10 @@ static void assign_membership(chain_t *ch, int cid, int is_r) {
 typedef struct { int row,col; double re,im; } sparse_entry;
 static sparse_entry *sr_entries, *sl_entries;
 static int sr_nnz=0, sl_nnz=0;
-#define MAX_NNZ 80000000
+static int max_nnz=0;  /* set dynamically in main */
 static void add_entry(sparse_entry *e,int *nnz,int r,int c,double complex v){
     if(cabs(v)<1e-15)return;
-    if(*nnz>=MAX_NNZ){fprintf(stderr,"Too many nnz\n");exit(1);}
+    if(*nnz>=max_nnz){fprintf(stderr,"Too many nnz\n");exit(1);}
     e[*nnz]=(sparse_entry){r,c,creal(v),cimag(v)};(*nnz)++;
 }
 
@@ -248,13 +296,49 @@ int main(int argc, char **argv) {
     if(argc>2)chain_len=atoi(argv[2]);
     if(argc>3)nfill=atoi(argv[3]);
 
+    fprintf(stderr,"=== walk_gen: seed_depth=%d chain_len=%d fill_passes=%d ===\n",
+            seed_depth, chain_len, nfill);
+    long avail0 = get_avail_mb();
+    fprintf(stderr,"Memory available: %ld MB\n", avail0);
+
+    /* Size allocations to fit in memory. Reserve 2 GB for OS + htab + sites + overhead. */
+    double fixed_mb = (double)HASH_SIZE*sizeof(hentry)/(1024*1024)
+                    + (double)MAX_SITES*sizeof(site_t)/(1024*1024) + 2048;
+    double budget_mb = (avail0 > 0 ? avail0 * 0.80 : 16000) - fixed_mb;
+    if (budget_mb < 500) {
+        fprintf(stderr,"*** ABORT: only %.0f MB available after fixed allocations. Need at least 500 MB. ***\n", budget_mb);
+        exit(2);
+    }
+    /* Budget split: 4 chain arrays take ~4*max_chains*sizeof(chain_t),
+     * 2 sparse arrays take ~2*max_nnz*sizeof(sparse_entry).
+     * Give 70% to chains, 30% to sparse. */
+    double chain_budget = budget_mb * 0.70 * 1024 * 1024;
+    double sparse_budget = budget_mb * 0.30 * 1024 * 1024;
+    max_chains = (int)(chain_budget / (4.0 * sizeof(chain_t)));
+    if (max_chains < 1000) max_chains = 1000;
+    if (max_chains > 4000000) max_chains = 4000000;
+    max_nnz = (int)(sparse_budget / (2.0 * sizeof(sparse_entry)));
+    if (max_nnz < 100000) max_nnz = 100000;
+    if (max_nnz > 300000000) max_nnz = 300000000;
+
+    double total_mb = 4.0*max_chains*sizeof(chain_t)/(1024*1024)
+                    + 2.0*max_nnz*sizeof(sparse_entry)/(1024*1024) + fixed_mb;
+    fprintf(stderr,"Sized for available memory:\n");
+    fprintf(stderr,"  max_chains: %d (%.0f MB each array)\n",
+            max_chains, (double)max_chains*sizeof(chain_t)/(1024*1024));
+    fprintf(stderr,"  max_nnz:    %d (%.0f MB each array)\n",
+            max_nnz, (double)max_nnz*sizeof(sparse_entry)/(1024*1024));
+    fprintf(stderr,"  TOTAL est:  %.0f MB\n", total_mb);
+
     init_dirac(); htab_init();
-    rchains=malloc(MAX_CHAINS*sizeof(chain_t));
-    lchains=malloc(MAX_CHAINS*sizeof(chain_t));
-    sr_entries=malloc(MAX_NNZ*sizeof(sparse_entry));
-    sl_entries=malloc(MAX_NNZ*sizeof(sparse_entry));
+    rchains = safe_malloc(max_chains*sizeof(chain_t), "rchains");
+    lchains = safe_malloc(max_chains*sizeof(chain_t), "lchains");
+    sr_entries = safe_malloc(max_nnz*sizeof(sparse_entry), "sr_entries");
+    sl_entries = safe_malloc(max_nnz*sizeof(sparse_entry), "sl_entries");
 
     /* ---- Phase 1: BFS seed ball ---- */
+    fprintf(stderr,"\n--- Phase 1: BFS seed (depth %d) ---\n", seed_depth);
+    mem_check("Phase 1", 500);
     vec3 d0[4]; init_tet(d0);
     int oid=site_insert((vec3){0,0,0},d0);
     int *queue=malloc(MAX_SITES*sizeof(int));
@@ -276,26 +360,34 @@ int main(int argc, char **argv) {
     fprintf(stderr,"Phase 1: BFS seed depth %d -> %d sites\n",seed_depth,n_seed);
 
     /* ---- Phase 2: Trace long R and L chains from each seed site ---- */
+    fprintf(stderr,"\n--- Phase 2: Tracing chains (len %d) from %d seed sites ---\n", chain_len, n_seed);
+    mem_check("Phase 2", 500);
     for(int s=0;s<n_seed;s++){
-        if(sites[s].r_chain<0 && nrch<MAX_CHAINS){
+        if(s % 1000 == 0 && s > 0)
+            fprintf(stderr,"  Phase 2: processed %d/%d seeds, %d sites, %d R + %d L chains\n",
+                    s, n_seed, nsites, nrch, nlch);
+        if(s % 5000 == 0) mem_check("Phase 2 loop", 300);
+        if(sites[s].r_chain<0 && nrch<max_chains){
             trace_chain(s,PAT_R,chain_len,chain_len,&rchains[nrch]);
             assign_membership(&rchains[nrch],nrch,1);nrch++;}
-        if(sites[s].l_chain<0 && nlch<MAX_CHAINS){
+        if(sites[s].l_chain<0 && nlch<max_chains){
             trace_chain(s,PAT_L,chain_len,chain_len,&lchains[nlch]);
             assign_membership(&lchains[nlch],nlch,0);nlch++;}
     }
-    fprintf(stderr,"Phase 2: %d sites, %d R, %d L\n",nsites,nrch,nlch);
+    fprintf(stderr,"Phase 2 done: %d sites, %d R, %d L chains\n",nsites,nrch,nlch);
 
     /* ---- Phase 3: Fill passes ---- */
+    fprintf(stderr,"\n--- Phase 3: Fill passes (max %d) ---\n", nfill);
     for(int fill=0;fill<nfill;fill++){
+        mem_check("Fill pass", 300);
         int al=0,ar=0;
         int snap=nsites;
         for(int s=0;s<snap;s++){
-            if(sites[s].l_chain<0 && nlch<MAX_CHAINS){
+            if(sites[s].l_chain<0 && nlch<max_chains){
                 trace_chain_existing(s,PAT_L,chain_len,chain_len,&lchains[nlch]);
                 if(lchains[nlch].len>=2){assign_membership(&lchains[nlch],nlch,0);nlch++;al++;}}}
         for(int s=0;s<snap;s++){
-            if(sites[s].r_chain<0 && nrch<MAX_CHAINS){
+            if(sites[s].r_chain<0 && nrch<max_chains){
                 trace_chain_existing(s,PAT_R,chain_len,chain_len,&rchains[nrch]);
                 if(rchains[nrch].len>=2){assign_membership(&rchains[nrch],nrch,1);nrch++;ar++;}}}
         int nb=0;for(int s=0;s<nsites;s++)if(sites[s].r_chain>=0&&sites[s].l_chain>=0)nb++;
@@ -304,12 +396,14 @@ int main(int argc, char **argv) {
     }
 
     /* ---- Phase 4: Restrict to dual-covered, extract chains ---- */
+    fprintf(stderr,"\n--- Phase 4: Restrict to dual-covered sites ---\n");
+    mem_check("Phase 4", 500);
     g_nr=malloc(nsites*sizeof(int)); g_nl=malloc(nsites*sizeof(int));
     int *nr_pos=malloc(nsites*sizeof(int)),*nl_pos=malloc(nsites*sizeof(int));
     for(int s=0;s<nsites;s++){g_nr[s]=g_nl[s]=-1;nr_pos[s]=nl_pos[s]=-1;}
 
-    chain_t *out_r=malloc(MAX_CHAINS*sizeof(chain_t));
-    chain_t *out_l=malloc(MAX_CHAINS*sizeof(chain_t));
+    chain_t *out_r=safe_malloc(max_chains*sizeof(chain_t), "out_r");
+    chain_t *out_l=safe_malloc(max_chains*sizeof(chain_t), "out_l");
     int onr=0,onl=0;
 
     for(int pass=0;pass<2;pass++){
@@ -325,11 +419,11 @@ int main(int argc, char **argv) {
                 int s=ch_in[c].ids[i];
                 int dual=(sites[s].r_chain>=0&&sites[s].l_chain>=0);
                 if(dual){seg.ids[seg.len]=s;seg.faces[seg.len]=ch_in[c].faces[i];seg.len++;}
-                else{if(seg.len>=2&&*on<MAX_CHAINS){
+                else{if(seg.len>=2&&*on<max_chains){
                     memcpy(&ch_out[*on],&seg,sizeof(chain_t));
                     for(int j=0;j<seg.len;j++)if(mem[seg.ids[j]]==-1){mem[seg.ids[j]]=*on;mpos[seg.ids[j]]=j;}
                     (*on)++;}seg.len=0;}}
-            if(seg.len>=2&&*on<MAX_CHAINS){
+            if(seg.len>=2&&*on<max_chains){
                 memcpy(&ch_out[*on],&seg,sizeof(chain_t));
                 for(int j=0;j<seg.len;j++)if(mem[seg.ids[j]]==-1){mem[seg.ids[j]]=*on;mpos[seg.ids[j]]=j;}
                 (*on)++;}
@@ -344,6 +438,8 @@ int main(int argc, char **argv) {
     fprintf(stderr,"\nRestricted: %d R, %d L, %d dual sites\n",onr,onl,nfinal);
 
     /* ---- Phase 5: Build stitched operators ---- */
+    fprintf(stderr,"\n--- Phase 5: Build stitched shift operators ---\n");
+    mem_check("Phase 5", 300);
     fprintf(stderr,"Building S_R...\n");
     build_stitched(out_r,onr,1,sr_entries,&sr_nnz);
     fprintf(stderr,"S_R: %d nnz\n",sr_nnz);
