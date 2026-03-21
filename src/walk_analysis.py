@@ -40,6 +40,16 @@ def load_walk_data(data):
     membership = membership.reshape(n_sites, 4)
     offset += n_sites * 4 * 4
 
+    # Direction vectors: 4 directions × 3 components per site
+    dirs = np.frombuffer(data, dtype=np.float64, count=n_sites*12, offset=offset)
+    dirs = dirs.reshape(n_sites, 4, 3)
+    offset += n_sites * 12 * 8
+
+    # Face indices (r_face, l_face per site)
+    faces = np.frombuffer(data, dtype=np.int32, count=n_sites*2, offset=offset)
+    faces = faces.reshape(n_sites, 2)
+    offset += n_sites * 2 * 4
+
     # S_R
     sr_rc = np.frombuffer(data, dtype=np.int32, count=nnz_R*2, offset=offset)
     sr_rc = sr_rc.reshape(nnz_R, 2)
@@ -71,6 +81,8 @@ def load_walk_data(data):
         'n_interior': n_interior,
         'positions': positions,
         'membership': membership,
+        'dirs': dirs,
+        'faces': faces,
         'S_R': S_R,
         'S_L': S_L,
     }

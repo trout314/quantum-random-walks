@@ -113,6 +113,7 @@ static hentry *htab;
 typedef struct {
     vec3 pos, dirs[4];
     int r_chain, r_pos, l_chain, l_pos;
+    int r_face, l_face;  /* face index used for R/L helix step at this site */
 } site_t;
 static site_t *sites;
 static int nsites=0;
@@ -144,7 +145,8 @@ static int site_insert(vec3 pos,vec3 dirs[4]){
             if(nsites>=MAX_SITES){fprintf(stderr,"Too many sites\n");exit(1);}
             int id=nsites++;htab[i]=(hentry){kx,ky,kz,id};
             sites[id].pos=pos;memcpy(sites[id].dirs,dirs,sizeof(vec3)*4);
-            sites[id].r_chain=sites[id].l_chain=-1;return id;}
+            sites[id].r_chain=sites[id].l_chain=-1;
+            sites[id].r_face=sites[id].l_face=-1;return id;}
         if(htab[i].kx==kx&&htab[i].ky==ky&&htab[i].kz==kz)return htab[i].id;}
     fprintf(stderr,"Hash full\n");exit(1);
 }
@@ -195,8 +197,8 @@ static void trace_chain_existing(int start, const int pat[4], int maxfwd, int ma
 
 static void assign_membership(chain_t *ch, int cid, int is_r) {
     for(int i=0;i<ch->len;i++){int s=ch->ids[i];
-        if(is_r){if(sites[s].r_chain<0){sites[s].r_chain=cid;sites[s].r_pos=i;}}
-        else    {if(sites[s].l_chain<0){sites[s].l_chain=cid;sites[s].l_pos=i;}}}
+        if(is_r){if(sites[s].r_chain<0){sites[s].r_chain=cid;sites[s].r_pos=i;sites[s].r_face=ch->faces[i];}}
+        else    {if(sites[s].l_chain<0){sites[s].l_chain=cid;sites[s].l_pos=i;sites[s].l_face=ch->faces[i];}}}
 }
 
 /* ========== Sparse entries ========== */
@@ -354,6 +356,14 @@ int main(int argc, char **argv) {
     fwrite(header,sizeof(int),4,stdout);
     for(int s=0;s<nsites;s++){double x[3]={sites[s].pos.x,sites[s].pos.y,sites[s].pos.z};fwrite(x,sizeof(double),3,stdout);}
     for(int s=0;s<nsites;s++){int m[4]={g_nr[s],nr_pos[s],g_nl[s],nl_pos[s]};fwrite(m,sizeof(int),4,stdout);}
+    /* Direction vectors (4 directions × 3 components per site) and face indices */
+    for(int s=0;s<nsites;s++){
+        for(int a=0;a<4;a++){
+            double d[3]={sites[s].dirs[a].x,sites[s].dirs[a].y,sites[s].dirs[a].z};
+            fwrite(d,sizeof(double),3,stdout);
+        }
+    }
+    for(int s=0;s<nsites;s++){int f[2]={sites[s].r_face,sites[s].l_face};fwrite(f,sizeof(int),2,stdout);}
     for(int i=0;i<sr_nnz;i++){int rc[2]={sr_entries[i].row,sr_entries[i].col};fwrite(rc,sizeof(int),2,stdout);}
     for(int i=0;i<sr_nnz;i++){double v[2]={sr_entries[i].re,sr_entries[i].im};fwrite(v,sizeof(double),2,stdout);}
     for(int i=0;i<sl_nnz;i++){int rc[2]={sl_entries[i].row,sl_entries[i].col};fwrite(rc,sizeof(int),2,stdout);}
