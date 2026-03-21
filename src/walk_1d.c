@@ -169,6 +169,9 @@ int main(int argc, char **argv) {
             N-1, v3norm((vec3){pos[N-1].x-pos[0].x, pos[N-1].y-pos[0].y, pos[N-1].z-pos[0].z}));
 
     /* ---- Initialize wavepacket ---- */
+    /* Use equal superposition of P+ and P- eigenstates of the local tau.
+     * At each site, find the tau eigenvectors, pick one from P+ and one
+     * from P-, and initialize as (v+ + v-)/sqrt(2) * Gaussian_weight. */
     double complex *psi = calloc(4*N, sizeof(double complex));
     double complex *tmp_psi = calloc(4*N, sizeof(double complex));
     int center = N / 2;
@@ -176,11 +179,32 @@ int main(int argc, char **argv) {
     for (int i = 0; i < N; i++) {
         double x = (double)(i - center);
         double w = exp(-x*x / (2*sigma*sigma));
-        psi[4*i] = w;  /* spinor (1,0,0,0) */
-        norm += w*w;
+        /* Compute tau eigenvectors at this site.
+         * tau has eigenvalues +1 (P+, 2D) and -1 (P-, 2D).
+         * P+ = (I+tau)/2, P- = (I-tau)/2.
+         * Pick the P+ eigenvector closest to (1,0,0,0) and similarly for P-. */
+        double complex v_plus[4], v_minus[4];
+        /* P+ * (1,0,0,0) gives a vector in the P+ subspace */
+        for (int a = 0; a < 4; a++) v_plus[a] = Pp[i][a][0];
+        /* P- * (1,0,0,0) gives a vector in the P- subspace */
+        for (int a = 0; a < 4; a++) v_minus[a] = Pm[i][a][0];
+        /* Normalize each */
+        double np2 = 0, nm2 = 0;
+        for (int a = 0; a < 4; a++) {
+            np2 += creal(v_plus[a]*conj(v_plus[a]));
+            nm2 += creal(v_minus[a]*conj(v_minus[a]));
+        }
+        double inv_np = 1.0/sqrt(np2), inv_nm = 1.0/sqrt(nm2);
+        /* psi = w * (v_plus/|v_plus| + v_minus/|v_minus|) / sqrt(2) */
+        double s2 = 1.0/sqrt(2.0);
+        for (int a = 0; a < 4; a++)
+            psi[4*i+a] = w * s2 * (v_plus[a]*inv_np + v_minus[a]*inv_nm);
+        for (int a = 0; a < 4; a++)
+            norm += creal(psi[4*i+a]*conj(psi[4*i+a]));
     }
     norm = sqrt(norm);
     for (int i = 0; i < 4*N; i++) psi[i] /= norm;
+    fprintf(stderr, "Initialized with symmetric P+/P- spinor\n");
 
     /* ---- Time evolution ---- */
     printf("# N=%d theta=%.4f sigma=%.1f n_steps=%d\n", N, theta, sigma, n_steps);
