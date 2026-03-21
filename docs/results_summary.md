@@ -104,12 +104,61 @@ This enables the walk decomposition W = S_R · S_L, where:
   non-overlapping chains)
 - Analogous to the cubic lattice decomposition W = S_z · S_y · S_x
 
+## 7. Frame Transport and Shift Unitarity
+
+**Result:** The shift operator S_R along a BC helix chain is made unitary by
+including a frame transport U_{n,n+1} at each step, constructed via the polar
+decomposition of the eigenspace overlap matrix. The transport intertwines
+the projectors: U P_from^± = P_to^± U, reducing the unitarity condition to
+P^+P^- = 0 at a single site.
+
+**Structure:** Each U_{n,n+1} acts as the identity on the +1 eigenspace and
+an SU(2) rotation on the -1 eigenspace. The rotation angle is O(1) (not
+infinitesimal), determined by the BC helix geometry.
+
+## 8. Conveyor Belt Problem and Coin Resolution
+
+**Problem:** The intertwining frame transport creates a perfect conveyor belt:
+eigenstates are spatially uniform, delta functions split but don't spread,
+and momentum exp(ikn) has no effect. The transport erases all phase
+information between sites.
+
+**Resolution:** A site-local coin operator C_n = exp(-iθ e_{a(n)}·α) applied
+before the shift breaks the conveyor belt while preserving unitarity. The
+walk W = S·C produces genuine dispersion.
+
+## 9. Massive Dirac Dispersion (1D Helix)
+
+**Result:** On a single BC helix chain with coin angle θ:
+- Dispersion relation: **E² = m² + k²** (R² > 0.99)
+- Mass gap: **m ≈ 0.59 sin(θ)** (proportional to coin mixing amplitude)
+- Speed of light: **c = 1 site/step** (constant, independent of mass)
+- Leading edge propagates at c for all masses
+- Group velocity decreases with mass: v_g = k/√(k²+m²) < c
+- Delta functions spread (genuine dispersion, sigma grows linearly)
+- ±E symmetry (particle-antiparticle)
+- Exactly unitary for all θ
+
+Verified by: (a) full diagonalization of the walk operator, (b) wavepacket
+group velocity measurements, (c) leading edge propagation speed.
+
+## 10. 3D Walk with Coin
+
+**Result (preliminary):** Adding the beta coin to the 3D walk
+W = S_R · C · S_L · C gives isotropic spreading with mass-dependent
+spreading rate (slower for larger θ). Exactly unitary. But the current
+lattice (~80K sites, radius ~22) is too small: the wavepacket fills
+it in ~2 steps, preventing clean measurement of the 3D dispersion.
+
+**Infrastructure:** C lattice generator (walk_gen.c) produces isotropic
+lattices with balanced R/L coverage using BFS seed + chain expansion +
+fill passes. Generates 80K sites with full shift operators in ~2 seconds.
+
 ## Open Questions
 
-- **Lattice partition:** Do the spirals completely partition the lattice?
-  (Every site on exactly one L-spiral and one R-spiral?)
-- **1D shift operator:** What is the explicit form of the shift along a single
-  spiral, using the local τ operators?
-- **Continuum limit:** Does W = S_R · S_L converge to the Dirac equation?
-  What are the BCH corrections?
-- **Mass term:** How to incorporate mass (via β = γ^0)?
+- **Larger 3D lattice:** Need ~10x bigger lattice (radius ~200) to
+  measure 3D dispersion before boundary saturation
+- **3D Dirac dispersion:** Does W = S_R·C·S_L·C give E² = m² + k_x² + k_y² + k_z²?
+- **Isotropy of speed of light:** Is c the same in all 3D directions?
+- **The factor 0.59:** Why m = 0.59 sin(θ) and not sin(θ)?
+- **Świerczkowski & two-slit:** Unique walker paths and interference
