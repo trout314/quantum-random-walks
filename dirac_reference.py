@@ -71,30 +71,46 @@ def dirac_propagate(r_arr, t_arr, sigma, c_eff, m_eff):
     mc2 = m_eff * c_eff**2  # rest energy (m*c^2 with our units)
     E = np.sqrt(c_eff**2 * p**2 + mc2**2)
 
-    # Momentum-space Gaussian (from Fourier transform of exp(-r²/2σ²))
-    # The 3D FT of exp(-r²/2σ²) is (2πσ²)^{3/2} exp(-σ²p²/2)
-    # We'll normalize at the end, so just use the exponential
+    # Momentum-space Gaussian
     fp = np.exp(-sigma**2 * p**2 / 2)
+
+    # Full Dirac propagation of initial state χ = (1,0,0,0)^T.
+    # This includes BOTH positive and negative energy components.
+    #
+    # The time evolution operator for the free Dirac equation is:
+    #   U(t) = exp(-iHt) = cos(Et)I - i sin(Et) H/E
+    # where H = c α·p + β mc² and E = √(c²p² + m²c⁴).
+    #
+    # Acting on (1,0,0,0)^T (spin-up, upper component only):
+    #   U(t)|↑⟩ = cos(Et)|↑⟩ - i sin(Et)/E [β mc² + c α·p]|↑⟩
+    #
+    # β|↑⟩ = |↑⟩ (upper components have β eigenvalue +1)
+    # (α·p)|↑⟩ for isotropic state: the angular average couples to j_1
+    #
+    # Upper spinor component (via j_0):
+    #   coefficient = cos(Et) - i(mc²/E)sin(Et)
+    #
+    # Lower spinor component (via j_1, from α·p coupling):
+    #   coefficient = -i(cp/E)sin(Et)
+    #
+    # These are the EXACT coefficients from the Dirac propagator.
 
     rho = np.zeros((len(t_arr), len(r_arr)))
 
     for it, t in enumerate(t_arr):
-        # Time evolution factors
         cosEt = np.cos(E * t)
         sinEt = np.sin(E * t)
 
-        # Upper component coefficient: cos(Et) - i(mc²/E)sin(Et)
-        # This is the (1,1) element of the Dirac propagator for spin-up
-        upper_re = cosEt        # real part
-        upper_im = -(mc2/E) * sinEt  # imaginary part
+        # Upper component: cos(Et) - i(mc²/E)sin(Et)
+        upper_re = cosEt
+        upper_im = -(mc2 / E) * sinEt
 
-        # Lower component coefficient: -i(cp/E)sin(Et)
-        # This couples to j_1(pr) via the σ·p̂ angular structure
-        lower_im = -(c_eff * p / E) * sinEt  # purely imaginary coefficient
+        # Lower component: -i(cp/E)sin(Et)
+        lower_re = np.zeros_like(p)
+        lower_im = -(c_eff * p / E) * sinEt
 
         for ir, r in enumerate(r_arr):
             if r < 1e-12:
-                # At origin: j_0(0)=1, j_1(0)=0
                 integrand = p**2 * fp * dp
                 I_re = np.sum(integrand * upper_re)
                 I_im = np.sum(integrand * upper_im)
@@ -105,24 +121,18 @@ def dirac_propagate(r_arr, t_arr, sigma, c_eff, m_eff):
             j0 = np.sin(pr) / pr
             j1 = np.sin(pr) / pr**2 - np.cos(pr) / pr
 
-            # Upper component: ψ_upper(r) = 1/(2π²) ∫ p² f(p) [upper_coeff] j_0(pr) dp
+            # Upper component via j_0
             integrand_j0 = p**2 * fp * j0 * dp
             Iu_re = np.sum(integrand_j0 * upper_re)
             Iu_im = np.sum(integrand_j0 * upper_im)
             upper_sq = (Iu_re**2 + Iu_im**2) / (2*np.pi**2)**2
 
-            # Lower component: ψ_lower(r) = 1/(2π²) ∫ p² f(p) [lower_coeff] j_1(pr) dp
-            # The factor of (cp/E) is already in lower_im
+            # Lower component via j_1
             integrand_j1 = p**2 * fp * j1 * dp
+            Il_re = np.sum(integrand_j1 * lower_re)
             Il_im = np.sum(integrand_j1 * lower_im)
-            lower_sq = Il_im**2 / (2*np.pi**2)**2
+            lower_sq = (Il_re**2 + Il_im**2) / (2*np.pi**2)**2
 
-            # Total radial probability density
-            # Upper: 1 component (spin up, the only one populated initially)
-            # Lower: the σ·p̂ structure distributes over 2 lower spinor components
-            #   After angular integration: ∫|σ·r̂ Y_00|² dΩ = 1/(4π) ∫|σ·r̂|² dΩ
-            #   |σ·r̂|² = 1 (since σ·r̂ is unitary for unit r̂)
-            #   So ∫ dΩ / (4π) = 1. The two lower components together give lower_sq.
             rho[it, ir] = 4 * np.pi * r**2 * (upper_sq + lower_sq)
 
     # Normalize each time slice to integrate to 1
