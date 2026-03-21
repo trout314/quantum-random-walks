@@ -268,13 +268,24 @@ int main(int argc, char **argv) {
         }
 
     /* ---- Time evolution ---- */
+    /* Radial histogram output: write to "radial.dat" if env var RADIAL_HIST is set */
+    FILE *radf = NULL;
+    int hist_nbins = 500;
+    {
+        const char *rf = getenv("RADIAL_HIST");
+        if (rf) { radf = fopen(rf, "w"); if (radf) fprintf(stderr, "Radial histograms -> %s\n", rf); }
+    }
+
     printf("# theta=%.4f sigma=%.1f n_steps=%d nsites=%d\n", theta, sigma, n_steps, nsites);
     printf("# t norm r2 x2 y2 z2 r95\n");
 
     double *radii = malloc(nsites * sizeof(double));
     double *probs = malloc(nsites * sizeof(double));
-    for (int n = 0; n < nsites; n++)
+    double rmax_global = 0;
+    for (int n = 0; n < nsites; n++) {
         radii[n] = sqrt(pos[3*n]*pos[3*n]+pos[3*n+1]*pos[3*n+1]+pos[3*n+2]*pos[3*n+2]);
+        if (radii[n] > rmax_global) rmax_global = radii[n];
+    }
 
     fprintf(stderr, "Starting time evolution (%d steps)...\n", n_steps);
     for (int t = 0; t <= n_steps; t++) {
@@ -323,6 +334,29 @@ int main(int argc, char **argv) {
                t, pnorm, mx2+my2+mz2, mx2, my2, mz2, r95);
         fflush(stdout);
 
+        /* Write radial histogram */
+        if (radf) {
+            double dr = rmax_global / hist_nbins;
+            double *hist = calloc(hist_nbins+1, sizeof(double));
+            /* Count sites per bin for density normalization */
+            double *bin_sites = calloc(hist_nbins+1, sizeof(double));
+            for (int n = 0; n < nsites; n++) {
+                int b = (int)(radii[n] / dr);
+                if (b > hist_nbins) b = hist_nbins;
+                hist[b] += probs[n] / total_prob;
+                bin_sites[b] += 1.0;
+            }
+            /* Output: r, P(r) (prob density = prob_in_bin / dr), raw_prob, sites_in_bin */
+            fprintf(radf, "# t=%d norm=%.6f\n", t, pnorm);
+            for (int b = 0; b <= hist_nbins; b++) {
+                double r = (b + 0.5) * dr;
+                double shell_vol = 4.0 * M_PI * r * r * dr;  /* for density */
+                double density = (shell_vol > 0) ? hist[b] / shell_vol : 0;
+                fprintf(radf, "%d %.4f %.8e %.8e %.0f\n", t, r, density, hist[b], bin_sites[b]);
+            }
+            free(hist); free(bin_sites);
+        }
+
         if (t < n_steps) {
             /* W = S_R C_R S_L C_L: apply right to left */
             /* Step 1: C_L */
@@ -336,6 +370,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (radf) fclose(radf);
     fprintf(stderr, "Done.\n");
     free(psi); free(tmp); free(pos); free(mem); free(dirs); free(faces);
     free(coin_R); free(coin_L); free(probs); free(radii);
