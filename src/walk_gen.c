@@ -77,30 +77,28 @@ static void make_tau(c4x4 tau, vec3 d) {
         tau[i][j]+=0.75*dd[a]*ALPHA[a][i][j];
 }
 
-/* ========== LAPACK ========== */
-extern void zheev_(const char*,const char*,const int*,double complex*,
-                   const int*,double*,double complex*,const int*,double*,int*);
-static void eigh4(const c4x4 M,double w[4],c4x4 V){
-    double complex a[16];
-    for(int i=0;i<4;i++)for(int j=0;j<4;j++)a[j*4+i]=M[i][j];
-    int n=4,lda=4,lwork=32,info; double complex work[32]; double rwork[16];
-    zheev_("V","U",&n,a,&lda,w,work,&lwork,rwork,&info);
-    if(info){fprintf(stderr,"zheev %d\n",info);exit(1);}
-    for(int i=0;i<4;i++)for(int j=0;j<4;j++)V[i][j]=a[j*4+i];
-}
-static void frame_transport(const c4x4 tf,const c4x4 tt,c4x4 U){
-    c4x4 Pfp,Pfm,Ptp,Ptm;
-    c4_eye(Pfp);c4_eye(Pfm);c4_eye(Ptp);c4_eye(Ptm);
-    for(int i=0;i<4;i++)for(int j=0;j<4;j++){
-        Pfp[i][j]=0.5*(Pfp[i][j]+tf[i][j]);Pfm[i][j]=0.5*(Pfm[i][j]-tf[i][j]);
-        Ptp[i][j]=0.5*(Ptp[i][j]+tt[i][j]);Ptm[i][j]=0.5*(Ptm[i][j]-tt[i][j]);
-    }
-    c4x4 W,t1,t2; c4_mul(t1,Ptp,Pfp);c4_mul(t2,Ptm,Pfm);c4_add(W,t1,t2);
-    c4x4 Wa,WdW; c4_adjoint(Wa,W);c4_mul(WdW,Wa,W);
-    double ev[4];c4x4 V; eigh4(WdW,ev,V);
-    c4x4 Va,D,t3,Hi; c4_adjoint(Va,V);c4_zero(D);
-    for(int i=0;i<4;i++)D[i][i]=(ev[i]>1e-15)?1.0/sqrt(ev[i]):0;
-    c4_mul(t3,V,D);c4_mul(Hi,t3,Va);c4_mul(U,W,Hi);
+/* LAPACK no longer needed — frame transport has a closed form */
+/* Closed-form frame transport: U = (I + tau_to tau_from) / (2 cos(phi/2))
+ * where cos(phi) = Tr(tau_to tau_from) / 4.
+ *
+ * Derived from: W = (I + tau_to tau_from)/2, and tau_to tau_from is
+ * unitary with eigenvalues e^{±i phi}, so the polar part of W is
+ * (tau_to tau_from)^{1/2} = (I + U) / (2 cos(phi/2)).
+ *
+ * For consecutive helix sites: cos(phi) = 5/8, giving 2cos(phi/2) = sqrt(13)/2.
+ * At stitching seams, cos(phi) may differ, so we compute it from the trace. */
+static void frame_transport(const c4x4 tf, const c4x4 tt, c4x4 U) {
+    c4x4 prod;
+    c4_mul(prod, tt, tf);  /* tau_to @ tau_from */
+    /* cos(phi) = Re(Tr(prod)) / 4 */
+    double cos_phi = 0;
+    for (int i = 0; i < 4; i++) cos_phi += creal(prod[i][i]);
+    cos_phi /= 4.0;
+    double cos_half = sqrt((1.0 + cos_phi) / 2.0);
+    double scale = 1.0 / (2.0 * cos_half);
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            U[i][j] = scale * ((i==j ? 1.0 : 0.0) + prod[i][j]);
 }
 
 /* ========== Hash table ========== */
@@ -205,7 +203,7 @@ static void assign_membership(chain_t *ch, int cid, int is_r) {
 typedef struct { int row,col; double re,im; } sparse_entry;
 static sparse_entry *sr_entries, *sl_entries;
 static int sr_nnz=0, sl_nnz=0;
-#define MAX_NNZ 20000000
+#define MAX_NNZ 80000000
 static void add_entry(sparse_entry *e,int *nnz,int r,int c,double complex v){
     if(cabs(v)<1e-15)return;
     if(*nnz>=MAX_NNZ){fprintf(stderr,"Too many nnz\n");exit(1);}
