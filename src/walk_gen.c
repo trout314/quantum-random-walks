@@ -329,10 +329,15 @@ static void build_shift(int is_r, sparse_entry *ent, int *nnz) {
 int main(int argc, char **argv) {
     int seed_depth = 3;
     double prune_ratio = 0.0;  /* 0 = no pruning, 0.5 = moderate, 0.8 = aggressive */
+    int dense_depth = 8;       /* no pruning below this depth */
+    int thicken = 2;           /* unpruned BFS passes at the end */
     if (argc > 1) seed_depth = atoi(argv[1]);
     if (argc > 2) prune_ratio = atof(argv[2]);
+    if (argc > 3) dense_depth = atoi(argv[3]);
+    if (argc > 4) thicken = atoi(argv[4]);
 
-    fprintf(stderr,"=== walk_gen: seed_depth=%d prune_ratio=%.2f ===\n", seed_depth, prune_ratio);
+    fprintf(stderr,"=== walk_gen: depth=%d prune=%.2f dense=%d thicken=%d ===\n",
+            seed_depth, prune_ratio, dense_depth, thicken);
     long avail0 = get_avail_mb();
     fprintf(stderr,"Memory available: %ld MB\n", avail0);
 
@@ -365,7 +370,6 @@ int main(int argc, char **argv) {
      * since the last round start.
      *
      * No pruning below min_prune_depth to keep the interior dense. */
-    int min_prune_depth = 6;
     int round_size = 4;
     double step_len = 2.0/3.0;
     fprintf(stderr,"\n--- Phase 1: BFS seed (depth %d, prune=%.2f) ---\n", seed_depth, prune_ratio);
@@ -384,7 +388,7 @@ int main(int argc, char **argv) {
         int s = queue[qh++];
         if (depth[s] >= seed_depth) continue;
         /* Pruning checks */
-        if (prune_ratio > 0 && depth[s] >= min_prune_depth) {
+        if (prune_ratio > 0 && depth[s] >= dense_depth) {
             double r = v3norm(sites[s].pos);
             double max_r = depth[s] * step_len;
             /* Global: overall displacement efficiency */
@@ -423,10 +427,32 @@ int main(int argc, char **argv) {
             fprintf(stderr,"  BFS: %d sites, depth frontier ~%d, pruned %d+%d\n",
                     nsites, depth[s], npruned_global, npruned_local);
     }
-    free(queue); free(depth); free(round_radius);
+    free(depth); free(round_radius);
+    fprintf(stderr,"Phase 1a: depth %d, prune=%.2f -> %d sites (pruned: %d global, %d local)\n",
+            seed_depth, prune_ratio, nsites, npruned_global, npruned_local);
+
+    /* ---- Phase 1b: Thicken — unpruned BFS from all sites ---- */
+    if (thicken > 0) {
+        fprintf(stderr,"\n--- Phase 1b: Thickening (%d passes) ---\n", thicken);
+        for (int pass = 0; pass < thicken; pass++) {
+            mem_check("Thicken", 500);
+            int snap = nsites;
+            for (int s = 0; s < snap; s++) {
+                for (int f = 0; f < 4; f++) {
+                    vec3 p = sites[s].pos, dd[4];
+                    memcpy(dd, sites[s].dirs, sizeof(dd));
+                    helix_step(&p, dd, f); reorth(dd);
+                    site_insert(p, dd);
+                }
+            }
+            fprintf(stderr,"  Thicken pass %d: %d -> %d sites (+%d)\n",
+                    pass, snap, nsites, nsites - snap);
+            if (nsites == snap) break;  /* no new sites */
+        }
+    }
+    free(queue);
     int n_seed = nsites;
-    fprintf(stderr,"Phase 1: depth %d, prune=%.2f -> %d sites (pruned: %d global, %d local)\n",
-            seed_depth, prune_ratio, n_seed, npruned_global, npruned_local);
+    fprintf(stderr,"Total sites after thickening: %d\n", n_seed);
 
     /* ---- Phase 2: Thread unique R and L chains through seed ball ---- */
     fprintf(stderr,"\n--- Phase 2: Threading chains through %d seed sites ---\n", n_seed);
