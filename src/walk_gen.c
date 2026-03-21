@@ -376,23 +376,38 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr,"Phase 2 done: %d sites, %d R, %d L chains\n",nsites,nrch,nlch);
 
-    /* ---- Phase 3: Fill passes ---- */
-    fprintf(stderr,"\n--- Phase 3: Fill passes (max %d) ---\n", nfill);
+    /* ---- Phase 3: Alternating chirality shell growth ---- */
+    /* Sites created by R-chains need L-chains and vice versa.
+     * Each pass: trace the missing chirality through frontier sites,
+     * creating new sites. Those new sites become the next frontier. */
+    /* ---- Phase 3: Alternating chirality shell growth ---- */
+    /* Sites created by R-chains need L-chains and vice versa.
+     * Each pass: trace the missing chirality through frontier sites,
+     * creating new sites. Those new sites become the next frontier.
+     * Use short chains (chain_len/2 fwd, 0 bwd) to limit growth. */
+    int fill_len = chain_len / 2;
+    if (fill_len < 4) fill_len = 4;
+    fprintf(stderr,"\n--- Phase 3: Shell growth (max %d passes, fill_len=%d) ---\n", nfill, fill_len);
+    int shell_start = n_seed;  /* frontier begins right after seed ball */
     for(int fill=0;fill<nfill;fill++){
-        mem_check("Fill pass", 300);
-        int al=0,ar=0;
+        mem_check("Shell growth", 500);
         int snap=nsites;
-        for(int s=0;s<snap;s++){
+        int al=0,ar=0;
+        /* Thread L-chains through frontier sites that lack L-coverage */
+        for(int s=shell_start;s<snap;s++){
             if(sites[s].l_chain<0 && nlch<max_chains){
-                trace_chain_existing(s,PAT_L,chain_len,chain_len,&lchains[nlch]);
-                if(lchains[nlch].len>=2){assign_membership(&lchains[nlch],nlch,0);nlch++;al++;}}}
-        for(int s=0;s<snap;s++){
+                trace_chain(s,PAT_L,fill_len,0,&lchains[nlch]);
+                assign_membership(&lchains[nlch],nlch,0);nlch++;al++;}}
+        /* Thread R-chains through frontier sites that lack R-coverage */
+        for(int s=shell_start;s<snap;s++){
             if(sites[s].r_chain<0 && nrch<max_chains){
-                trace_chain_existing(s,PAT_R,chain_len,chain_len,&rchains[nrch]);
-                if(rchains[nrch].len>=2){assign_membership(&rchains[nrch],nrch,1);nrch++;ar++;}}}
+                trace_chain(s,PAT_R,fill_len,0,&rchains[nrch]);
+                assign_membership(&rchains[nrch],nrch,1);nrch++;ar++;}}
         int nb=0;for(int s=0;s<nsites;s++)if(sites[s].r_chain>=0&&sites[s].l_chain>=0)nb++;
-        fprintf(stderr,"Fill %d: +%dL +%dR, both=%d/%d (%.1f%%)\n",fill,al,ar,nb,nsites,100.0*nb/nsites);
-        if(al==0&&ar==0)break;
+        fprintf(stderr,"Shell %d: +%dL +%dR, frontier [%d,%d), new sites %d, both=%d/%d (%.1f%%)\n",
+                fill,al,ar,shell_start,snap,nsites-snap,nb,nsites,100.0*nb/nsites);
+        shell_start = snap;  /* next pass processes newly created sites */
+        if(nsites==snap)break;  /* no new sites created */
     }
 
     /* ---- Phase 4: Restrict to dual-covered, extract chains ---- */
