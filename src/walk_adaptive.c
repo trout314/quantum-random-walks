@@ -523,40 +523,68 @@ int main(int argc, char **argv) {
      * but keep the interior dense (no pruning below min_prune_depth=6).
      * Only expand sites where exp(-r²/2σ²) > seed_threshold. */
     double seed_thresh = 1e-4;
-    double prune_ratio = 0.7;
-    int min_prune_depth = 6;
     double step_len = 2.0/3.0;
-    fprintf(stderr, "\n--- Phase 1: BFS seed (depth %d, Gaussian > %.1e, prune=%.2f) ---\n",
-            seed_depth, seed_thresh, prune_ratio);
+
+    /* Density-based pruning: divide space into cells of size `cell_size`.
+     * Don't expand from a site if its cell already has >= max_per_cell sites.
+     * This gives dense coverage near the origin (where BFS fills cells early)
+     * and sparse coverage at large r (where only efficient paths reach). */
+    double cell_size = 1.0;  /* ~1.5 step lengths */
+    int max_per_cell = 50;   /* target density per cell */
+    /* Grid: centered at origin, covering [-grid_half, grid_half]³ */
+    double grid_half = seed_depth * step_len + 5.0;
+    int grid_n = (int)(2.0 * grid_half / cell_size) + 1;
+    if (grid_n > 500) grid_n = 500;  /* cap grid size */
+    int grid_total = grid_n * grid_n * grid_n;
+    int *grid_count = calloc(grid_total, sizeof(int));
+
+    fprintf(stderr, "\n--- Phase 1: BFS seed (depth %d, Gaussian > %.1e, density grid %d³) ---\n",
+            seed_depth, seed_thresh, grid_n);
+
+    /* Helper to get grid cell index from position */
+    #define GRID_IDX(pos) ({ \
+        int gx = (int)((pos.x + grid_half) / cell_size); \
+        int gy = (int)((pos.y + grid_half) / cell_size); \
+        int gz = (int)((pos.z + grid_half) / cell_size); \
+        if (gx < 0) gx = 0; if (gx >= grid_n) gx = grid_n-1; \
+        if (gy < 0) gy = 0; if (gy >= grid_n) gy = grid_n-1; \
+        if (gz < 0) gz = 0; if (gz >= grid_n) gz = grid_n-1; \
+        gx * grid_n * grid_n + gy * grid_n + gz; \
+    })
+
     vec3 d0[4]; init_tet(d0);
     site_insert((vec3){0,0,0}, d0);
+    grid_count[GRID_IDX(((vec3){0,0,0}))]++;
     int *queue = malloc(MAX_SITES * sizeof(int));
     int qh=0, qt=0; queue[qt++] = 0;
     int *sdepth = calloc(MAX_SITES, sizeof(int));
+    int npruned = 0;
     while (qh < qt) {
         int s = queue[qh++];
         if (sdepth[s] >= seed_depth) continue;
         double r2 = v3dot(sites[s].pos, sites[s].pos);
-        double r = sqrt(r2);
         /* Stop expanding if Gaussian is negligible */
         if (exp(-r2 / (2*sigma*sigma)) < seed_thresh) continue;
-        /* Radial pruning for efficiency */
-        if (sdepth[s] >= min_prune_depth) {
-            double max_r = sdepth[s] * step_len;
-            if (r < prune_ratio * max_r) continue;
-        }
+        /* Density pruning: don't expand if this cell is already full */
+        int gi = GRID_IDX(sites[s].pos);
+        if (grid_count[gi] >= max_per_cell) { npruned++; continue; }
         for (int f = 0; f < 4; f++) {
             vec3 p = sites[s].pos, dd[4];
             memcpy(dd, sites[s].dirs, sizeof(dd));
             helix_step(&p, dd, f); reorth(dd);
             int old_n = nsites;
             int nid = site_insert(p, dd);
-            if (nid >= old_n) { sdepth[nid] = sdepth[s]+1; queue[qt++] = nid; }
+            if (nid >= old_n) {
+                sdepth[nid] = sdepth[s]+1;
+                queue[qt++] = nid;
+                int ci = GRID_IDX(sites[nid].pos);
+                grid_count[ci]++;
+            }
         }
         if (nsites % 500000 == 0)
-            fprintf(stderr, "  BFS: %d sites, depth ~%d\n", nsites, sdepth[s]);
+            fprintf(stderr, "  BFS: %d sites, depth ~%d, pruned %d\n", nsites, sdepth[s], npruned);
     }
-    free(queue); free(sdepth);
+    free(queue); free(sdepth); free(grid_count);
     int n_seed = nsites;
     fprintf(stderr, "Seed: %d sites\n", n_seed);
 
@@ -626,8 +654,9 @@ int main(int argc, char **argv) {
                 double r = v3norm(sites[n].pos);
                 if (r > rmax) rmax = r;
             }
-            int nbins = 200;
-            double dr = rmax / nbins;
+            double dr = 0.5;  /* fixed bin width */
+            int nbins = (int)(rmax / dr) + 1;
+            if (nbins < 10) nbins = 10;
             double *bp = calloc(nbins+1, sizeof(double));
             for (int n = 0; n < nsites; n++) {
                 double r = v3norm(sites[n].pos);
