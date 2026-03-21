@@ -1,15 +1,16 @@
 /*
  * walk_gen.c — Generate tetrahedral walk lattice and sparse shift operators.
  *
- * Hybrid approach:
- *   Phase 1: Small BFS ball for isotropic seed (depth ~3-4)
- *   Phase 2: From each seed site, trace long R and L chains (creates new sites)
- *   Phase 3: Fill passes — trace chains through existing sites for coverage
- *   Phase 4: Restrict to dual-covered sites, extract and stitch chains
- *   Phase 5: Build sparse S_R, S_L with frame transport
+ * Approach:
+ *   Phase 1: BFS ball for isotropic seed
+ *   Phase 2: Thread unique R and L chains through seed (linked-list, no new sites)
+ *   Phase 3: Build sparse S_R, S_L with frame transport and open boundaries
  *
- * Build: clang -O2 -o walk_gen src/walk_gen.c -lm -llapack -lblas
- * Usage: ./walk_gen [seed_depth] [chain_len] [fill_passes]
+ * Each site has exactly one R-helix and one L-helix through it.
+ * Chains are stored as doubly-linked lists embedded in the site array.
+ *
+ * Build: clang -O2 -o walk_gen src/walk_gen.c -lm
+ * Usage: ./walk_gen [seed_depth]
  */
 
 #include <stdio.h>
@@ -29,34 +30,28 @@ static long get_avail_mb(void) {
     fclose(f);
     return avail;
 }
-/* Abort if available memory drops below threshold (MB) */
 static void mem_check(const char *label, long reserve_mb) {
     long avail = get_avail_mb();
-    if (avail < 0) return;  /* can't read, skip check */
+    if (avail < 0) return;
     if (avail < reserve_mb) {
-        fprintf(stderr,"\n*** ABORT at %s: only %ld MB available (need > %ld MB). ***\n"
-                        "*** Reduce seed_depth, chain_len, or fill_passes. ***\n",
+        fprintf(stderr,"\n*** ABORT at %s: only %ld MB available (need > %ld MB). ***\n",
                 label, avail, reserve_mb);
         exit(2);
     }
 }
-/* malloc with memory guard */
 static void *safe_malloc(size_t bytes, const char *label) {
     long need_mb = (long)(bytes / (1024*1024)) + 1;
     long avail = get_avail_mb();
     if (avail > 0 && avail < need_mb + 500) {
-        fprintf(stderr,"\n*** ABORT before %s: need ~%ld MB but only %ld MB available. ***\n"
-                        "*** Reduce seed_depth, chain_len, or fill_passes. ***\n",
+        fprintf(stderr,"\n*** ABORT before %s: need ~%ld MB but only %ld MB available. ***\n",
                 label, need_mb, avail);
         exit(2);
     }
     void *p = malloc(bytes);
-    if (!p) {
-        fprintf(stderr,"*** malloc failed for %s (%zu bytes) ***\n", label, bytes);
-        exit(2);
-    }
-    fprintf(stderr,"  alloc %s: %.1f MB (avail: %ld MB)\n", label,
-            (double)bytes/(1024*1024), avail>0?avail:-1);
+    if (!p) { fprintf(stderr,"*** malloc failed for %s (%zu bytes) ***\n", label, bytes); exit(2); }
+    if (bytes > 10*1024*1024)
+        fprintf(stderr,"  alloc %s: %.1f MB (avail: %ld MB)\n", label,
+                (double)bytes/(1024*1024), avail>0?avail:-1);
     return p;
 }
 
@@ -99,8 +94,6 @@ static void c4_mul(c4x4 C,const c4x4 A,const c4x4 B){
     for(int i=0;i<4;i++)for(int j=0;j<4;j++)for(int k=0;k<4;k++)t[i][j]+=A[i][k]*B[k][j];
     c4_copy(C,t);
 }
-static void c4_adjoint(c4x4 d,const c4x4 s){for(int i=0;i<4;i++)for(int j=0;j<4;j++)d[i][j]=conj(s[j][i]);}
-static void c4_add(c4x4 C,const c4x4 A,const c4x4 B){for(int i=0;i<4;i++)for(int j=0;j<4;j++)C[i][j]=A[i][j]+B[i][j];}
 
 /* ========== Dirac matrices ========== */
 static c4x4 ALPHA[3], BETA;
@@ -119,20 +112,10 @@ static void make_tau(c4x4 tau, vec3 d) {
         tau[i][j]+=0.75*dd[a]*ALPHA[a][i][j];
 }
 
-/* LAPACK no longer needed — frame transport has a closed form */
-/* Closed-form frame transport: U = (I + tau_to tau_from) / (2 cos(phi/2))
- * where cos(phi) = Tr(tau_to tau_from) / 4.
- *
- * Derived from: W = (I + tau_to tau_from)/2, and tau_to tau_from is
- * unitary with eigenvalues e^{±i phi}, so the polar part of W is
- * (tau_to tau_from)^{1/2} = (I + U) / (2 cos(phi/2)).
- *
- * For consecutive helix sites: cos(phi) = 5/8, giving 2cos(phi/2) = sqrt(13)/2.
- * At stitching seams, cos(phi) may differ, so we compute it from the trace. */
+/* Closed-form frame transport: U = (I + tau_to tau_from) / (2 cos(phi/2)) */
 static void frame_transport(const c4x4 tf, const c4x4 tt, c4x4 U) {
     c4x4 prod;
-    c4_mul(prod, tt, tf);  /* tau_to @ tau_from */
-    /* cos(phi) = Re(Tr(prod)) / 4 */
+    c4_mul(prod, tt, tf);
     double cos_phi = 0;
     for (int i = 0; i < 4; i++) cos_phi += creal(prod[i][i]);
     cos_phi /= 4.0;
@@ -154,8 +137,9 @@ static hentry *htab;
 
 typedef struct {
     vec3 pos, dirs[4];
-    int r_chain, r_pos, l_chain, l_pos;
-    int r_face, l_face;  /* face index used for R/L helix step at this site */
+    int r_next, r_prev;   /* next/prev site along R-helix, -1 at chain ends */
+    int l_next, l_prev;   /* next/prev site along L-helix, -1 at chain ends */
+    int r_face, l_face;   /* face index used for R/L helix step at this site */
 } site_t;
 static site_t *sites;
 static int nsites=0;
@@ -193,146 +177,179 @@ static int site_insert(vec3 pos,vec3 dirs[4]){
             if(nsites>=MAX_SITES){fprintf(stderr,"Too many sites\n");exit(1);}
             int id=nsites++;htab[i]=(hentry){kx,ky,kz,id};
             sites[id].pos=pos;memcpy(sites[id].dirs,dirs,sizeof(vec3)*4);
-            sites[id].r_chain=sites[id].l_chain=-1;
+            sites[id].r_next=sites[id].r_prev=-1;
+            sites[id].l_next=sites[id].l_prev=-1;
             sites[id].r_face=sites[id].l_face=-1;return id;}
         if(htab[i].kx==kx&&htab[i].ky==ky&&htab[i].kz==kz)return htab[i].id;}
     fprintf(stderr,"Hash full\n");exit(1);
 }
 
-/* ========== Chain storage ========== */
+/* ========== Chain threading (linked list) ========== */
 static const int PAT_R[4]={1,3,0,2}, PAT_L[4]={0,1,2,3};
-#define MAX_CLEN 600
-typedef struct { int ids[MAX_CLEN]; int faces[MAX_CLEN]; int len; } chain_t;
-static chain_t *rchains, *lchains;
-static int nrch=0, nlch=0;
-static int max_chains=0;  /* set dynamically in main */
 
-/* Trace chain creating new sites */
-static void trace_chain(int start, const int pat[4], int nfwd, int nbwd, chain_t *ch) {
-    ch->len=0;
+/* Thread a chain through existing sites starting from 'start'.
+ * Links sites via next/prev pointers. Only follows existing sites (no creation).
+ * is_r: 1 for R-chain, 0 for L-chain.
+ * Returns number of sites linked. */
+static int thread_chain(int start, const int pat[4], int is_r) {
     int rev[4]={pat[3],pat[2],pat[1],pat[0]};
-    int bwd[MAX_CLEN]; int nb=0;
-    {vec3 p=sites[start].pos; vec3 d[4]; memcpy(d,sites[start].dirs,sizeof(d));
-     for(int i=0;i<nbwd&&nb<MAX_CLEN/2;i++){
-         helix_step(&p,d,rev[i%4]); if((i+1)%8==0)reorth(d);
-         bwd[nb++]=site_insert(p,d);}}
-    for(int i=nb-1;i>=0;i--){ch->ids[ch->len]=bwd[i];ch->len++;}
-    ch->ids[ch->len]=start; ch->len++;
-    {vec3 p=sites[start].pos; vec3 d[4]; memcpy(d,sites[start].dirs,sizeof(d));
-     for(int i=0;i<nfwd&&ch->len<MAX_CLEN;i++){
-         helix_step(&p,d,pat[i%4]); if((i+1)%8==0)reorth(d);
-         ch->ids[ch->len]=site_insert(p,d); ch->len++;}}
-    for(int i=0;i<ch->len;i++){int off=i-nb; ch->faces[i]=pat[((off%4)+4)%4];}
-}
+    int linked = 1;
 
-/* Trace chain through existing sites only */
-static void trace_chain_existing(int start, const int pat[4], int maxfwd, int maxbwd, chain_t *ch) {
-    ch->len=0;
-    int rev[4]={pat[3],pat[2],pat[1],pat[0]};
-    int bwd[MAX_CLEN]; int nb=0;
-    {vec3 p=sites[start].pos; vec3 d[4]; memcpy(d,sites[start].dirs,sizeof(d));
-     for(int i=0;i<maxbwd&&nb<MAX_CLEN/2;i++){
-         helix_step(&p,d,rev[i%4]); if((i+1)%8==0)reorth(d);
-         int s=site_find(p); if(s<0)break; bwd[nb++]=s;}}
-    for(int i=nb-1;i>=0;i--){ch->ids[ch->len]=bwd[i];ch->len++;}
-    ch->ids[ch->len]=start; ch->len++;
-    {vec3 p=sites[start].pos; vec3 d[4]; memcpy(d,sites[start].dirs,sizeof(d));
-     for(int i=0;i<maxfwd&&ch->len<MAX_CLEN;i++){
-         helix_step(&p,d,pat[i%4]); if((i+1)%8==0)reorth(d);
-         int s=site_find(p); if(s<0)break; ch->ids[ch->len]=s; ch->len++;}}
-    for(int i=0;i<ch->len;i++){int off=i-nb; ch->faces[i]=pat[((off%4)+4)%4];}
-}
+    /* Set face for start site */
+    /* The face at start depends on its position in the helix pattern.
+     * We use face = pat[0] for the start site (offset 0 in the chain). */
+    if (is_r) sites[start].r_face = pat[0];
+    else      sites[start].l_face = pat[0];
 
-static void assign_membership(chain_t *ch, int cid, int is_r) {
-    for(int i=0;i<ch->len;i++){int s=ch->ids[i];
-        if(is_r){if(sites[s].r_chain<0){sites[s].r_chain=cid;sites[s].r_pos=i;sites[s].r_face=ch->faces[i];}}
-        else    {if(sites[s].l_chain<0){sites[s].l_chain=cid;sites[s].l_pos=i;sites[s].l_face=ch->faces[i];}}}
+    /* Trace forward */
+    {
+        int cur = start;
+        vec3 p = sites[start].pos;
+        vec3 d[4]; memcpy(d, sites[start].dirs, sizeof(d));
+        for (int step = 0; step < MAX_SITES; step++) {
+            int face = pat[step % 4];
+            helix_step(&p, d, face);
+            if ((step+1) % 8 == 0) reorth(d);
+            int next = site_find(p);
+            if (next < 0) break;  /* left seed ball */
+            /* Check if next site already has a prev link (already on a chain) */
+            if (is_r) {
+                if (sites[next].r_prev >= 0) break;  /* already linked */
+                sites[cur].r_next = next;
+                sites[next].r_prev = cur;
+                sites[next].r_face = pat[(step+1) % 4];
+            } else {
+                if (sites[next].l_prev >= 0) break;
+                sites[cur].l_next = next;
+                sites[next].l_prev = cur;
+                sites[next].l_face = pat[(step+1) % 4];
+            }
+            cur = next;
+            linked++;
+        }
+    }
+
+    /* Trace backward */
+    {
+        int cur = start;
+        vec3 p = sites[start].pos;
+        vec3 d[4]; memcpy(d, sites[start].dirs, sizeof(d));
+        for (int step = 0; step < MAX_SITES; step++) {
+            int face = rev[step % 4];
+            helix_step(&p, d, face);
+            if ((step+1) % 8 == 0) reorth(d);
+            int prev = site_find(p);
+            if (prev < 0) break;
+            if (is_r) {
+                if (sites[prev].r_next >= 0) break;
+                sites[cur].r_prev = prev;
+                sites[prev].r_next = cur;
+                /* Face for prev: it's at offset -(step+1) from start.
+                 * pat index = (-(step+1)) mod 4 */
+                sites[prev].r_face = pat[(((-(step+1))%4)+4)%4];
+            } else {
+                if (sites[prev].l_next >= 0) break;
+                sites[cur].l_prev = prev;
+                sites[prev].l_next = cur;
+                sites[prev].l_face = pat[(((-(step+1))%4)+4)%4];
+            }
+            cur = prev;
+            linked++;
+        }
+    }
+
+    return linked;
 }
 
 /* ========== Sparse entries ========== */
 typedef struct { int row,col; double re,im; } sparse_entry;
 static sparse_entry *sr_entries, *sl_entries;
 static int sr_nnz=0, sl_nnz=0;
-static int max_nnz=0;  /* set dynamically in main */
+static int max_nnz=0;
 static void add_entry(sparse_entry *e,int *nnz,int r,int c,double complex v){
     if(cabs(v)<1e-15)return;
     if(*nnz>=max_nnz){fprintf(stderr,"Too many nnz\n");exit(1);}
     e[*nnz]=(sparse_entry){r,c,creal(v),cimag(v)};(*nnz)++;
 }
 
-/* Global for stitcher */
-static int *g_nr, *g_nl;
+/* Build shift operator by walking linked lists.
+ * is_r: 1 for R-chains, 0 for L-chains. */
+static void build_shift(int is_r, sparse_entry *ent, int *nnz) {
+    int nchains=0, chain_sites=0, n_id=0;
 
-static void build_stitched(chain_t *chains,int nch,int is_r,sparse_entry *ent,int *nnz){
-    int mt=0; for(int c=0;c<nch;c++)mt+=chains[c].len;
-    int *ids=malloc(mt*sizeof(int)), *faces=malloc(mt*sizeof(int));
-    int total=0;
-    for(int c=0;c<nch;c++) for(int i=0;i<chains[c].len;i++){
-        int s=chains[c].ids[i];
-        if((is_r?g_nr[s]:g_nl[s])!=c)continue;
-        ids[total]=s; faces[total]=chains[c].faces[i]; total++;}
-    fprintf(stderr,"  Loop: %d sites\n",total);
-    for(int i=0;i<total;i++){
-        int in=(i+1)%total, ip=(i-1+total)%total;
-        int sid=ids[i]; vec3 d=sites[sid].dirs[faces[i]];
-        c4x4 tau; make_tau(tau,d);
-        c4x4 Pp,Pm; c4_eye(Pp);c4_eye(Pm);
-        for(int a=0;a<4;a++)for(int b=0;b<4;b++){
-            Pp[a][b]=0.5*(Pp[a][b]+tau[a][b]);Pm[a][b]=0.5*(Pm[a][b]-tau[a][b]);}
-        {int sn=ids[in];vec3 dn=sites[sn].dirs[faces[in]];
-         c4x4 tn;make_tau(tn,dn);c4x4 U,bl;frame_transport(tau,tn,U);c4_mul(bl,U,Pp);
-         for(int a=0;a<4;a++)for(int b=0;b<4;b++)add_entry(ent,nnz,sn*4+a,sid*4+b,bl[a][b]);}
-        {int sp=ids[ip];vec3 dp=sites[sp].dirs[faces[ip]];
-         c4x4 tp;make_tau(tp,dp);c4x4 U,bl;frame_transport(tau,tp,U);c4_mul(bl,U,Pm);
-         for(int a=0;a<4;a++)for(int b=0;b<4;b++)add_entry(ent,nnz,sp*4+a,sid*4+b,bl[a][b]);}
+    for (int s = 0; s < nsites; s++) {
+        int prev = is_r ? sites[s].r_prev : sites[s].l_prev;
+        int next = is_r ? sites[s].r_next : sites[s].l_next;
+        int face = is_r ? sites[s].r_face : sites[s].l_face;
+
+        if (face < 0) {
+            /* Site not on any chain of this type — identity */
+            for (int a = 0; a < 4; a++) add_entry(ent, nnz, s*4+a, s*4+a, 1.0);
+            n_id++;
+            continue;
+        }
+
+        /* Count chain starts for statistics */
+        if (prev < 0) nchains++;
+        chain_sites++;
+
+        vec3 d = sites[s].dirs[face];
+        c4x4 tau; make_tau(tau, d);
+        c4x4 Pp, Pm; c4_eye(Pp); c4_eye(Pm);
+        for (int a=0;a<4;a++) for(int b=0;b<4;b++) {
+            Pp[a][b] = 0.5*(Pp[a][b]+tau[a][b]);
+            Pm[a][b] = 0.5*(Pm[a][b]-tau[a][b]);
+        }
+
+        /* P+ -> forward (next site), absorb at chain end */
+        if (next >= 0) {
+            int fn = is_r ? sites[next].r_face : sites[next].l_face;
+            vec3 dn = sites[next].dirs[fn];
+            c4x4 tn; make_tau(tn, dn);
+            c4x4 U, bl; frame_transport(tau, tn, U); c4_mul(bl, U, Pp);
+            for (int a=0;a<4;a++) for(int b=0;b<4;b++)
+                add_entry(ent, nnz, next*4+a, s*4+b, bl[a][b]);
+        }
+
+        /* P- -> backward (prev site), absorb at chain start */
+        if (prev >= 0) {
+            int fp = is_r ? sites[prev].r_face : sites[prev].l_face;
+            vec3 dp = sites[prev].dirs[fp];
+            c4x4 tp; make_tau(tp, dp);
+            c4x4 U, bl; frame_transport(tau, tp, U); c4_mul(bl, U, Pm);
+            for (int a=0;a<4;a++) for(int b=0;b<4;b++)
+                add_entry(ent, nnz, prev*4+a, s*4+b, bl[a][b]);
+        }
     }
-    free(ids);free(faces);
+
+    fprintf(stderr,"  %d chains, %d chain sites, %d identity sites\n", nchains, chain_sites, n_id);
 }
 
 /* ========== Main ========== */
 int main(int argc, char **argv) {
-    int seed_depth=3, chain_len=20, nfill=10;
-    if(argc>1)seed_depth=atoi(argv[1]);
-    if(argc>2)chain_len=atoi(argv[2]);
-    if(argc>3)nfill=atoi(argv[3]);
+    int seed_depth = 3;
+    if (argc > 1) seed_depth = atoi(argv[1]);
 
-    fprintf(stderr,"=== walk_gen: seed_depth=%d chain_len=%d fill_passes=%d ===\n",
-            seed_depth, chain_len, nfill);
+    fprintf(stderr,"=== walk_gen: seed_depth=%d ===\n", seed_depth);
     long avail0 = get_avail_mb();
     fprintf(stderr,"Memory available: %ld MB\n", avail0);
 
-    /* Size allocations to fit in memory. Reserve 2 GB for OS + htab + sites + overhead. */
+    /* Memory budget: htab + sites + 2 sparse arrays */
     double fixed_mb = (double)HASH_SIZE*sizeof(hentry)/(1024*1024)
                     + (double)MAX_SITES*sizeof(site_t)/(1024*1024) + 2048;
     double budget_mb = (avail0 > 0 ? avail0 * 0.80 : 16000) - fixed_mb;
     if (budget_mb < 500) {
-        fprintf(stderr,"*** ABORT: only %.0f MB available after fixed allocations. Need at least 500 MB. ***\n", budget_mb);
+        fprintf(stderr,"*** ABORT: only %.0f MB available after fixed allocations. ***\n", budget_mb);
         exit(2);
     }
-    /* Budget split: 4 chain arrays take ~4*max_chains*sizeof(chain_t),
-     * 2 sparse arrays take ~2*max_nnz*sizeof(sparse_entry).
-     * Give 70% to chains, 30% to sparse. */
-    double chain_budget = budget_mb * 0.70 * 1024 * 1024;
-    double sparse_budget = budget_mb * 0.30 * 1024 * 1024;
-    max_chains = (int)(chain_budget / (4.0 * sizeof(chain_t)));
-    if (max_chains < 1000) max_chains = 1000;
-    if (max_chains > 4000000) max_chains = 4000000;
-    max_nnz = (int)(sparse_budget / (2.0 * sizeof(sparse_entry)));
+    max_nnz = (int)(budget_mb * 1024 * 1024 / (2.0 * sizeof(sparse_entry)));
     if (max_nnz < 100000) max_nnz = 100000;
     if (max_nnz > 300000000) max_nnz = 300000000;
 
-    double total_mb = 4.0*max_chains*sizeof(chain_t)/(1024*1024)
-                    + 2.0*max_nnz*sizeof(sparse_entry)/(1024*1024) + fixed_mb;
-    fprintf(stderr,"Sized for available memory:\n");
-    fprintf(stderr,"  max_chains: %d (%.0f MB each array)\n",
-            max_chains, (double)max_chains*sizeof(chain_t)/(1024*1024));
-    fprintf(stderr,"  max_nnz:    %d (%.0f MB each array)\n",
+    fprintf(stderr,"  max_nnz: %d (%.0f MB each array)\n",
             max_nnz, (double)max_nnz*sizeof(sparse_entry)/(1024*1024));
-    fprintf(stderr,"  TOTAL est:  %.0f MB\n", total_mb);
 
     init_dirac(); htab_init();
-    rchains = safe_malloc(max_chains*sizeof(chain_t), "rchains");
-    lchains = safe_malloc(max_chains*sizeof(chain_t), "lchains");
     sr_entries = safe_malloc(max_nnz*sizeof(sparse_entry), "sr_entries");
     sl_entries = safe_malloc(max_nnz*sizeof(sparse_entry), "sl_entries");
 
@@ -340,147 +357,99 @@ int main(int argc, char **argv) {
     fprintf(stderr,"\n--- Phase 1: BFS seed (depth %d) ---\n", seed_depth);
     mem_check("Phase 1", 500);
     vec3 d0[4]; init_tet(d0);
-    int oid=site_insert((vec3){0,0,0},d0);
-    int *queue=malloc(MAX_SITES*sizeof(int));
-    int qh=0,qt=0; queue[qt++]=oid;
-    int *depth=calloc(MAX_SITES,sizeof(int));
-    while(qh<qt){
-        int s=queue[qh++];
-        if(depth[s]>=seed_depth)continue;
-        for(int f=0;f<4;f++){
-            vec3 p=sites[s].pos,dd[4];memcpy(dd,sites[s].dirs,sizeof(dd));
-            helix_step(&p,dd,f);reorth(dd);
-            int old_n=nsites;
-            int nid=site_insert(p,dd);
-            if(nid>=old_n){depth[nid]=depth[s]+1;queue[qt++]=nid;}
+    site_insert((vec3){0,0,0}, d0);
+    int *queue = malloc(MAX_SITES*sizeof(int));
+    int qh=0, qt=0; queue[qt++] = 0;
+    int *depth = calloc(MAX_SITES, sizeof(int));
+    while (qh < qt) {
+        int s = queue[qh++];
+        if (depth[s] >= seed_depth) continue;
+        for (int f = 0; f < 4; f++) {
+            vec3 p = sites[s].pos, dd[4];
+            memcpy(dd, sites[s].dirs, sizeof(dd));
+            helix_step(&p, dd, f); reorth(dd);
+            int old_n = nsites;
+            int nid = site_insert(p, dd);
+            if (nid >= old_n) { depth[nid] = depth[s]+1; queue[qt++] = nid; }
         }
     }
-    free(queue);free(depth);
-    int n_seed=nsites;
-    fprintf(stderr,"Phase 1: BFS seed depth %d -> %d sites\n",seed_depth,n_seed);
+    free(queue); free(depth);
+    int n_seed = nsites;
+    fprintf(stderr,"Phase 1: BFS seed depth %d -> %d sites\n", seed_depth, n_seed);
 
-    /* ---- Phase 2: Trace long R and L chains from each seed site ---- */
-    fprintf(stderr,"\n--- Phase 2: Tracing chains (len %d) from %d seed sites ---\n", chain_len, n_seed);
+    /* ---- Phase 2: Thread unique R and L chains through seed ball ---- */
+    fprintf(stderr,"\n--- Phase 2: Threading chains through %d seed sites ---\n", n_seed);
     mem_check("Phase 2", 500);
-    for(int s=0;s<n_seed;s++){
-        if(s % 1000 == 0 && s > 0)
-            fprintf(stderr,"  Phase 2: processed %d/%d seeds, %d sites, %d R + %d L chains\n",
-                    s, n_seed, nsites, nrch, nlch);
-        if(s % 5000 == 0) mem_check("Phase 2 loop", 300);
-        if(sites[s].r_chain<0 && nrch<max_chains){
-            trace_chain(s,PAT_R,chain_len,chain_len,&rchains[nrch]);
-            assign_membership(&rchains[nrch],nrch,1);nrch++;}
-        if(sites[s].l_chain<0 && nlch<max_chains){
-            trace_chain(s,PAT_L,chain_len,chain_len,&lchains[nlch]);
-            assign_membership(&lchains[nlch],nlch,0);nlch++;}
-    }
-    fprintf(stderr,"Phase 2 done: %d sites, %d R, %d L chains\n",nsites,nrch,nlch);
-
-    /* ---- Phase 3: Alternating chirality shell growth ---- */
-    /* Sites created by R-chains need L-chains and vice versa.
-     * Each pass: trace the missing chirality through frontier sites,
-     * creating new sites. Those new sites become the next frontier. */
-    /* ---- Phase 3: Alternating chirality shell growth ---- */
-    /* Sites created by R-chains need L-chains and vice versa.
-     * Each pass: trace the missing chirality through frontier sites,
-     * creating new sites. Those new sites become the next frontier.
-     * Use short chains (chain_len/2 fwd, 0 bwd) to limit growth. */
-    int fill_len = chain_len / 2;
-    if (fill_len < 4) fill_len = 4;
-    fprintf(stderr,"\n--- Phase 3: Shell growth (max %d passes, fill_len=%d) ---\n", nfill, fill_len);
-    int shell_start = n_seed;  /* frontier begins right after seed ball */
-    for(int fill=0;fill<nfill;fill++){
-        mem_check("Shell growth", 500);
-        int snap=nsites;
-        int al=0,ar=0;
-        /* Thread L-chains through frontier sites that lack L-coverage */
-        for(int s=shell_start;s<snap;s++){
-            if(sites[s].l_chain<0 && nlch<max_chains){
-                trace_chain(s,PAT_L,fill_len,0,&lchains[nlch]);
-                assign_membership(&lchains[nlch],nlch,0);nlch++;al++;}}
-        /* Thread R-chains through frontier sites that lack R-coverage */
-        for(int s=shell_start;s<snap;s++){
-            if(sites[s].r_chain<0 && nrch<max_chains){
-                trace_chain(s,PAT_R,fill_len,0,&rchains[nrch]);
-                assign_membership(&rchains[nrch],nrch,1);nrch++;ar++;}}
-        int nb=0;for(int s=0;s<nsites;s++)if(sites[s].r_chain>=0&&sites[s].l_chain>=0)nb++;
-        fprintf(stderr,"Shell %d: +%dL +%dR, frontier [%d,%d), new sites %d, both=%d/%d (%.1f%%)\n",
-                fill,al,ar,shell_start,snap,nsites-snap,nb,nsites,100.0*nb/nsites);
-        shell_start = snap;  /* next pass processes newly created sites */
-        if(nsites==snap)break;  /* no new sites created */
-    }
-
-    /* ---- Phase 4: Restrict to dual-covered, extract chains ---- */
-    fprintf(stderr,"\n--- Phase 4: Restrict to dual-covered sites ---\n");
-    mem_check("Phase 4", 500);
-    g_nr=malloc(nsites*sizeof(int)); g_nl=malloc(nsites*sizeof(int));
-    int *nr_pos=malloc(nsites*sizeof(int)),*nl_pos=malloc(nsites*sizeof(int));
-    for(int s=0;s<nsites;s++){g_nr[s]=g_nl[s]=-1;nr_pos[s]=nl_pos[s]=-1;}
-
-    chain_t *out_r=safe_malloc(max_chains*sizeof(chain_t), "out_r");
-    chain_t *out_l=safe_malloc(max_chains*sizeof(chain_t), "out_l");
-    int onr=0,onl=0;
-
-    for(int pass=0;pass<2;pass++){
-        int nch=pass?nlch:nrch;
-        chain_t *ch_in=pass?lchains:rchains;
-        chain_t *ch_out=pass?out_l:out_r;
-        int *on=pass?&onl:&onr;
-        int *mem=pass?g_nl:g_nr;
-        int *mpos=pass?nl_pos:nr_pos;
-        for(int c=0;c<nch;c++){
-            chain_t seg;seg.len=0;
-            for(int i=0;i<ch_in[c].len;i++){
-                int s=ch_in[c].ids[i];
-                int dual=(sites[s].r_chain>=0&&sites[s].l_chain>=0);
-                if(dual){seg.ids[seg.len]=s;seg.faces[seg.len]=ch_in[c].faces[i];seg.len++;}
-                else{if(seg.len>=2&&*on<max_chains){
-                    memcpy(&ch_out[*on],&seg,sizeof(chain_t));
-                    for(int j=0;j<seg.len;j++)if(mem[seg.ids[j]]==-1){mem[seg.ids[j]]=*on;mpos[seg.ids[j]]=j;}
-                    (*on)++;}seg.len=0;}}
-            if(seg.len>=2&&*on<max_chains){
-                memcpy(&ch_out[*on],&seg,sizeof(chain_t));
-                for(int j=0;j<seg.len;j++)if(mem[seg.ids[j]]==-1){mem[seg.ids[j]]=*on;mpos[seg.ids[j]]=j;}
-                (*on)++;}
+    int nrch=0, nlch=0, total_r_linked=0, total_l_linked=0;
+    for (int s = 0; s < n_seed; s++) {
+        if (s % 10000 == 0 && s > 0)
+            fprintf(stderr,"  Phase 2: processed %d/%d seeds, %d R + %d L chains\n",
+                    s, n_seed, nrch, nlch);
+        /* Thread R-chain if this site isn't already on one */
+        if (sites[s].r_face < 0) {
+            int linked = thread_chain(s, PAT_R, 1);
+            if (linked >= 2) { nrch++; total_r_linked += linked; }
+        }
+        /* Thread L-chain if this site isn't already on one */
+        if (sites[s].l_face < 0) {
+            int linked = thread_chain(s, PAT_L, 0);
+            if (linked >= 2) { nlch++; total_l_linked += linked; }
         }
     }
-    /* Update membership */
-    for(int s=0;s<nsites;s++){
-        sites[s].r_chain=g_nr[s];sites[s].r_pos=nr_pos[s];
-        sites[s].l_chain=g_nl[s];sites[s].l_pos=nl_pos[s];}
-    int nfinal=0;
-    for(int s=0;s<nsites;s++)if(g_nr[s]>=0&&g_nl[s]>=0)nfinal++;
-    fprintf(stderr,"\nRestricted: %d R, %d L, %d dual sites\n",onr,onl,nfinal);
+    int nR=0, nL=0, nBoth=0;
+    for (int s = 0; s < n_seed; s++) {
+        if (sites[s].r_face >= 0) nR++;
+        if (sites[s].l_face >= 0) nL++;
+        if (sites[s].r_face >= 0 && sites[s].l_face >= 0) nBoth++;
+    }
+    fprintf(stderr,"Phase 2 done: %d R-chains (%d sites), %d L-chains (%d sites)\n",
+            nrch, total_r_linked, nlch, total_l_linked);
+    fprintf(stderr,"Coverage: R=%d L=%d both=%d/%d (%.1f%%)\n",
+            nR, nL, nBoth, n_seed, 100.0*nBoth/n_seed);
 
-    /* ---- Phase 5: Build stitched operators ---- */
-    fprintf(stderr,"\n--- Phase 5: Build stitched shift operators ---\n");
-    mem_check("Phase 5", 300);
+    /* ---- Phase 3: Build shift operators ---- */
+    fprintf(stderr,"\n--- Phase 3: Build open-boundary shift operators ---\n");
+    mem_check("Phase 3", 300);
     fprintf(stderr,"Building S_R...\n");
-    build_stitched(out_r,onr,1,sr_entries,&sr_nnz);
-    fprintf(stderr,"S_R: %d nnz\n",sr_nnz);
+    build_shift(1, sr_entries, &sr_nnz);
+    fprintf(stderr,"S_R: %d nnz\n", sr_nnz);
     fprintf(stderr,"Building S_L...\n");
-    build_stitched(out_l,onl,0,sl_entries,&sl_nnz);
-    fprintf(stderr,"S_L: %d nnz\n",sl_nnz);
+    build_shift(0, sl_entries, &sl_nnz);
+    fprintf(stderr,"S_L: %d nnz\n", sl_nnz);
 
     /* ---- Output ---- */
-    int header[4]={nsites,nfinal,sr_nnz,sl_nnz};
-    fwrite(header,sizeof(int),4,stdout);
-    for(int s=0;s<nsites;s++){double x[3]={sites[s].pos.x,sites[s].pos.y,sites[s].pos.z};fwrite(x,sizeof(double),3,stdout);}
-    for(int s=0;s<nsites;s++){int m[4]={g_nr[s],nr_pos[s],g_nl[s],nl_pos[s]};fwrite(m,sizeof(int),4,stdout);}
-    /* Direction vectors (4 directions × 3 components per site) and face indices */
-    for(int s=0;s<nsites;s++){
-        for(int a=0;a<4;a++){
-            double d[3]={sites[s].dirs[a].x,sites[s].dirs[a].y,sites[s].dirs[a].z};
-            fwrite(d,sizeof(double),3,stdout);
+    int header[4] = {nsites, nBoth, sr_nnz, sl_nnz};
+    fwrite(header, sizeof(int), 4, stdout);
+    for (int s=0;s<nsites;s++) {
+        double x[3] = {sites[s].pos.x, sites[s].pos.y, sites[s].pos.z};
+        fwrite(x, sizeof(double), 3, stdout);
+    }
+    /* Write next/prev links as membership data (same 4-int slot per site) */
+    for (int s=0;s<nsites;s++) {
+        int m[4] = {sites[s].r_next, sites[s].r_prev, sites[s].l_next, sites[s].l_prev};
+        fwrite(m, sizeof(int), 4, stdout);
+    }
+    /* Direction vectors */
+    for (int s=0;s<nsites;s++) {
+        for (int a=0;a<4;a++) {
+            double d[3] = {sites[s].dirs[a].x, sites[s].dirs[a].y, sites[s].dirs[a].z};
+            fwrite(d, sizeof(double), 3, stdout);
         }
     }
-    for(int s=0;s<nsites;s++){int f[2]={sites[s].r_face,sites[s].l_face};fwrite(f,sizeof(int),2,stdout);}
-    for(int i=0;i<sr_nnz;i++){int rc[2]={sr_entries[i].row,sr_entries[i].col};fwrite(rc,sizeof(int),2,stdout);}
-    for(int i=0;i<sr_nnz;i++){double v[2]={sr_entries[i].re,sr_entries[i].im};fwrite(v,sizeof(double),2,stdout);}
-    for(int i=0;i<sl_nnz;i++){int rc[2]={sl_entries[i].row,sl_entries[i].col};fwrite(rc,sizeof(int),2,stdout);}
-    for(int i=0;i<sl_nnz;i++){double v[2]={sl_entries[i].re,sl_entries[i].im};fwrite(v,sizeof(double),2,stdout);}
+    /* Face indices */
+    for (int s=0;s<nsites;s++) {
+        int f[2] = {sites[s].r_face, sites[s].l_face};
+        fwrite(f, sizeof(int), 2, stdout);
+    }
+    /* Sparse matrices */
+    for (int i=0;i<sr_nnz;i++) { int rc[2]={sr_entries[i].row,sr_entries[i].col}; fwrite(rc,sizeof(int),2,stdout); }
+    for (int i=0;i<sr_nnz;i++) { double v[2]={sr_entries[i].re,sr_entries[i].im}; fwrite(v,sizeof(double),2,stdout); }
+    for (int i=0;i<sl_nnz;i++) { int rc[2]={sl_entries[i].row,sl_entries[i].col}; fwrite(rc,sizeof(int),2,stdout); }
+    for (int i=0;i<sl_nnz;i++) { double v[2]={sl_entries[i].re,sl_entries[i].im}; fwrite(v,sizeof(double),2,stdout); }
 
-    free(htab);free(sites);free(rchains);free(lchains);free(out_r);free(out_l);
-    free(sr_entries);free(sl_entries);free(g_nr);free(g_nl);free(nr_pos);free(nl_pos);
+    fprintf(stderr,"\nOutput: %d sites, R=%d L=%d both=%d, nnz_R=%d nnz_L=%d\n",
+            nsites, nR, nL, nBoth, sr_nnz, sl_nnz);
+
+    free(htab); free(sites); free(sr_entries); free(sl_entries);
     return 0;
 }
