@@ -238,29 +238,58 @@ int main(int argc, char **argv) {
     printf("# theta=%.4f sigma=%.1f n_steps=%d coin=%d\n", theta, sigma, n_steps, g_coin_type);
     printf("# t norm x_mean x2 active_width\n");
 
+    /* Track mean position for centered-coordinate computation */
+    double x_mean_est = 0.0;  /* updated each step */
+
     for (int t = 0; t <= n_steps; t++) {
-        /* Compute observables over active region.
-         * Use long double accumulators for precision at large sigma.
-         * Compute variance directly: var = <(x-<x>)^2> to avoid
-         * catastrophic cancellation in <x^2> - <x>^2. */
-        long double total_prob = 0, mx = 0, mx2 = 0;
+        /* Compute observables using three precision techniques:
+         * 1. long double accumulators
+         * 2. Centered coordinates: compute <(x-x_mean)^2> not <x^2>
+         * 3. Kahan compensated summation for the inner loops */
         int alo = active_lo, ahi = active_hi;
-        #pragma omp parallel for reduction(+:total_prob,mx,mx2)
+
+        /* First pass: compute total_prob and mean */
+        long double total_prob = 0, mx = 0;
+        long double tp_comp = 0, mx_comp = 0;  /* Kahan compensation */
         for (int i = alo; i < ahi; i++) {
             double p = 0;
             for (int a = 0; a < 4; a++)
                 p += creal(psi[4*i+a]*conj(psi[4*i+a]));
-            total_prob += p;
-            long double x = (long double)(i - center);
-            mx += p * x;
-            mx2 += p * x * x;
+            /* Kahan sum for total_prob */
+            long double y = p - tp_comp;
+            long double tt = total_prob + y;
+            tp_comp = (tt - total_prob) - y;
+            total_prob = tt;
+            /* Kahan sum for mx */
+            long double xval = (long double)(i - center);
+            y = p * xval - mx_comp;
+            tt = mx + y;
+            mx_comp = (tt - mx) - y;
+            mx = tt;
         }
         double pnorm = sqrt((double)total_prob);
-        double mx_d = (double)(mx / total_prob);
-        double mx2_d = (double)(mx2 / total_prob);
+        long double x_mean = mx / total_prob;
+
+        /* Second pass: compute variance using centered coordinates.
+         * var = <(x - x_mean)^2> avoids catastrophic cancellation. */
+        long double var = 0, var_comp = 0;
+        #pragma omp parallel for reduction(+:var)
+        for (int i = alo; i < ahi; i++) {
+            double p = 0;
+            for (int a = 0; a < 4; a++)
+                p += creal(psi[4*i+a]*conj(psi[4*i+a]));
+            long double dx = (long double)(i - center) - x_mean;
+            var += p * dx * dx;
+        }
+        var /= total_prob;
+
+        /* x2 = var + x_mean^2 (reconstruct absolute <x^2> for output) */
+        double mx_d = (double)x_mean;
+        double mx2_d = (double)(var + x_mean * x_mean);
+        x_mean_est = mx_d;
 
         if (t % 10 == 0 || t <= 5)
-            printf("%d %.8f %.4f %.4f %d\n", t, pnorm, mx_d, mx2_d, active_hi-active_lo);
+            printf("%d %.8f %.6f %.6f %d\n", t, pnorm, mx_d, mx2_d, active_hi-active_lo);
 
         if (t < n_steps) {
             /* Step 1: Apply coin(s) — embarrassingly parallel */
