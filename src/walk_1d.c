@@ -187,7 +187,7 @@ int main(int argc, char **argv) {
             }
         }
         fprintf(stderr, "Coin: beta\n");
-    } else {
+    } else if (coin_type == 1) {
         /* e·α coin: C = cos(θ)I - i sin(θ)(e·α) (position-dependent) */
         for (int i = 0; i < N; i++) {
             double *d = &dirs[i][face[i]].x;
@@ -197,6 +197,46 @@ int main(int argc, char **argv) {
             }
         }
         fprintf(stderr, "Coin: e.alpha\n");
+    } else if (coin_type == 2) {
+        /* γ₅ coin: C = cos(θ)I - i sin(θ)γ₅ */
+        double complex g5[4][4] = {{0}};
+        g5[0][2] = -1; g5[1][3] = -1; g5[2][0] = -1; g5[3][1] = -1;
+        for (int i = 0; i < N; i++) {
+            for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
+                coin[i][a][b] = ct*(a==b ? 1 : 0) - I*st*g5[a][b];
+            }
+        }
+        fprintf(stderr, "Coin: gamma5\n");
+    } else {
+        /* f·α coin (parity): C = cos(θ)I - i sin(θ)(f·α)
+         * where f is perpendicular to the local face direction e.
+         * This gives {Q, tau} = 0 (Q anticommutes with tau),
+         * making Q the parity operator in the Mlodinow-Brun sense. */
+        for (int i = 0; i < N; i++) {
+            vec3 e = dirs[i][face[i]];
+            double en = v3norm(e);
+            vec3 ehat = v3scale(e, 1.0/en);
+            /* f = cross(e, z) / |cross(e, z)|, fallback to cross(e, y) */
+            vec3 f;
+            f.x = ehat.y*0 - ehat.z*0;  /* cross with (0,0,1) */
+            f.y = ehat.z*1 - ehat.x*0;
+            f.z = ehat.x*0 - ehat.y*1;
+            /* Simplified: cross(ehat, (0,0,1)) = (ehat.y, -ehat.x, 0) */
+            f.x = ehat.y; f.y = -ehat.x; f.z = 0;
+            double fn = v3norm(f);
+            if (fn < 1e-10) {
+                /* e parallel to z, use cross(e, (0,1,0)) = (-ehat.z, 0, ehat.x) */
+                f.x = -ehat.z; f.y = 0; f.z = ehat.x;
+                fn = v3norm(f);
+            }
+            f = v3scale(f, 1.0/fn);
+            double fd[3] = {f.x, f.y, f.z};
+            for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
+                double complex fa = fd[0]*ALPHA[0][a][b] + fd[1]*ALPHA[1][a][b] + fd[2]*ALPHA[2][a][b];
+                coin[i][a][b] = ct*(a==b ? 1 : 0) - I*st*fa;
+            }
+        }
+        fprintf(stderr, "Coin: f.alpha (parity, f perp e)\n");
     }
 
     fprintf(stderr, "Chain built. Displacement from site 0 to %d: %.2f\n",
