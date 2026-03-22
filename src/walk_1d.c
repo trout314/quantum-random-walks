@@ -176,8 +176,10 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Precompute coin at each site */
+    /* Precompute coin(s) at each site */
     c4x4 *coin = malloc(N * sizeof(c4x4));
+    c4x4 *coin2 = calloc(N, sizeof(c4x4)); /* second coin for dual parity */
+    int use_coin2 = 0;
     if (coin_type == 0) {
         /* β coin: C = cos(θ)I - i sin(θ)β (position-independent) */
         double beta_diag[4] = {1, 1, -1, -1};
@@ -208,35 +210,46 @@ int main(int argc, char **argv) {
         }
         fprintf(stderr, "Coin: gamma5\n");
     } else {
-        /* f·α coin (parity): C = cos(θ)I - i sin(θ)(f·α)
-         * where f is perpendicular to the local face direction e.
-         * This gives {Q, tau} = 0 (Q anticommutes with tau),
-         * making Q the parity operator in the Mlodinow-Brun sense. */
+        /* f·α coin (parity): C₁ = cos(θ)I - i sin(θ)(f₁·α)
+         *                     C₂ = cos(θ)I - i sin(θ)(f₂·α)
+         * where f₁, f₂ are both perpendicular to e and to each other.
+         * Both anticommute with tau. Using both covers the full
+         * perpendicular plane, eliminating the massless mode. */
         for (int i = 0; i < N; i++) {
             vec3 e = dirs[i][face[i]];
             double en = v3norm(e);
             vec3 ehat = v3scale(e, 1.0/en);
-            /* f = cross(e, z) / |cross(e, z)|, fallback to cross(e, y) */
-            vec3 f;
-            f.x = ehat.y*0 - ehat.z*0;  /* cross with (0,0,1) */
-            f.y = ehat.z*1 - ehat.x*0;
-            f.z = ehat.x*0 - ehat.y*1;
-            /* Simplified: cross(ehat, (0,0,1)) = (ehat.y, -ehat.x, 0) */
-            f.x = ehat.y; f.y = -ehat.x; f.z = 0;
-            double fn = v3norm(f);
+            /* f1 = cross(ehat, z), fallback to cross(ehat, y) */
+            vec3 f1;
+            f1.x = ehat.y; f1.y = -ehat.x; f1.z = 0;
+            double fn = v3norm(f1);
             if (fn < 1e-10) {
-                /* e parallel to z, use cross(e, (0,1,0)) = (-ehat.z, 0, ehat.x) */
-                f.x = -ehat.z; f.y = 0; f.z = ehat.x;
-                fn = v3norm(f);
+                f1.x = -ehat.z; f1.y = 0; f1.z = ehat.x;
+                fn = v3norm(f1);
             }
-            f = v3scale(f, 1.0/fn);
-            double fd[3] = {f.x, f.y, f.z};
+            f1 = v3scale(f1, 1.0/fn);
+            /* f2 = cross(ehat, f1) — perpendicular to both e and f1 */
+            vec3 f2;
+            f2.x = ehat.y*f1.z - ehat.z*f1.y;
+            f2.y = ehat.z*f1.x - ehat.x*f1.z;
+            f2.z = ehat.x*f1.y - ehat.y*f1.x;
+            fn = v3norm(f2);
+            f2 = v3scale(f2, 1.0/fn);
+            double fd1[3] = {f1.x, f1.y, f1.z};
+            double fd2[3] = {f2.x, f2.y, f2.z};
+            /* coin = C₁ (using f₁) */
             for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
-                double complex fa = fd[0]*ALPHA[0][a][b] + fd[1]*ALPHA[1][a][b] + fd[2]*ALPHA[2][a][b];
+                double complex fa = fd1[0]*ALPHA[0][a][b] + fd1[1]*ALPHA[1][a][b] + fd1[2]*ALPHA[2][a][b];
                 coin[i][a][b] = ct*(a==b ? 1 : 0) - I*st*fa;
             }
+            /* coin2 = C₂ (using f₂) */
+            for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
+                double complex fa = fd2[0]*ALPHA[0][a][b] + fd2[1]*ALPHA[1][a][b] + fd2[2]*ALPHA[2][a][b];
+                coin2[i][a][b] = ct*(a==b ? 1 : 0) - I*st*fa;
+            }
         }
-        fprintf(stderr, "Coin: f.alpha (parity, f perp e)\n");
+        use_coin2 = 1;
+        fprintf(stderr, "Coin: f.alpha (dual parity, f1,f2 perp e)\n");
     }
 
     fprintf(stderr, "Chain built. Displacement from site 0 to %d: %.2f\n",
@@ -327,7 +340,7 @@ int main(int argc, char **argv) {
         if (t < n_steps) {
             /* W = S · C: apply coin then shift */
 
-            /* Step 1: Apply coin */
+            /* Step 1: Apply coin (and coin2 if dual parity) */
             for (int i = 0; i < N; i++) {
                 double complex out[4];
                 for (int a = 0; a < 4; a++) {
@@ -337,6 +350,18 @@ int main(int argc, char **argv) {
                     out[a] = s;
                 }
                 for (int a = 0; a < 4; a++) psi[4*i+a] = out[a];
+            }
+            if (use_coin2) {
+                for (int i = 0; i < N; i++) {
+                    double complex out[4];
+                    for (int a = 0; a < 4; a++) {
+                        double complex s = 0;
+                        for (int b = 0; b < 4; b++)
+                            s += coin2[i][a][b] * psi[4*i+b];
+                        out[a] = s;
+                    }
+                    for (int a = 0; a < 4; a++) psi[4*i+a] = out[a];
+                }
             }
 
             /* Step 2: Apply shift (open boundaries)
@@ -386,6 +411,6 @@ int main(int argc, char **argv) {
     free(psi); free(tmp_psi);
     free(pos); free(dirs); free(face);
     free(tau_p); free(tau_m); free(Pp_p); free(Pm_p); free(Pp_m); free(Pm_m);
-    free(fwd_p); free(bwd_p); free(fwd_m); free(bwd_m); free(coin);
+    free(fwd_p); free(bwd_p); free(fwd_m); free(bwd_m); free(coin); free(coin2);
     return 0;
 }
