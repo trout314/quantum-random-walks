@@ -132,33 +132,47 @@ int main(int argc, char **argv) {
         face[i] = PAT[i % 4];
     }
 
-    /* Precompute tau and projectors at each site. */
-    c4x4 *tau = malloc(N * sizeof(c4x4));
-    c4x4 *Pp = malloc(N * sizeof(c4x4));
-    c4x4 *Pm = malloc(N * sizeof(c4x4));
+    /* Precompute tau, projectors, and shift blocks for BOTH +nu and -nu.
+     * nu_type=0: use +nu only
+     * nu_type=1: alternate between +nu and -nu at each STEP (not each site)
+     * nu_type=2: (reserved for site-alternating, not currently used) */
+    c4x4 *tau_p = malloc(N * sizeof(c4x4));  /* +nu */
+    c4x4 *tau_m = malloc(N * sizeof(c4x4));  /* -nu */
+    c4x4 *Pp_p = malloc(N * sizeof(c4x4));
+    c4x4 *Pm_p = malloc(N * sizeof(c4x4));
+    c4x4 *Pp_m = malloc(N * sizeof(c4x4));
+    c4x4 *Pm_m = malloc(N * sizeof(c4x4));
     for (int i = 0; i < N; i++) {
-        double nu_sign = (nu_type == 1 && i % 2 == 1) ? -1.0 : 1.0;
-        make_tau_s(tau[i], dirs[i][face[i]], nu_sign);
-        c4_eye(Pp[i]); c4_eye(Pm[i]);
+        make_tau_s(tau_p[i], dirs[i][face[i]], +1.0);
+        make_tau_s(tau_m[i], dirs[i][face[i]], -1.0);
+        c4_eye(Pp_p[i]); c4_eye(Pm_p[i]);
+        c4_eye(Pp_m[i]); c4_eye(Pm_m[i]);
         for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
-            Pp[i][a][b] = 0.5 * (Pp[i][a][b] + tau[i][a][b]);
-            Pm[i][a][b] = 0.5 * (Pm[i][a][b] - tau[i][a][b]);
+            Pp_p[i][a][b] = 0.5 * (Pp_p[i][a][b] + tau_p[i][a][b]);
+            Pm_p[i][a][b] = 0.5 * (Pm_p[i][a][b] - tau_p[i][a][b]);
+            Pp_m[i][a][b] = 0.5 * (Pp_m[i][a][b] + tau_m[i][a][b]);
+            Pm_m[i][a][b] = 0.5 * (Pm_m[i][a][b] - tau_m[i][a][b]);
         }
     }
+    /* Point to the +nu versions as default (for IC computation etc.) */
+    c4x4 *Pp = Pp_p, *Pm = Pm_p;
 
-    /* Precompute frame transport and shift blocks:
-     * fwd_block[i] = U(tau[i]->tau[i+1]) * Pp[i]  (sends P+ from i to i+1)
-     * bwd_block[i] = U(tau[i]->tau[i-1]) * Pm[i]  (sends P- from i to i-1) */
-    c4x4 *fwd_block = malloc(N * sizeof(c4x4));
-    c4x4 *bwd_block = malloc(N * sizeof(c4x4));
+    c4x4 *fwd_p = malloc(N * sizeof(c4x4));
+    c4x4 *bwd_p = malloc(N * sizeof(c4x4));
+    c4x4 *fwd_m = malloc(N * sizeof(c4x4));
+    c4x4 *bwd_m = malloc(N * sizeof(c4x4));
     for (int i = 0; i < N; i++) {
         if (i < N-1) {
-            c4x4 U; frame_transport(tau[i], tau[i+1], U);
-            c4_mul(fwd_block[i], U, Pp[i]);
+            c4x4 U; frame_transport(tau_p[i], tau_p[i+1], U);
+            c4_mul(fwd_p[i], U, Pp_p[i]);
+            frame_transport(tau_m[i], tau_m[i+1], U);
+            c4_mul(fwd_m[i], U, Pp_m[i]);
         }
         if (i > 0) {
-            c4x4 U; frame_transport(tau[i], tau[i-1], U);
-            c4_mul(bwd_block[i], U, Pm[i]);
+            c4x4 U; frame_transport(tau_p[i], tau_p[i-1], U);
+            c4_mul(bwd_p[i], U, Pm_p[i]);
+            frame_transport(tau_m[i], tau_m[i-1], U);
+            c4_mul(bwd_m[i], U, Pm_m[i]);
         }
     }
 
@@ -285,20 +299,22 @@ int main(int argc, char **argv) {
                 for (int a = 0; a < 4; a++) psi[4*i+a] = out[a];
             }
 
-            /* Step 2: Apply shift (open boundaries) */
+            /* Step 2: Apply shift (open boundaries)
+             * nu_type=0: always use +nu blocks
+             * nu_type=1: alternate +nu/-nu between steps */
+            c4x4 *fwd = (nu_type == 1 && t % 2 == 1) ? fwd_m : fwd_p;
+            c4x4 *bwd = (nu_type == 1 && t % 2 == 1) ? bwd_m : bwd_p;
             memset(tmp_psi, 0, 4*N*sizeof(double complex));
             for (int i = 0; i < N; i++) {
-                /* P+ -> forward (i+1) */
                 if (i < N-1) {
                     for (int a = 0; a < 4; a++)
                         for (int b = 0; b < 4; b++)
-                            tmp_psi[4*(i+1)+a] += fwd_block[i][a][b] * psi[4*i+b];
+                            tmp_psi[4*(i+1)+a] += fwd[i][a][b] * psi[4*i+b];
                 }
-                /* P- -> backward (i-1) */
                 if (i > 0) {
                     for (int a = 0; a < 4; a++)
                         for (int b = 0; b < 4; b++)
-                            tmp_psi[4*(i-1)+a] += bwd_block[i][a][b] * psi[4*i+b];
+                            tmp_psi[4*(i-1)+a] += bwd[i][a][b] * psi[4*i+b];
                 }
             }
             memcpy(psi, tmp_psi, 4*N*sizeof(double complex));
@@ -327,7 +343,7 @@ int main(int argc, char **argv) {
 
     free(psi); free(tmp_psi);
     free(pos); free(dirs); free(face);
-    free(tau); free(Pp); free(Pm);
-    free(fwd_block); free(bwd_block); free(coin);
+    free(tau_p); free(tau_m); free(Pp_p); free(Pm_p); free(Pp_m); free(Pm_m);
+    free(fwd_p); free(bwd_p); free(fwd_m); free(bwd_m); free(coin);
     return 0;
 }
