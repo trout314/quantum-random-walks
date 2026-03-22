@@ -94,7 +94,7 @@ static int face_idx[MAX_N];
 static c4x4 tau_arr[MAX_N];
 static c4x4 Pp[MAX_N], Pm[MAX_N];
 static c4x4 fwd_block[MAX_N], bwd_block[MAX_N];
-static c4x4 coin1[MAX_N], coin2[MAX_N];
+static c4x4 coin1[MAX_N], coin2[MAX_N], coin3[MAX_N];
 
 static int built_up_to = 0;  /* chain geometry built for sites [0, built_up_to) */
 static int active_lo = 0, active_hi = 0;  /* psi is nonzero in [active_lo, active_hi) */
@@ -102,6 +102,7 @@ static int active_lo = 0, active_hi = 0;  /* psi is nonzero in [active_lo, activ
 static double g_ct, g_st;
 static int g_coin_type = 3;  /* default dual parity */
 static int g_use_coin2 = 0;
+static int g_use_coin3 = 0;  /* third coin (beta) for combined mode */
 
 /* Build chain geometry and operators for site i (and its neighbors) */
 static void ensure_site(int i) {
@@ -142,7 +143,7 @@ static void ensure_site(int i) {
         vec3 e = dirs[n][face_idx[n]];
         double en = v3norm(e);
         vec3 ehat = v3scale(e, 1.0/en);
-        if (g_coin_type == 3) {
+        if (g_coin_type == 3 || g_coin_type == 4) {
             /* dual parity: f1,f2 perp e */
             vec3 f1; f1.x=ehat.y; f1.y=-ehat.x; f1.z=0;
             double fn=v3norm(f1);
@@ -161,6 +162,13 @@ static void ensure_site(int i) {
                 coin2[n][a][b]=g_ct*(a==b?1:0)-I*g_st*fa2;
             }
             g_use_coin2 = 1;
+            if (g_coin_type == 4) {
+                /* Also add beta coin as coin3 */
+                double beta_diag[4]={1,1,-1,-1};
+                for(int a=0;a<4;a++)for(int b=0;b<4;b++)
+                    coin3[n][a][b]=(a==b)?(g_ct-I*g_st*beta_diag[a]):0;
+                g_use_coin3 = 1;
+            }
         } else if (g_coin_type == 1) {
             /* e.alpha coin */
             double dd[3]={e.x,e.y,e.z};
@@ -310,6 +318,18 @@ int main(int argc, char **argv) {
                     for (int a=0;a<4;a++){
                         double complex s=0;
                         for(int b=0;b<4;b++) s+=coin2[i][a][b]*psi[4*i+b];
+                        out[a]=s;
+                    }
+                    for(int a=0;a<4;a++) psi[4*i+a]=out[a];
+                }
+            }
+            if (g_use_coin3) {
+                #pragma omp parallel for
+                for (int i = alo; i < ahi; i++) {
+                    double complex out[4];
+                    for (int a=0;a<4;a++){
+                        double complex s=0;
+                        for(int b=0;b<4;b++) s+=coin3[i][a][b]*psi[4*i+b];
                         out[a]=s;
                     }
                     for(int a=0;a<4;a++) psi[4*i+a]=out[a];
