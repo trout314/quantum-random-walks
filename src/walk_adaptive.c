@@ -466,27 +466,64 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
     memcpy(psi, tmp, 4 * (size_t)nsites * sizeof(double complex));
 }
 
-/* Apply coin operator (in-place via tmp) */
+/* Apply one coin pass using direction vector d[3] */
+static void apply_coin_dir(double *d, int n, double ct, double st) {
+    double complex out[4];
+    for (int a = 0; a < 4; a++) {
+        double complex s = 0;
+        for (int b = 0; b < 4; b++) {
+            double complex ea = d[0]*ALPHA[0][a][b] + d[1]*ALPHA[1][a][b] + d[2]*ALPHA[2][a][b];
+            double complex Cab = ct*(a==b?1:0) - I*st*ea;
+            s += Cab * psi[4*n+b];
+        }
+        out[a] = s;
+    }
+    for (int a = 0; a < 4; a++) psi[4*n+a] = out[a];
+}
+
+/* Apply coin operator (in-place).
+ * coin_type: 0 = e·α (original), 1 = dual parity f·α (f₁,f₂ ⊥ e) */
+static int g_coin_type = 1;  /* default to dual parity */
+
 static void apply_coin(int is_r, double ct, double st) {
     int ns = nsites;
     for (int n = 0; n < ns; n++) {
         int face = is_r ? sites[n].r_face : sites[n].l_face;
-        double complex out[4];
-        if (face >= 0) {
-            double *d = &sites[n].dirs[face].x;
-            for (int a = 0; a < 4; a++) {
-                double complex s = 0;
-                for (int b = 0; b < 4; b++) {
-                    double complex ea = d[0]*ALPHA[0][a][b] + d[1]*ALPHA[1][a][b] + d[2]*ALPHA[2][a][b];
-                    double complex Cab = ct*(a==b?1:0) - I*st*ea;
-                    s += Cab * psi[4*n+b];
-                }
-                out[a] = s;
-            }
+        if (face < 0) continue;  /* no chain = identity */
+
+        vec3 e = sites[n].dirs[face];
+        double en = v3norm(e);
+        if (en < 1e-15) continue;
+        vec3 ehat = v3scale(e, 1.0/en);
+
+        if (g_coin_type == 0) {
+            /* Original e·α coin */
+            double d[3] = {e.x, e.y, e.z};
+            apply_coin_dir(d, n, ct, st);
         } else {
-            for (int a = 0; a < 4; a++) out[a] = psi[4*n+a];
+            /* Dual parity coin: f₁·α then f₂·α, both ⊥ e */
+            /* f₁ = cross(ê, ẑ), fallback to cross(ê, ŷ) */
+            vec3 f1;
+            f1.x = ehat.y; f1.y = -ehat.x; f1.z = 0;
+            double fn = v3norm(f1);
+            if (fn < 1e-10) {
+                f1.x = -ehat.z; f1.y = 0; f1.z = ehat.x;
+                fn = v3norm(f1);
+            }
+            f1 = v3scale(f1, 1.0/fn);
+            /* f₂ = cross(ê, f₁) */
+            vec3 f2;
+            f2.x = ehat.y*f1.z - ehat.z*f1.y;
+            f2.y = ehat.z*f1.x - ehat.x*f1.z;
+            f2.z = ehat.x*f1.y - ehat.y*f1.x;
+            fn = v3norm(f2);
+            f2 = v3scale(f2, 1.0/fn);
+
+            double d1[3] = {f1.x, f1.y, f1.z};
+            double d2[3] = {f2.x, f2.y, f2.z};
+            apply_coin_dir(d1, n, ct, st);
+            apply_coin_dir(d2, n, ct, st);
         }
-        for (int a = 0; a < 4; a++) psi[4*n+a] = out[a];
     }
 }
 
@@ -500,6 +537,7 @@ int main(int argc, char **argv) {
     if (argc > 3) n_steps = atoi(argv[3]);
     if (argc > 4) threshold = atof(argv[4]);
     if (argc > 5) seed_depth = atoi(argv[5]);
+    if (argc > 6) g_coin_type = atoi(argv[6]);
     double thresh2 = threshold * threshold;
     double ct = cos(theta), st = sin(theta);
 
@@ -510,8 +548,9 @@ int main(int argc, char **argv) {
         if (seed_depth < 4) seed_depth = 4;
     }
 
-    fprintf(stderr, "=== walk_adaptive: seed=%d theta=%.3f sigma=%.1f steps=%d thresh=%.1e ===\n",
-            seed_depth, theta, sigma, n_steps, threshold);
+    fprintf(stderr, "=== walk_adaptive: seed=%d theta=%.3f sigma=%.1f steps=%d thresh=%.1e coin=%s ===\n",
+            seed_depth, theta, sigma, n_steps, threshold,
+            g_coin_type==0 ? "e.alpha" : "dual_parity");
     fprintf(stderr, "Memory available: %ld MB\n", get_avail_mb());
 
     init_dirac();
