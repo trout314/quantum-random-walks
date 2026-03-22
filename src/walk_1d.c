@@ -205,6 +205,7 @@ int main(int argc, char **argv) {
     double sigma = 50.0;
     int n_steps = 500;
     int nu_type = 0;
+    double k0 = 0.0;           /* initial momentum kick */
     double amp_thresh = 1e-15;  /* extend chain when amplitude > this */
 
     if (argc > 1) theta = atof(argv[1]);
@@ -212,11 +213,12 @@ int main(int argc, char **argv) {
     if (argc > 3) n_steps = atoi(argv[3]);
     if (argc > 4) g_coin_type = atoi(argv[4]);
     if (argc > 5) nu_type = atoi(argv[5]);
+    if (argc > 6) k0 = atof(argv[6]);
 
     g_ct = cos(theta); g_st = sin(theta);
 
-    fprintf(stderr, "=== walk_1d adaptive: theta=%.3f sigma=%.1f steps=%d coin=%d ===\n",
-            theta, sigma, n_steps, g_coin_type);
+    fprintf(stderr, "=== walk_1d adaptive: theta=%.3f sigma=%.1f steps=%d coin=%d k0=%.4f ===\n",
+            theta, sigma, n_steps, g_coin_type, k0);
 
     init_dirac();
 
@@ -231,14 +233,60 @@ int main(int argc, char **argv) {
     if (hi >= MAX_N) hi = MAX_N - 1;
     ensure_site(hi);
 
-    /* Set initial condition: (1,0,0,0) Gaussian */
+    /* Set initial condition: Gaussian * e^{ik0*x} * frame-transported spinor
+     * k0=0: wavepacket at rest (spreading only)
+     * k0>0: wavepacket with momentum in the walk's eigenbasis.
+     * The spinor at each site follows the frame transport:
+     *   chi[i] = U_{i-1→i} ... U_{center→center+1} chi_0
+     * This ensures the phase e^{ik0*x} represents true momentum
+     * in the walk's frame, not just a gauge phase. */
     memset(psi, 0, sizeof(psi));
     double norm = 0;
-    for (int i = lo; i <= hi; i++) {
-        double x = (double)(i - center);
-        double w = exp(-x*x / (2*sigma*sigma));
-        psi[4*i] = w;
-        norm += w*w;
+
+    /* Build frame-transported reference spinor from center outward */
+    double complex chi_ref[4] = {1, 0, 0, 0};
+    /* Forward from center */
+    {
+        double complex chi_cur[4];
+        memcpy(chi_cur, chi_ref, sizeof(chi_cur));
+        for (int i = center; i <= hi; i++) {
+            double x = (double)(i - center);
+            double w = exp(-x*x / (2*sigma*sigma));
+            double complex phase = cexp(I * k0 * x);
+            for (int a = 0; a < 4; a++)
+                psi[4*i+a] = w * phase * chi_cur[a];
+            norm += w*w;
+            /* Frame transport to next site */
+            if (i < hi) {
+                ensure_site(i+1);
+                c4x4 U; frame_transport(tau_arr[i], tau_arr[i+1], U);
+                double complex chi_next[4] = {0};
+                for (int a = 0; a < 4; a++)
+                    for (int b = 0; b < 4; b++)
+                        chi_next[a] += U[a][b] * chi_cur[b];
+                memcpy(chi_cur, chi_next, sizeof(chi_cur));
+            }
+        }
+    }
+    /* Backward from center */
+    {
+        double complex chi_cur[4];
+        memcpy(chi_cur, chi_ref, sizeof(chi_cur));
+        for (int i = center - 1; i >= lo; i--) {
+            ensure_site(i);
+            c4x4 U; frame_transport(tau_arr[i+1], tau_arr[i], U);
+            double complex chi_next[4] = {0};
+            for (int a = 0; a < 4; a++)
+                for (int b = 0; b < 4; b++)
+                    chi_next[a] += U[a][b] * chi_cur[b];
+            memcpy(chi_cur, chi_next, sizeof(chi_cur));
+            double x = (double)(i - center);
+            double w = exp(-x*x / (2*sigma*sigma));
+            double complex phase = cexp(I * k0 * x);
+            for (int a = 0; a < 4; a++)
+                psi[4*i+a] = w * phase * chi_cur[a];
+            norm += w*w;
+        }
     }
     norm = sqrt(norm);
     for (int i = lo; i <= hi; i++)
@@ -252,7 +300,7 @@ int main(int argc, char **argv) {
             active_lo, active_hi, center, active_hi-active_lo);
 
     /* ---- Time evolution ---- */
-    printf("# theta=%.4f sigma=%.1f n_steps=%d coin=%d\n", theta, sigma, n_steps, g_coin_type);
+    printf("# theta=%.4f sigma=%.1f n_steps=%d coin=%d k0=%.6f\n", theta, sigma, n_steps, g_coin_type, k0);
     printf("# t norm x_mean x2 active_width\n");
 
     /* Track mean position for centered-coordinate computation */
