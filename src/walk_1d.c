@@ -143,7 +143,7 @@ static void ensure_site(int i) {
         vec3 e = dirs[n][face_idx[n]];
         double en = v3norm(e);
         vec3 ehat = v3scale(e, 1.0/en);
-        if (g_coin_type == 3 || g_coin_type == 4) {
+        if (g_coin_type == 3 || g_coin_type == 4 || g_coin_type == 5) {
             /* dual parity: f1,f2 perp e */
             vec3 f1; f1.x=ehat.y; f1.y=-ehat.x; f1.z=0;
             double fn=v3norm(f1);
@@ -167,6 +167,15 @@ static void ensure_site(int i) {
                 double beta_diag[4]={1,1,-1,-1};
                 for(int a=0;a<4;a++)for(int b=0;b<4;b++)
                     coin3[n][a][b]=(a==b)?(g_ct-I*g_st*beta_diag[a]):0;
+                g_use_coin3 = 1;
+            }
+            if (g_coin_type == 5) {
+                /* Also add e·alpha coin as coin3 (completes the 3D basis) */
+                double de[3]={e.x,e.y,e.z};
+                for(int a=0;a<4;a++)for(int b=0;b<4;b++){
+                    double complex ea=de[0]*ALPHA[0][a][b]+de[1]*ALPHA[1][a][b]+de[2]*ALPHA[2][a][b];
+                    coin3[n][a][b]=g_ct*(a==b?1:0)-I*g_st*ea;
+                }
                 g_use_coin3 = 1;
             }
         } else if (g_coin_type == 1) {
