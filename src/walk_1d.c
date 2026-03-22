@@ -247,15 +247,25 @@ int main(int argc, char **argv) {
         mx /= total_prob;
         mx2 /= total_prob;
 
-        /* Probability at boundaries (absorbed fraction) */
+        /* Probability at boundaries */
         double edge = 0;
-        for (int i = 0; i < 10; i++) {
+        int edge_width = 20;
+        for (int i = 0; i < edge_width; i++) {
             for (int a = 0; a < 4; a++) {
                 edge += creal(psi[4*i+a]*conj(psi[4*i+a]));
                 edge += creal(psi[4*(N-1-i)+a]*conj(psi[4*(N-1-i)+a]));
             }
         }
         edge /= total_prob;
+
+        if (edge > 1e-10) {
+            fprintf(stderr, "ERROR: probability reached boundary at t=%d (edge_frac=%.2e). Increase N.\n", t, edge);
+            exit(1);
+        }
+        if (fabs(pnorm - 1.0) > 1e-6) {
+            fprintf(stderr, "ERROR: norm changed to %.10f at t=%d. Boundary absorption occurred. Increase N.\n", pnorm, t);
+            exit(1);
+        }
 
         if (t % 10 == 0 || t <= 5)
             printf("%d %.8f %.4f %.4f %.6f\n", t, pnorm, mx, mx2, edge);
