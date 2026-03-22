@@ -95,6 +95,7 @@ static c4x4 tau_arr[MAX_N];
 static c4x4 Pp[MAX_N], Pm[MAX_N];
 static c4x4 fwd_block[MAX_N], bwd_block[MAX_N];
 static c4x4 coin1[MAX_N], coin2[MAX_N], coin3[MAX_N];
+static c4x4 vmix[MAX_N];  /* post-shift P+/P- mixing operator */
 
 static int built_up_to = 0;  /* chain geometry built for sites [0, built_up_to) */
 static int active_lo = 0, active_hi = 0;  /* psi is nonzero in [active_lo, active_hi) */
@@ -102,7 +103,8 @@ static int active_lo = 0, active_hi = 0;  /* psi is nonzero in [active_lo, activ
 static double g_ct, g_st;
 static int g_coin_type = 3;  /* default dual parity */
 static int g_use_coin2 = 0;
-static int g_use_coin3 = 0;  /* third coin (beta) for combined mode */
+static int g_use_coin3 = 0;
+static double g_mix_phi = 0.0;  /* post-shift mixing angle */
 
 /* Build chain geometry and operators for site i (and its neighbors) */
 static void ensure_site(int i) {
@@ -191,6 +193,55 @@ static void ensure_site(int i) {
             for(int a=0;a<4;a++)for(int b=0;b<4;b++)
                 coin1[n][a][b]=(a==b)?(g_ct-I*g_st*beta_diag[a]):0;
         }
+        /* Post-shift mixing operator V = cos(phi)*I + i*sin(phi)*M
+         * where M swaps P+ and P- eigenspaces of tau.
+         * M is built from the eigenvectors of tau. */
+        if (g_mix_phi != 0.0) {
+            /* Find orthonormal bases for P+ and P- via Gram-Schmidt on
+             * the columns of the projectors */
+            double complex pp_basis[4][2], pm_basis[4][2];
+            int np_found=0, nm_found=0;
+            for (int col=0; col<4 && (np_found<2||nm_found<2); col++) {
+                if (np_found < 2) {
+                    double complex v[4];
+                    for(int a=0;a<4;a++) v[a]=Pp[n][a][col];
+                    for(int j=0;j<np_found;j++){
+                        double complex dot=0;
+                        for(int a=0;a<4;a++) dot+=conj(pp_basis[a][j])*v[a];
+                        for(int a=0;a<4;a++) v[a]-=dot*pp_basis[a][j];
+                    }
+                    double nm=0; for(int a=0;a<4;a++) nm+=creal(v[a]*conj(v[a]));
+                    if(nm>1e-10){double inv=1.0/sqrt(nm);
+                        for(int a=0;a<4;a++) pp_basis[a][np_found]=v[a]*inv; np_found++;}
+                }
+                if (nm_found < 2) {
+                    double complex v[4];
+                    for(int a=0;a<4;a++) v[a]=Pm[n][a][col];
+                    for(int j=0;j<nm_found;j++){
+                        double complex dot=0;
+                        for(int a=0;a<4;a++) dot+=conj(pm_basis[a][j])*v[a];
+                        for(int a=0;a<4;a++) v[a]-=dot*pm_basis[a][j];
+                    }
+                    double nm=0; for(int a=0;a<4;a++) nm+=creal(v[a]*conj(v[a]));
+                    if(nm>1e-10){double inv=1.0/sqrt(nm);
+                        for(int a=0;a<4;a++) pm_basis[a][nm_found]=v[a]*inv; nm_found++;}
+                }
+            }
+            /* M = Σ_j |pm_j><pp_j| + |pp_j><pm_j| */
+            c4x4 M; c4_zero(M);
+            for(int j=0;j<2;j++)
+                for(int a=0;a<4;a++) for(int b=0;b<4;b++){
+                    M[a][b]+=pm_basis[a][j]*conj(pp_basis[b][j]);
+                    M[a][b]+=pp_basis[a][j]*conj(pm_basis[b][j]);
+                }
+            /* V = cos(phi)*I + i*sin(phi)*M */
+            double cp=cos(g_mix_phi), sp=sin(g_mix_phi);
+            for(int a=0;a<4;a++) for(int b=0;b<4;b++)
+                vmix[n][a][b]=cp*(a==b?1:0)+I*sp*M[a][b];
+        } else {
+            c4_eye(vmix[n]);
+        }
+
         built_up_to++;
     }
 }
@@ -206,6 +257,7 @@ int main(int argc, char **argv) {
     int n_steps = 500;
     int nu_type = 0;
     double k0 = 0.0;           /* initial momentum kick */
+    double mix_phi = 0.0;      /* post-shift P+/P- mixing angle */
     double amp_thresh = 1e-15;  /* extend chain when amplitude > this */
 
     if (argc > 1) theta = atof(argv[1]);
@@ -214,6 +266,7 @@ int main(int argc, char **argv) {
     if (argc > 4) g_coin_type = atoi(argv[4]);
     if (argc > 5) nu_type = atoi(argv[5]);
     if (argc > 6) k0 = atof(argv[6]);
+    if (argc > 7) { mix_phi = atof(argv[7]); g_mix_phi = mix_phi; }
 
     g_ct = cos(theta); g_st = sin(theta);
 
@@ -420,6 +473,20 @@ int main(int argc, char **argv) {
                             s += bwd_block[i+1][a][b] * psi[4*(i+1)+b];
                     }
                     tmp_psi[4*i+a] = s;
+                }
+            }
+
+            /* Step 3: Post-shift P+/P- mixing (enables quantum interference) */
+            if (g_mix_phi != 0.0) {
+                #pragma omp parallel for
+                for (int i = zlo; i < zhi; i++) {
+                    double complex out[4];
+                    for (int a=0;a<4;a++){
+                        double complex s=0;
+                        for(int b=0;b<4;b++) s+=vmix[i][a][b]*tmp_psi[4*i+b];
+                        out[a]=s;
+                    }
+                    for(int a=0;a<4;a++) tmp_psi[4*i+a]=out[a];
                 }
             }
 
