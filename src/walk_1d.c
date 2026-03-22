@@ -94,7 +94,7 @@ int main(int argc, char **argv) {
     int n_steps = 500;
     int ic_type = 0;        /* 0=(1,0,0,0), 1=(1,0,1,0)/sqrt(2), 2=P+/P- symmetric */
     int coin_type = 0;      /* 0=beta, 1=e·alpha */
-    int nu_type = 0;        /* 0=constant +nu, 1=alternating +/-nu */
+    int nu_type = 0;        /* 0=const +nu, 1=step-alt +/-nu, 2=const -nu, 3=averaged +/-nu */
 
     if (argc > 1) N = atoi(argv[1]);
     if (argc > 2) theta = atof(argv[2]);
@@ -302,8 +302,10 @@ int main(int argc, char **argv) {
             /* Step 2: Apply shift (open boundaries)
              * nu_type=0: always use +nu blocks
              * nu_type=1: alternate +nu/-nu between steps */
-            c4x4 *fwd = (nu_type == 1 && t % 2 == 1) ? fwd_m : fwd_p;
-            c4x4 *bwd = (nu_type == 1 && t % 2 == 1) ? bwd_m : bwd_p;
+            c4x4 *fwd, *bwd;
+            if (nu_type == 2) { fwd = fwd_m; bwd = bwd_m; }
+            else if (nu_type == 1 && t % 2 == 1) { fwd = fwd_m; bwd = bwd_m; }
+            else { fwd = fwd_p; bwd = bwd_p; }
             memset(tmp_psi, 0, 4*N*sizeof(double complex));
             for (int i = 0; i < N; i++) {
                 if (i < N-1) {
