@@ -1,15 +1,11 @@
 /*
  * walk_1d.c — 1D quantum walk on a single BC helix chain.
  *
- * A long chain of sites connected by the R-helix pattern {1,3,0,2}.
- * The walk operator is W = S·C where:
- *   C = cos(θ)I - i sin(θ)(e·α)  (coin from local direction)
- *   S sends P+ forward, P- backward along the chain
- *
- * Initial state: Gaussian wavepacket centered at the middle of the chain.
+ * Adaptive: chain extends on-the-fly as the wavepacket spreads.
+ * No fixed N — allocates large arrays and tracks active region.
  *
  * Build: clang -O2 -o walk_1d src/walk_1d.c -lm
- * Usage: ./walk_1d [n_sites] [theta] [sigma] [n_steps]
+ * Usage: ./walk_1d [theta] [sigma] [n_steps] [coin_type] [nu_type]
  */
 
 #include <stdio.h>
@@ -66,14 +62,13 @@ static void init_dirac(void) {
     ALPHA[1][0][3]=-I;ALPHA[1][1][2]=I;ALPHA[1][2][1]=-I;ALPHA[1][3][0]=I;
     ALPHA[2][0][2]=1;ALPHA[2][1][3]=-1;ALPHA[2][2][0]=1;ALPHA[2][3][1]=-1;
 }
-static void make_tau_s(c4x4 tau, vec3 d, double nu_sign) {
-    double nu=nu_sign*sqrt(7.0)/4.0; c4_zero(tau);
+static void make_tau(c4x4 tau, vec3 d) {
+    double nu=sqrt(7.0)/4.0; c4_zero(tau);
     for(int i=0;i<4;i++) tau[i][i]=nu*(i<2?1.0:-1.0);
     double dd[3]={d.x,d.y,d.z};
     for(int a=0;a<3;a++)for(int i=0;i<4;i++)for(int j=0;j<4;j++)
         tau[i][j]+=0.75*dd[a]*ALPHA[a][i][j];
 }
-static void make_tau(c4x4 tau, vec3 d) { make_tau_s(tau, d, 1.0); }
 static void frame_transport(const c4x4 tf, const c4x4 tt, c4x4 U) {
     c4x4 prod; c4_mul(prod, tt, tf);
     double cos_phi = 0;
@@ -86,225 +81,167 @@ static void frame_transport(const c4x4 tf, const c4x4 tt, c4x4 U) {
             U[i][j] = scale * ((i==j ? 1.0 : 0.0) + prod[i][j]);
 }
 
+/* ========== Chain data (pre-allocated, built lazily) ========== */
+#define MAX_N 500000
+static int PAT[4] = {1, 3, 0, 2};
+
+static vec3 pos[MAX_N];
+static vec3 dirs[MAX_N][4];
+static int face_idx[MAX_N];
+static c4x4 tau_arr[MAX_N];
+static c4x4 Pp[MAX_N], Pm[MAX_N];
+static c4x4 fwd_block[MAX_N], bwd_block[MAX_N];
+static c4x4 coin1[MAX_N], coin2[MAX_N];
+
+static int built_up_to = 0;  /* chain geometry built for sites [0, built_up_to) */
+static int active_lo = 0, active_hi = 0;  /* psi is nonzero in [active_lo, active_hi) */
+
+static double g_ct, g_st;
+static int g_coin_type = 3;  /* default dual parity */
+static int g_use_coin2 = 0;
+
+/* Build chain geometry and operators for site i (and its neighbors) */
+static void ensure_site(int i) {
+    if (i < 0 || i >= MAX_N) {
+        fprintf(stderr, "FATAL: site %d out of range [0,%d)\n", i, MAX_N);
+        exit(1);
+    }
+    while (built_up_to <= i) {
+        int n = built_up_to;
+        if (n == 0) {
+            init_tet(dirs[0]);
+            pos[0] = (vec3){0,0,0};
+            face_idx[0] = PAT[0];
+        } else {
+            memcpy(dirs[n], dirs[n-1], sizeof(vec3[4]));
+            pos[n] = pos[n-1];
+            helix_step(&pos[n], dirs[n], PAT[(n-1)%4]);
+            if (n % 8 == 0) reorth(dirs[n]);
+            face_idx[n] = PAT[n%4];
+        }
+        /* tau and projectors */
+        make_tau(tau_arr[n], dirs[n][face_idx[n]]);
+        c4_eye(Pp[n]); c4_eye(Pm[n]);
+        for (int a=0;a<4;a++) for(int b=0;b<4;b++) {
+            Pp[n][a][b] = 0.5*(Pp[n][a][b]+tau_arr[n][a][b]);
+            Pm[n][a][b] = 0.5*(Pm[n][a][b]-tau_arr[n][a][b]);
+        }
+        /* shift blocks (forward: needs site n+1, defer if not built yet) */
+        /* backward: needs site n-1, available if n>0 */
+        if (n > 0) {
+            c4x4 U; frame_transport(tau_arr[n], tau_arr[n-1], U);
+            c4_mul(bwd_block[n], U, Pm[n]);
+            /* also set forward block for n-1 -> n */
+            frame_transport(tau_arr[n-1], tau_arr[n], U);
+            c4_mul(fwd_block[n-1], U, Pp[n-1]);
+        }
+        /* coins */
+        vec3 e = dirs[n][face_idx[n]];
+        double en = v3norm(e);
+        vec3 ehat = v3scale(e, 1.0/en);
+        if (g_coin_type == 3) {
+            /* dual parity: f1,f2 perp e */
+            vec3 f1; f1.x=ehat.y; f1.y=-ehat.x; f1.z=0;
+            double fn=v3norm(f1);
+            if(fn<1e-10){f1.x=-ehat.z;f1.y=0;f1.z=ehat.x;fn=v3norm(f1);}
+            f1=v3scale(f1,1.0/fn);
+            vec3 f2;
+            f2.x=ehat.y*f1.z-ehat.z*f1.y;
+            f2.y=ehat.z*f1.x-ehat.x*f1.z;
+            f2.z=ehat.x*f1.y-ehat.y*f1.x;
+            fn=v3norm(f2); f2=v3scale(f2,1.0/fn);
+            double fd1[3]={f1.x,f1.y,f1.z}, fd2[3]={f2.x,f2.y,f2.z};
+            for(int a=0;a<4;a++)for(int b=0;b<4;b++){
+                double complex fa1=fd1[0]*ALPHA[0][a][b]+fd1[1]*ALPHA[1][a][b]+fd1[2]*ALPHA[2][a][b];
+                coin1[n][a][b]=g_ct*(a==b?1:0)-I*g_st*fa1;
+                double complex fa2=fd2[0]*ALPHA[0][a][b]+fd2[1]*ALPHA[1][a][b]+fd2[2]*ALPHA[2][a][b];
+                coin2[n][a][b]=g_ct*(a==b?1:0)-I*g_st*fa2;
+            }
+            g_use_coin2 = 1;
+        } else if (g_coin_type == 1) {
+            /* e.alpha coin */
+            double dd[3]={e.x,e.y,e.z};
+            for(int a=0;a<4;a++)for(int b=0;b<4;b++){
+                double complex ea=dd[0]*ALPHA[0][a][b]+dd[1]*ALPHA[1][a][b]+dd[2]*ALPHA[2][a][b];
+                coin1[n][a][b]=g_ct*(a==b?1:0)-I*g_st*ea;
+            }
+        } else {
+            /* beta coin */
+            double beta_diag[4]={1,1,-1,-1};
+            for(int a=0;a<4;a++)for(int b=0;b<4;b++)
+                coin1[n][a][b]=(a==b)?(g_ct-I*g_st*beta_diag[a]):0;
+        }
+        built_up_to++;
+    }
+}
+
+/* ========== Spinor arrays ========== */
+static double complex psi[4*MAX_N];
+static double complex tmp_psi[4*MAX_N];
+
 /* ========== Main ========== */
 int main(int argc, char **argv) {
-    int N = 2000;           /* chain length */
     double theta = 0.5;
-    double sigma = 50.0;    /* in units of chain sites */
+    double sigma = 50.0;
     int n_steps = 500;
-    int ic_type = 0;        /* 0=(1,0,0,0), 1=(1,0,1,0)/sqrt(2), 2=P+/P- symmetric */
-    int coin_type = 0;      /* 0=beta, 1=e·alpha */
-    int nu_type = 0;        /* 0=const +nu, 1=step-alt +/-nu, 2=const -nu, 3=averaged +/-nu */
+    int nu_type = 0;
+    double amp_thresh = 1e-15;  /* extend chain when amplitude > this */
 
-    if (argc > 1) N = atoi(argv[1]);
-    if (argc > 2) theta = atof(argv[2]);
-    if (argc > 3) sigma = atof(argv[3]);
-    if (argc > 4) n_steps = atoi(argv[4]);
-    if (argc > 5) ic_type = atoi(argv[5]);
-    if (argc > 6) coin_type = atoi(argv[6]);
-    if (argc > 7) nu_type = atoi(argv[7]);
+    if (argc > 1) theta = atof(argv[1]);
+    if (argc > 2) sigma = atof(argv[2]);
+    if (argc > 3) n_steps = atoi(argv[3]);
+    if (argc > 4) g_coin_type = atoi(argv[4]);
+    if (argc > 5) nu_type = atoi(argv[5]);
 
-    double ct = cos(theta), st = sin(theta);
+    g_ct = cos(theta); g_st = sin(theta);
 
-    fprintf(stderr, "=== walk_1d: N=%d theta=%.3f sigma=%.1f steps=%d ===\n",
-            N, theta, sigma, n_steps);
+    fprintf(stderr, "=== walk_1d adaptive: theta=%.3f sigma=%.1f steps=%d coin=%d ===\n",
+            theta, sigma, n_steps, g_coin_type);
 
     init_dirac();
 
-    /* ---- Build chain ---- */
-    /* Generate N sites along the R-helix pattern {1,3,0,2} */
-    int PAT[4] = {1, 3, 0, 2};
-
-    vec3 *pos = malloc(N * sizeof(vec3));
-    vec3 (*dirs)[4] = malloc(N * sizeof(vec3[4]));
-    int *face = malloc(N * sizeof(int));  /* face index at each site */
-
-    init_tet(dirs[0]);
-    pos[0] = (vec3){0, 0, 0};
-    face[0] = PAT[0];
-
-    for (int i = 1; i < N; i++) {
-        memcpy(dirs[i], dirs[i-1], sizeof(vec3[4]));
-        pos[i] = pos[i-1];
-        int f = PAT[(i-1) % 4];
-        helix_step(&pos[i], dirs[i], f);
-        if (i % 8 == 0) reorth(dirs[i]);
-        face[i] = PAT[i % 4];
-    }
-
-    /* Precompute tau, projectors, and shift blocks for BOTH +nu and -nu.
-     * nu_type=0: use +nu only
-     * nu_type=1: alternate between +nu and -nu at each STEP (not each site)
-     * nu_type=2: (reserved for site-alternating, not currently used) */
-    c4x4 *tau_p = malloc(N * sizeof(c4x4));  /* +nu */
-    c4x4 *tau_m = malloc(N * sizeof(c4x4));  /* -nu */
-    c4x4 *Pp_p = malloc(N * sizeof(c4x4));
-    c4x4 *Pm_p = malloc(N * sizeof(c4x4));
-    c4x4 *Pp_m = malloc(N * sizeof(c4x4));
-    c4x4 *Pm_m = malloc(N * sizeof(c4x4));
-    for (int i = 0; i < N; i++) {
-        make_tau_s(tau_p[i], dirs[i][face[i]], +1.0);
-        make_tau_s(tau_m[i], dirs[i][face[i]], -1.0);
-        c4_eye(Pp_p[i]); c4_eye(Pm_p[i]);
-        c4_eye(Pp_m[i]); c4_eye(Pm_m[i]);
-        for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
-            Pp_p[i][a][b] = 0.5 * (Pp_p[i][a][b] + tau_p[i][a][b]);
-            Pm_p[i][a][b] = 0.5 * (Pm_p[i][a][b] - tau_p[i][a][b]);
-            Pp_m[i][a][b] = 0.5 * (Pp_m[i][a][b] + tau_m[i][a][b]);
-            Pm_m[i][a][b] = 0.5 * (Pm_m[i][a][b] - tau_m[i][a][b]);
-        }
-    }
-    /* Point to the +nu versions as default (for IC computation etc.) */
-    c4x4 *Pp = Pp_p, *Pm = Pm_p;
-
-    c4x4 *fwd_p = malloc(N * sizeof(c4x4));
-    c4x4 *bwd_p = malloc(N * sizeof(c4x4));
-    c4x4 *fwd_m = malloc(N * sizeof(c4x4));
-    c4x4 *bwd_m = malloc(N * sizeof(c4x4));
-    for (int i = 0; i < N; i++) {
-        if (i < N-1) {
-            c4x4 U; frame_transport(tau_p[i], tau_p[i+1], U);
-            c4_mul(fwd_p[i], U, Pp_p[i]);
-            frame_transport(tau_m[i], tau_m[i+1], U);
-            c4_mul(fwd_m[i], U, Pp_m[i]);
-        }
-        if (i > 0) {
-            c4x4 U; frame_transport(tau_p[i], tau_p[i-1], U);
-            c4_mul(bwd_p[i], U, Pm_p[i]);
-            frame_transport(tau_m[i], tau_m[i-1], U);
-            c4_mul(bwd_m[i], U, Pm_m[i]);
-        }
-    }
-
-    /* Precompute coin(s) at each site */
-    c4x4 *coin = malloc(N * sizeof(c4x4));
-    c4x4 *coin2 = calloc(N, sizeof(c4x4)); /* second coin for dual parity */
-    int use_coin2 = 0;
-    if (coin_type == 0) {
-        /* β coin: C = cos(θ)I - i sin(θ)β (position-independent) */
-        double beta_diag[4] = {1, 1, -1, -1};
-        for (int i = 0; i < N; i++) {
-            for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
-                coin[i][a][b] = (a==b) ? (ct - I*st*beta_diag[a]) : 0;
-            }
-        }
-        fprintf(stderr, "Coin: beta\n");
-    } else if (coin_type == 1) {
-        /* e·α coin: C = cos(θ)I - i sin(θ)(e·α) (position-dependent) */
-        for (int i = 0; i < N; i++) {
-            double *d = &dirs[i][face[i]].x;
-            for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
-                double complex ea = d[0]*ALPHA[0][a][b] + d[1]*ALPHA[1][a][b] + d[2]*ALPHA[2][a][b];
-                coin[i][a][b] = ct*(a==b ? 1 : 0) - I*st*ea;
-            }
-        }
-        fprintf(stderr, "Coin: e.alpha\n");
-    } else if (coin_type == 2) {
-        /* γ₅ coin: C = cos(θ)I - i sin(θ)γ₅ */
-        double complex g5[4][4] = {{0}};
-        g5[0][2] = -1; g5[1][3] = -1; g5[2][0] = -1; g5[3][1] = -1;
-        for (int i = 0; i < N; i++) {
-            for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
-                coin[i][a][b] = ct*(a==b ? 1 : 0) - I*st*g5[a][b];
-            }
-        }
-        fprintf(stderr, "Coin: gamma5\n");
-    } else {
-        /* f·α coin (parity): C₁ = cos(θ)I - i sin(θ)(f₁·α)
-         *                     C₂ = cos(θ)I - i sin(θ)(f₂·α)
-         * where f₁, f₂ are both perpendicular to e and to each other.
-         * Both anticommute with tau. Using both covers the full
-         * perpendicular plane, eliminating the massless mode. */
-        for (int i = 0; i < N; i++) {
-            vec3 e = dirs[i][face[i]];
-            double en = v3norm(e);
-            vec3 ehat = v3scale(e, 1.0/en);
-            /* f1 = cross(ehat, z), fallback to cross(ehat, y) */
-            vec3 f1;
-            f1.x = ehat.y; f1.y = -ehat.x; f1.z = 0;
-            double fn = v3norm(f1);
-            if (fn < 1e-10) {
-                f1.x = -ehat.z; f1.y = 0; f1.z = ehat.x;
-                fn = v3norm(f1);
-            }
-            f1 = v3scale(f1, 1.0/fn);
-            /* f2 = cross(ehat, f1) — perpendicular to both e and f1 */
-            vec3 f2;
-            f2.x = ehat.y*f1.z - ehat.z*f1.y;
-            f2.y = ehat.z*f1.x - ehat.x*f1.z;
-            f2.z = ehat.x*f1.y - ehat.y*f1.x;
-            fn = v3norm(f2);
-            f2 = v3scale(f2, 1.0/fn);
-            double fd1[3] = {f1.x, f1.y, f1.z};
-            double fd2[3] = {f2.x, f2.y, f2.z};
-            /* coin = C₁ (using f₁) */
-            for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
-                double complex fa = fd1[0]*ALPHA[0][a][b] + fd1[1]*ALPHA[1][a][b] + fd1[2]*ALPHA[2][a][b];
-                coin[i][a][b] = ct*(a==b ? 1 : 0) - I*st*fa;
-            }
-            /* coin2 = C₂ (using f₂) */
-            for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
-                double complex fa = fd2[0]*ALPHA[0][a][b] + fd2[1]*ALPHA[1][a][b] + fd2[2]*ALPHA[2][a][b];
-                coin2[i][a][b] = ct*(a==b ? 1 : 0) - I*st*fa;
-            }
-        }
-        use_coin2 = 1;
-        fprintf(stderr, "Coin: f.alpha (dual parity, f1,f2 perp e)\n");
-    }
-
-    fprintf(stderr, "Chain built. Displacement from site 0 to %d: %.2f\n",
-            N-1, v3norm((vec3){pos[N-1].x-pos[0].x, pos[N-1].y-pos[0].y, pos[N-1].z-pos[0].z}));
-
     /* ---- Initialize wavepacket ---- */
-    double complex *psi = calloc(4*N, sizeof(double complex));
-    double complex *tmp_psi = calloc(4*N, sizeof(double complex));
-    int center = N / 2;
+    /* Center the Gaussian at MAX_N/2 so we have room on both sides */
+    int center = MAX_N / 2;
+
+    /* Build chain out to 4*sigma on each side of center */
+    int lo = center - (int)(4*sigma) - 10;
+    int hi = center + (int)(4*sigma) + 10;
+    if (lo < 0) lo = 0;
+    if (hi >= MAX_N) hi = MAX_N - 1;
+    ensure_site(hi);
+
+    /* Set initial condition: (1,0,0,0) Gaussian */
+    memset(psi, 0, sizeof(psi));
     double norm = 0;
-    for (int i = 0; i < N; i++) {
+    for (int i = lo; i <= hi; i++) {
         double x = (double)(i - center);
         double w = exp(-x*x / (2*sigma*sigma));
-        if (ic_type == 0) {
-            psi[4*i] = w;
-        } else if (ic_type == 1) {
-            double s2inv = 1.0/sqrt(2.0);
-            psi[4*i]   = w * s2inv;
-            psi[4*i+2] = w * s2inv;
-        } else {
-            /* Symmetric P+/P- superposition */
-            double complex v_plus[4], v_minus[4];
-            for (int a = 0; a < 4; a++) v_plus[a] = Pp[i][a][0];
-            for (int a = 0; a < 4; a++) v_minus[a] = Pm[i][a][0];
-            double np2 = 0, nm2 = 0;
-            for (int a = 0; a < 4; a++) {
-                np2 += creal(v_plus[a]*conj(v_plus[a]));
-                nm2 += creal(v_minus[a]*conj(v_minus[a]));
-            }
-            double inv_np = 1.0/sqrt(np2), inv_nm = 1.0/sqrt(nm2);
-            double s2inv = 1.0/sqrt(2.0);
-            for (int a = 0; a < 4; a++)
-                psi[4*i+a] = w * s2inv * (v_plus[a]*inv_np + v_minus[a]*inv_nm);
-        }
-        for (int a = 0; a < 4; a++)
-            norm += creal(psi[4*i+a]*conj(psi[4*i+a]));
+        psi[4*i] = w;
+        norm += w*w;
     }
     norm = sqrt(norm);
-    for (int i = 0; i < 4*N; i++) psi[i] /= norm;
-    const char *ic_names[] = {"(1,0,0,0)", "(1,0,1,0)/sqrt(2)", "P+/P- symmetric"};
-    fprintf(stderr, "IC: %s, Coin: %s, Nu: %s\n",
-            ic_names[ic_type], coin_type==0?"beta":"e.alpha", nu_type==0?"const":"alt");
+    for (int i = lo; i <= hi; i++)
+        for (int a = 0; a < 4; a++)
+            psi[4*i+a] /= norm;
+
+    active_lo = lo;
+    active_hi = hi + 1;
+
+    fprintf(stderr, "Initial: active [%d, %d), center=%d, width=%d\n",
+            active_lo, active_hi, center, active_hi-active_lo);
 
     /* ---- Time evolution ---- */
-    printf("# N=%d theta=%.4f sigma=%.1f n_steps=%d\n", N, theta, sigma, n_steps);
-    printf("# t norm x_mean x2 absorbed_frac\n");
+    printf("# theta=%.4f sigma=%.1f n_steps=%d coin=%d\n", theta, sigma, n_steps, g_coin_type);
+    printf("# t norm x_mean x2 active_width\n");
 
     for (int t = 0; t <= n_steps; t++) {
-        /* Compute observables */
-        double total_prob = 0;
-        double mx = 0, mx2 = 0;
-        for (int i = 0; i < N; i++) {
+        /* Compute observables over active region */
+        double total_prob = 0, mx = 0, mx2 = 0;
+        for (int i = active_lo; i < active_hi; i++) {
             double p = 0;
             for (int a = 0; a < 4; a++)
-                p += creal(psi[4*i+a] * conj(psi[4*i+a]));
+                p += creal(psi[4*i+a]*conj(psi[4*i+a]));
             total_prob += p;
             double x = (double)(i - center);
             mx += p * x;
@@ -314,103 +251,103 @@ int main(int argc, char **argv) {
         mx /= total_prob;
         mx2 /= total_prob;
 
-        /* Probability at boundaries */
-        double edge = 0;
-        int edge_width = 20;
-        for (int i = 0; i < edge_width; i++) {
-            for (int a = 0; a < 4; a++) {
-                edge += creal(psi[4*i+a]*conj(psi[4*i+a]));
-                edge += creal(psi[4*(N-1-i)+a]*conj(psi[4*(N-1-i)+a]));
-            }
-        }
-        edge /= total_prob;
-
-        if (edge > 1e-10) {
-            fprintf(stderr, "ERROR: probability reached boundary at t=%d (edge_frac=%.2e). Increase N.\n", t, edge);
-            exit(1);
-        }
-        if (fabs(pnorm - 1.0) > 1e-6) {
-            fprintf(stderr, "ERROR: norm changed to %.10f at t=%d. Boundary absorption occurred. Increase N.\n", pnorm, t);
-            exit(1);
-        }
-
         if (t % 10 == 0 || t <= 5)
-            printf("%d %.8f %.4f %.4f %.6f\n", t, pnorm, mx, mx2, edge);
+            printf("%d %.8f %.4f %.4f %d\n", t, pnorm, mx, mx2, active_hi-active_lo);
 
         if (t < n_steps) {
-            /* W = S · C: apply coin then shift */
-
-            /* Step 1: Apply coin (and coin2 if dual parity) */
-            for (int i = 0; i < N; i++) {
+            /* Step 1: Apply coin(s) */
+            for (int i = active_lo; i < active_hi; i++) {
                 double complex out[4];
-                for (int a = 0; a < 4; a++) {
-                    double complex s = 0;
-                    for (int b = 0; b < 4; b++)
-                        s += coin[i][a][b] * psi[4*i+b];
-                    out[a] = s;
+                for (int a=0;a<4;a++){
+                    double complex s=0;
+                    for(int b=0;b<4;b++) s+=coin1[i][a][b]*psi[4*i+b];
+                    out[a]=s;
                 }
-                for (int a = 0; a < 4; a++) psi[4*i+a] = out[a];
+                for(int a=0;a<4;a++) psi[4*i+a]=out[a];
             }
-            if (use_coin2) {
-                for (int i = 0; i < N; i++) {
+            if (g_use_coin2) {
+                for (int i = active_lo; i < active_hi; i++) {
                     double complex out[4];
-                    for (int a = 0; a < 4; a++) {
-                        double complex s = 0;
-                        for (int b = 0; b < 4; b++)
-                            s += coin2[i][a][b] * psi[4*i+b];
-                        out[a] = s;
+                    for (int a=0;a<4;a++){
+                        double complex s=0;
+                        for(int b=0;b<4;b++) s+=coin2[i][a][b]*psi[4*i+b];
+                        out[a]=s;
                     }
-                    for (int a = 0; a < 4; a++) psi[4*i+a] = out[a];
+                    for(int a=0;a<4;a++) psi[4*i+a]=out[a];
                 }
             }
 
-            /* Step 2: Apply shift (open boundaries)
-             * nu_type=0: always use +nu blocks
-             * nu_type=1: alternate +nu/-nu between steps */
-            c4x4 *fwd, *bwd;
-            if (nu_type == 2) { fwd = fwd_m; bwd = bwd_m; }
-            else if (nu_type == 1 && t % 2 == 1) { fwd = fwd_m; bwd = bwd_m; }
-            else { fwd = fwd_p; bwd = bwd_p; }
-            memset(tmp_psi, 0, 4*N*sizeof(double complex));
-            for (int i = 0; i < N; i++) {
-                if (i < N-1) {
-                    for (int a = 0; a < 4; a++)
-                        for (int b = 0; b < 4; b++)
-                            tmp_psi[4*(i+1)+a] += fwd[i][a][b] * psi[4*i+b];
-                }
+            /* Step 2: Shift with adaptive extension */
+            /* Ensure neighbors exist */
+            if (active_lo > 0) ensure_site(active_lo - 1);
+            ensure_site(active_hi);  /* one beyond current end */
+
+            memset(&tmp_psi[4*active_lo], 0, 4*(active_hi-active_lo+2)*sizeof(double complex));
+            /* Also zero the neighbor slots */
+            if (active_lo > 0)
+                memset(&tmp_psi[4*(active_lo-1)], 0, 4*sizeof(double complex));
+            memset(&tmp_psi[4*active_hi], 0, 4*sizeof(double complex));
+
+            for (int i = active_lo; i < active_hi; i++) {
+                /* P+ -> forward (i+1) */
+                for (int a=0;a<4;a++)
+                    for(int b=0;b<4;b++)
+                        tmp_psi[4*(i+1)+a] += fwd_block[i][a][b]*psi[4*i+b];
+                /* P- -> backward (i-1) */
                 if (i > 0) {
-                    for (int a = 0; a < 4; a++)
-                        for (int b = 0; b < 4; b++)
-                            tmp_psi[4*(i-1)+a] += bwd[i][a][b] * psi[4*i+b];
+                    for (int a=0;a<4;a++)
+                        for(int b=0;b<4;b++)
+                            tmp_psi[4*(i-1)+a] += bwd_block[i][a][b]*psi[4*i+b];
                 }
             }
-            memcpy(psi, tmp_psi, 4*N*sizeof(double complex));
+
+            /* Update active region: extend if amplitude at edges is significant */
+            int new_lo = active_lo, new_hi = active_hi;
+
+            /* Check lower extension */
+            if (active_lo > 0) {
+                double p = 0;
+                for (int a=0;a<4;a++) p+=creal(tmp_psi[4*(active_lo-1)+a]*conj(tmp_psi[4*(active_lo-1)+a]));
+                if (p > amp_thresh) new_lo = active_lo - 1;
+            }
+            /* Check upper extension */
+            {
+                double p = 0;
+                for (int a=0;a<4;a++) p+=creal(tmp_psi[4*active_hi+a]*conj(tmp_psi[4*active_hi+a]));
+                if (p > amp_thresh) new_hi = active_hi + 1;
+            }
+
+            /* Also shrink if edges have no amplitude (optional, saves work) */
+            /* Skip for now — the active region only grows */
+
+            active_lo = new_lo;
+            active_hi = new_hi;
+
+            /* Copy tmp to psi for active region */
+            memcpy(&psi[4*active_lo], &tmp_psi[4*active_lo],
+                   4*(active_hi-active_lo)*sizeof(double complex));
         }
     }
 
-    /* Output probability density at final time for plotting */
+    /* Output density */
     FILE *pf = fopen("/tmp/walk_1d_density.dat", "w");
     if (pf) {
         double total = 0;
-        for (int i = 0; i < N; i++)
+        for (int i = active_lo; i < active_hi; i++)
             for (int a = 0; a < 4; a++)
                 total += creal(psi[4*i+a]*conj(psi[4*i+a]));
         fprintf(pf, "# site position prob\n");
-        for (int i = 0; i < N; i++) {
+        for (int i = active_lo; i < active_hi; i++) {
             double p = 0;
             for (int a = 0; a < 4; a++)
                 p += creal(psi[4*i+a]*conj(psi[4*i+a]));
             fprintf(pf, "%d %.6f %.10e\n", i - center,
-                    v3norm(pos[i]) * (i >= center ? 1 : -1),  /* signed distance */
+                    v3norm(pos[i]) * (i >= center ? 1 : -1),
                     p / total);
         }
         fclose(pf);
-        fprintf(stderr, "Density saved to /tmp/walk_1d_density.dat\n");
+        fprintf(stderr, "Density -> /tmp/walk_1d_density.dat (%d sites)\n", active_hi-active_lo);
     }
 
-    free(psi); free(tmp_psi);
-    free(pos); free(dirs); free(face);
-    free(tau_p); free(tau_m); free(Pp_p); free(Pm_p); free(Pp_m); free(Pm_m);
-    free(fwd_p); free(bwd_p); free(fwd_m); free(bwd_m); free(coin); free(coin2);
     return 0;
 }
