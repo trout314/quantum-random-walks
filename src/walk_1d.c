@@ -66,13 +66,14 @@ static void init_dirac(void) {
     ALPHA[1][0][3]=-I;ALPHA[1][1][2]=I;ALPHA[1][2][1]=-I;ALPHA[1][3][0]=I;
     ALPHA[2][0][2]=1;ALPHA[2][1][3]=-1;ALPHA[2][2][0]=1;ALPHA[2][3][1]=-1;
 }
-static void make_tau(c4x4 tau, vec3 d) {
-    double nu=sqrt(7.0)/4.0; c4_zero(tau);
+static void make_tau_s(c4x4 tau, vec3 d, double nu_sign) {
+    double nu=nu_sign*sqrt(7.0)/4.0; c4_zero(tau);
     for(int i=0;i<4;i++) tau[i][i]=nu*(i<2?1.0:-1.0);
     double dd[3]={d.x,d.y,d.z};
     for(int a=0;a<3;a++)for(int i=0;i<4;i++)for(int j=0;j<4;j++)
         tau[i][j]+=0.75*dd[a]*ALPHA[a][i][j];
 }
+static void make_tau(c4x4 tau, vec3 d) { make_tau_s(tau, d, 1.0); }
 static void frame_transport(const c4x4 tf, const c4x4 tt, c4x4 U) {
     c4x4 prod; c4_mul(prod, tt, tf);
     double cos_phi = 0;
@@ -91,18 +92,18 @@ int main(int argc, char **argv) {
     double theta = 0.5;
     double sigma = 50.0;    /* in units of chain sites */
     int n_steps = 500;
-    double mix_phi = M_PI/4; /* mixing angle: 0=no mixing, pi/4=50/50 */
+    int ic_type = 0;        /* 0 = (1,0,0,0), 1 = (1,0,1,0)/sqrt(2) */
 
     if (argc > 1) N = atoi(argv[1]);
     if (argc > 2) theta = atof(argv[2]);
     if (argc > 3) sigma = atof(argv[3]);
     if (argc > 4) n_steps = atoi(argv[4]);
-    if (argc > 5) mix_phi = atof(argv[5]);
+    if (argc > 5) ic_type = atoi(argv[5]);
 
     double ct = cos(theta), st = sin(theta);
 
-    fprintf(stderr, "=== walk_1d: N=%d theta=%.3f sigma=%.1f steps=%d mix_phi=%.4f ===\n",
-            N, theta, sigma, n_steps, mix_phi);
+    fprintf(stderr, "=== walk_1d: N=%d theta=%.3f sigma=%.1f steps=%d ===\n",
+            N, theta, sigma, n_steps);
 
     init_dirac();
 
@@ -127,12 +128,15 @@ int main(int argc, char **argv) {
         face[i] = PAT[i % 4];
     }
 
-    /* Precompute tau and projectors at each site */
+    /* Precompute tau and projectors at each site.
+     * Alternate the sign of nu: +nu at even sites, -nu at odd sites.
+     * This balances the P+/P- asymmetry for standard basis spinors. */
     c4x4 *tau = malloc(N * sizeof(c4x4));
     c4x4 *Pp = malloc(N * sizeof(c4x4));
     c4x4 *Pm = malloc(N * sizeof(c4x4));
     for (int i = 0; i < N; i++) {
-        make_tau(tau[i], dirs[i][face[i]]);
+        double nu_sign = 1.0;
+        make_tau_s(tau[i], dirs[i][face[i]], nu_sign);
         c4_eye(Pp[i]); c4_eye(Pm[i]);
         for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
             Pp[i][a][b] = 0.5 * (Pp[i][a][b] + tau[i][a][b]);
@@ -140,85 +144,12 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Precompute the P+/P- mixing operator M at each site.
-     * M anticommutes with tau: M*tau = -tau*M, so it swaps P+ <-> P-.
-     * M = P-_vecs @ P+_vecs^dag + P+_vecs @ P-_vecs^dag
-     * where P+_vecs, P-_vecs are eigenvectors of tau.
-     *
-     * We compute M from the projectors:
-     * For any unit vector v, P+ v and P- v are in the respective subspaces.
-     * Using two linearly independent vectors gives us bases for each subspace. */
-    c4x4 *M_mix = malloc(N * sizeof(c4x4));
-    for (int i = 0; i < N; i++) {
-        /* Find orthonormal bases for P+ and P- subspaces.
-         * Project the 4 standard basis vectors through P+ and P-,
-         * then Gram-Schmidt to get orthonormal bases. */
-        double complex pp_basis[4][2], pm_basis[4][2];  /* [component][basis_idx] */
-        int np_found = 0, nm_found = 0;
-        for (int col = 0; col < 4 && (np_found < 2 || nm_found < 2); col++) {
-            /* Project e_col through P+ */
-            if (np_found < 2) {
-                double complex v[4];
-                for (int a = 0; a < 4; a++) v[a] = Pp[i][a][col];
-                /* Gram-Schmidt against existing basis vectors */
-                for (int j = 0; j < np_found; j++) {
-                    double complex dot = 0;
-                    for (int a = 0; a < 4; a++) dot += conj(pp_basis[a][j]) * v[a];
-                    for (int a = 0; a < 4; a++) v[a] -= dot * pp_basis[a][j];
-                }
-                double norm2 = 0;
-                for (int a = 0; a < 4; a++) norm2 += creal(v[a]*conj(v[a]));
-                if (norm2 > 1e-10) {
-                    double inv = 1.0/sqrt(norm2);
-                    for (int a = 0; a < 4; a++) pp_basis[a][np_found] = v[a] * inv;
-                    np_found++;
-                }
-            }
-            /* Same for P- */
-            if (nm_found < 2) {
-                double complex v[4];
-                for (int a = 0; a < 4; a++) v[a] = Pm[i][a][col];
-                for (int j = 0; j < nm_found; j++) {
-                    double complex dot = 0;
-                    for (int a = 0; a < 4; a++) dot += conj(pm_basis[a][j]) * v[a];
-                    for (int a = 0; a < 4; a++) v[a] -= dot * pm_basis[a][j];
-                }
-                double norm2 = 0;
-                for (int a = 0; a < 4; a++) norm2 += creal(v[a]*conj(v[a]));
-                if (norm2 > 1e-10) {
-                    double inv = 1.0/sqrt(norm2);
-                    for (int a = 0; a < 4; a++) pm_basis[a][nm_found] = v[a] * inv;
-                    nm_found++;
-                }
-            }
-        }
-        /* M = sum_j ( |pm_j><pp_j| + |pp_j><pm_j| ) */
-        c4_zero(M_mix[i]);
-        for (int j = 0; j < 2; j++)
-            for (int a = 0; a < 4; a++)
-                for (int b = 0; b < 4; b++) {
-                    M_mix[i][a][b] += pm_basis[a][j] * conj(pp_basis[b][j]);
-                    M_mix[i][a][b] += pp_basis[a][j] * conj(pm_basis[b][j]);
-                }
-    }
-
-    /* Precompute frame transport shift blocks (unmixed — original parallel transport).
-     * fwd_block[i] = U(tau[i]->tau[i+1]) * Pp[i]
-     * bwd_block[i] = U(tau[i]->tau[i-1]) * Pm[i]
-     *
-     * The mixing V is applied as a SEPARATE unitary step after the shift,
-     * not baked into the shift blocks. This preserves unitarity. */
+    /* Precompute frame transport and shift blocks:
+     * fwd_block[i] = U(tau[i]->tau[i+1]) * Pp[i]  (sends P+ from i to i+1)
+     * bwd_block[i] = U(tau[i]->tau[i-1]) * Pm[i]  (sends P- from i to i-1) */
     c4x4 *fwd_block = malloc(N * sizeof(c4x4));
     c4x4 *bwd_block = malloc(N * sizeof(c4x4));
-    /* Precompute V = (I + iM)/sqrt(2) at each site for the mixing step */
-    c4x4 *V_mix = malloc(N * sizeof(c4x4));
-    double cp = cos(mix_phi), sp = sin(mix_phi);
     for (int i = 0; i < N; i++) {
-        /* V = cos(phi)*I + i*sin(phi)*M */
-        for (int a = 0; a < 4; a++)
-            for (int b = 0; b < 4; b++)
-                V_mix[i][a][b] = cp * (a==b ? 1.0 : 0.0) + I * sp * M_mix[i][a][b];
-
         if (i < N-1) {
             c4x4 U; frame_transport(tau[i], tau[i+1], U);
             c4_mul(fwd_block[i], U, Pp[i]);
@@ -228,16 +159,17 @@ int main(int argc, char **argv) {
             c4_mul(bwd_block[i], U, Pm[i]);
         }
     }
-    free(M_mix);
 
-    /* Precompute coin at each site:
-     * C[i] = cos(θ)I - i sin(θ)(e_face · α) */
+    /* Coin: C = cos(θ)I - i sin(θ)β
+     * Position-independent mass term using only β. */
     c4x4 *coin = malloc(N * sizeof(c4x4));
-    for (int i = 0; i < N; i++) {
-        double *d = &dirs[i][face[i]].x;
-        for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
-            double complex ea = d[0]*ALPHA[0][a][b] + d[1]*ALPHA[1][a][b] + d[2]*ALPHA[2][a][b];
-            coin[i][a][b] = ct*(a==b ? 1 : 0) - I*st*ea;
+    {
+        /* β = diag(1,1,-1,-1) */
+        double beta_diag[4] = {1, 1, -1, -1};
+        for (int i = 0; i < N; i++) {
+            for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
+                coin[i][a][b] = (a==b) ? (ct - I*st*beta_diag[a]) : 0;
+            }
         }
     }
 
@@ -245,8 +177,6 @@ int main(int argc, char **argv) {
             N-1, v3norm((vec3){pos[N-1].x-pos[0].x, pos[N-1].y-pos[0].y, pos[N-1].z-pos[0].z}));
 
     /* ---- Initialize wavepacket ---- */
-    /* Simple (1,0,0,0) spinor — the symmetric frame transport should
-     * ensure equal probability flow in both directions regardless. */
     double complex *psi = calloc(4*N, sizeof(double complex));
     double complex *tmp_psi = calloc(4*N, sizeof(double complex));
     int center = N / 2;
@@ -254,11 +184,20 @@ int main(int argc, char **argv) {
     for (int i = 0; i < N; i++) {
         double x = (double)(i - center);
         double w = exp(-x*x / (2*sigma*sigma));
-        psi[4*i] = w;  /* spinor (1,0,0,0) */
+        if (ic_type == 0) {
+            /* (1,0,0,0) spinor */
+            psi[4*i] = w;
+        } else {
+            /* (1,0,1,0)/sqrt(2) spinor */
+            double s2inv = 1.0/sqrt(2.0);
+            psi[4*i]   = w * s2inv;
+            psi[4*i+2] = w * s2inv;
+        }
         norm += w*w;
     }
     norm = sqrt(norm);
     for (int i = 0; i < 4*N; i++) psi[i] /= norm;
+    fprintf(stderr, "IC type: %s\n", ic_type == 0 ? "(1,0,0,0)" : "(1,0,1,0)/sqrt(2)");
 
     /* ---- Time evolution ---- */
     printf("# N=%d theta=%.4f sigma=%.1f n_steps=%d\n", N, theta, sigma, n_steps);
@@ -325,21 +264,9 @@ int main(int argc, char **argv) {
                             tmp_psi[4*(i-1)+a] += bwd_block[i][a][b] * psi[4*i+b];
                 }
             }
-            /* Step 3: Apply V mixing (separate unitary step) */
-            for (int i = 0; i < N; i++) {
-                double complex out[4];
-                for (int a = 0; a < 4; a++) {
-                    double complex s = 0;
-                    for (int b = 0; b < 4; b++)
-                        s += V_mix[i][a][b] * tmp_psi[4*i+b];
-                    out[a] = s;
-                }
-                for (int a = 0; a < 4; a++) tmp_psi[4*i+a] = out[a];
-            }
             memcpy(psi, tmp_psi, 4*N*sizeof(double complex));
         }
     }
-    free(V_mix);
 
     /* Output probability density at final time for plotting */
     FILE *pf = fopen("/tmp/walk_1d_density.dat", "w");
