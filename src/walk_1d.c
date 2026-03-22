@@ -4,7 +4,7 @@
  * Adaptive: chain extends on-the-fly as the wavepacket spreads.
  * No fixed N — allocates large arrays and tracks active region.
  *
- * Build: clang -O2 -o walk_1d src/walk_1d.c -lm
+ * Build: gcc -O2 -fopenmp -o walk_1d src/walk_1d.c -lm
  * Usage: ./walk_1d [theta] [sigma] [n_steps] [coin_type] [nu_type]
  */
 
@@ -13,6 +13,9 @@
 #include <string.h>
 #include <math.h>
 #include <complex.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 /* ========== 3D vector ========== */
 typedef struct { double x, y, z; } vec3;
@@ -236,27 +239,33 @@ int main(int argc, char **argv) {
     printf("# t norm x_mean x2 active_width\n");
 
     for (int t = 0; t <= n_steps; t++) {
-        /* Compute observables over active region */
-        double total_prob = 0, mx = 0, mx2 = 0;
-        for (int i = active_lo; i < active_hi; i++) {
+        /* Compute observables over active region.
+         * Use long double accumulators for precision at large sigma.
+         * Compute variance directly: var = <(x-<x>)^2> to avoid
+         * catastrophic cancellation in <x^2> - <x>^2. */
+        long double total_prob = 0, mx = 0, mx2 = 0;
+        int alo = active_lo, ahi = active_hi;
+        #pragma omp parallel for reduction(+:total_prob,mx,mx2)
+        for (int i = alo; i < ahi; i++) {
             double p = 0;
             for (int a = 0; a < 4; a++)
                 p += creal(psi[4*i+a]*conj(psi[4*i+a]));
             total_prob += p;
-            double x = (double)(i - center);
+            long double x = (long double)(i - center);
             mx += p * x;
             mx2 += p * x * x;
         }
-        double pnorm = sqrt(total_prob);
-        mx /= total_prob;
-        mx2 /= total_prob;
+        double pnorm = sqrt((double)total_prob);
+        double mx_d = (double)(mx / total_prob);
+        double mx2_d = (double)(mx2 / total_prob);
 
         if (t % 10 == 0 || t <= 5)
-            printf("%d %.8f %.4f %.4f %d\n", t, pnorm, mx, mx2, active_hi-active_lo);
+            printf("%d %.8f %.4f %.4f %d\n", t, pnorm, mx_d, mx2_d, active_hi-active_lo);
 
         if (t < n_steps) {
-            /* Step 1: Apply coin(s) */
-            for (int i = active_lo; i < active_hi; i++) {
+            /* Step 1: Apply coin(s) — embarrassingly parallel */
+            #pragma omp parallel for
+            for (int i = alo; i < ahi; i++) {
                 double complex out[4];
                 for (int a=0;a<4;a++){
                     double complex s=0;
@@ -266,7 +275,8 @@ int main(int argc, char **argv) {
                 for(int a=0;a<4;a++) psi[4*i+a]=out[a];
             }
             if (g_use_coin2) {
-                for (int i = active_lo; i < active_hi; i++) {
+                #pragma omp parallel for
+                for (int i = alo; i < ahi; i++) {
                     double complex out[4];
                     for (int a=0;a<4;a++){
                         double complex s=0;
@@ -278,26 +288,32 @@ int main(int argc, char **argv) {
             }
 
             /* Step 2: Shift with adaptive extension */
-            /* Ensure neighbors exist */
             if (active_lo > 0) ensure_site(active_lo - 1);
-            ensure_site(active_hi);  /* one beyond current end */
+            ensure_site(active_hi);
 
-            memset(&tmp_psi[4*active_lo], 0, 4*(active_hi-active_lo+2)*sizeof(double complex));
-            /* Also zero the neighbor slots */
-            if (active_lo > 0)
-                memset(&tmp_psi[4*(active_lo-1)], 0, 4*sizeof(double complex));
-            memset(&tmp_psi[4*active_hi], 0, 4*sizeof(double complex));
+            /* Zero tmp over the full range including neighbors */
+            int zlo = (active_lo > 0) ? active_lo-1 : 0;
+            int zhi = active_hi + 1;
+            memset(&tmp_psi[4*zlo], 0, 4*(zhi-zlo)*sizeof(double complex));
 
-            for (int i = active_lo; i < active_hi; i++) {
-                /* P+ -> forward (i+1) */
-                for (int a=0;a<4;a++)
-                    for(int b=0;b<4;b++)
-                        tmp_psi[4*(i+1)+a] += fwd_block[i][a][b]*psi[4*i+b];
-                /* P- -> backward (i-1) */
-                if (i > 0) {
-                    for (int a=0;a<4;a++)
-                        for(int b=0;b<4;b++)
-                            tmp_psi[4*(i-1)+a] += bwd_block[i][a][b]*psi[4*i+b];
+            /* Shift: site i's P+ goes to i+1, P- goes to i-1.
+             * Each target site receives from exactly 2 sources (i-1's fwd
+             * and i+1's bwd). Parallelize by computing each target site's
+             * total contribution independently. */
+            #pragma omp parallel for
+            for (int i = zlo; i < zhi; i++) {
+                /* Site i receives: fwd from i-1, bwd from i+1 */
+                for (int a = 0; a < 4; a++) {
+                    double complex s = 0;
+                    if (i-1 >= alo && i-1 < ahi) {
+                        for (int b = 0; b < 4; b++)
+                            s += fwd_block[i-1][a][b] * psi[4*(i-1)+b];
+                    }
+                    if (i+1 >= alo && i+1 < ahi) {
+                        for (int b = 0; b < 4; b++)
+                            s += bwd_block[i+1][a][b] * psi[4*(i+1)+b];
+                    }
+                    tmp_psi[4*i+a] = s;
                 }
             }
 
