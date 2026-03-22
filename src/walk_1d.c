@@ -92,13 +92,17 @@ int main(int argc, char **argv) {
     double theta = 0.5;
     double sigma = 50.0;    /* in units of chain sites */
     int n_steps = 500;
-    int ic_type = 0;        /* 0 = (1,0,0,0), 1 = (1,0,1,0)/sqrt(2) */
+    int ic_type = 0;        /* 0=(1,0,0,0), 1=(1,0,1,0)/sqrt(2), 2=P+/P- symmetric */
+    int coin_type = 0;      /* 0=beta, 1=e·alpha */
+    int nu_type = 0;        /* 0=constant +nu, 1=alternating +/-nu */
 
     if (argc > 1) N = atoi(argv[1]);
     if (argc > 2) theta = atof(argv[2]);
     if (argc > 3) sigma = atof(argv[3]);
     if (argc > 4) n_steps = atoi(argv[4]);
     if (argc > 5) ic_type = atoi(argv[5]);
+    if (argc > 6) coin_type = atoi(argv[6]);
+    if (argc > 7) nu_type = atoi(argv[7]);
 
     double ct = cos(theta), st = sin(theta);
 
@@ -128,14 +132,12 @@ int main(int argc, char **argv) {
         face[i] = PAT[i % 4];
     }
 
-    /* Precompute tau and projectors at each site.
-     * Alternate the sign of nu: +nu at even sites, -nu at odd sites.
-     * This balances the P+/P- asymmetry for standard basis spinors. */
+    /* Precompute tau and projectors at each site. */
     c4x4 *tau = malloc(N * sizeof(c4x4));
     c4x4 *Pp = malloc(N * sizeof(c4x4));
     c4x4 *Pm = malloc(N * sizeof(c4x4));
     for (int i = 0; i < N; i++) {
-        double nu_sign = 1.0;
+        double nu_sign = (nu_type == 1 && i % 2 == 1) ? -1.0 : 1.0;
         make_tau_s(tau[i], dirs[i][face[i]], nu_sign);
         c4_eye(Pp[i]); c4_eye(Pm[i]);
         for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
@@ -160,17 +162,27 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Coin: C = cos(θ)I - i sin(θ)β
-     * Position-independent mass term using only β. */
+    /* Precompute coin at each site */
     c4x4 *coin = malloc(N * sizeof(c4x4));
-    {
-        /* β = diag(1,1,-1,-1) */
+    if (coin_type == 0) {
+        /* β coin: C = cos(θ)I - i sin(θ)β (position-independent) */
         double beta_diag[4] = {1, 1, -1, -1};
         for (int i = 0; i < N; i++) {
             for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
                 coin[i][a][b] = (a==b) ? (ct - I*st*beta_diag[a]) : 0;
             }
         }
+        fprintf(stderr, "Coin: beta\n");
+    } else {
+        /* e·α coin: C = cos(θ)I - i sin(θ)(e·α) (position-dependent) */
+        for (int i = 0; i < N; i++) {
+            double *d = &dirs[i][face[i]].x;
+            for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
+                double complex ea = d[0]*ALPHA[0][a][b] + d[1]*ALPHA[1][a][b] + d[2]*ALPHA[2][a][b];
+                coin[i][a][b] = ct*(a==b ? 1 : 0) - I*st*ea;
+            }
+        }
+        fprintf(stderr, "Coin: e.alpha\n");
     }
 
     fprintf(stderr, "Chain built. Displacement from site 0 to %d: %.2f\n",
@@ -185,19 +197,34 @@ int main(int argc, char **argv) {
         double x = (double)(i - center);
         double w = exp(-x*x / (2*sigma*sigma));
         if (ic_type == 0) {
-            /* (1,0,0,0) spinor */
             psi[4*i] = w;
-        } else {
-            /* (1,0,1,0)/sqrt(2) spinor */
+        } else if (ic_type == 1) {
             double s2inv = 1.0/sqrt(2.0);
             psi[4*i]   = w * s2inv;
             psi[4*i+2] = w * s2inv;
+        } else {
+            /* Symmetric P+/P- superposition */
+            double complex v_plus[4], v_minus[4];
+            for (int a = 0; a < 4; a++) v_plus[a] = Pp[i][a][0];
+            for (int a = 0; a < 4; a++) v_minus[a] = Pm[i][a][0];
+            double np2 = 0, nm2 = 0;
+            for (int a = 0; a < 4; a++) {
+                np2 += creal(v_plus[a]*conj(v_plus[a]));
+                nm2 += creal(v_minus[a]*conj(v_minus[a]));
+            }
+            double inv_np = 1.0/sqrt(np2), inv_nm = 1.0/sqrt(nm2);
+            double s2inv = 1.0/sqrt(2.0);
+            for (int a = 0; a < 4; a++)
+                psi[4*i+a] = w * s2inv * (v_plus[a]*inv_np + v_minus[a]*inv_nm);
         }
-        norm += w*w;
+        for (int a = 0; a < 4; a++)
+            norm += creal(psi[4*i+a]*conj(psi[4*i+a]));
     }
     norm = sqrt(norm);
     for (int i = 0; i < 4*N; i++) psi[i] /= norm;
-    fprintf(stderr, "IC type: %s\n", ic_type == 0 ? "(1,0,0,0)" : "(1,0,1,0)/sqrt(2)");
+    const char *ic_names[] = {"(1,0,0,0)", "(1,0,1,0)/sqrt(2)", "P+/P- symmetric"};
+    fprintf(stderr, "IC: %s, Coin: %s, Nu: %s\n",
+            ic_names[ic_type], coin_type==0?"beta":"e.alpha", nu_type==0?"const":"alt");
 
     /* ---- Time evolution ---- */
     printf("# N=%d theta=%.4f sigma=%.1f n_steps=%d\n", N, theta, sigma, n_steps);
