@@ -525,14 +525,27 @@ int main(int argc, char **argv) {
         for (int i = active_lo; i < active_hi; i++)
             for (int a = 0; a < 4; a++)
                 total += creal(psi[4*i+a]*conj(psi[4*i+a]));
-        fprintf(pf, "# site position prob\n");
+        fprintf(pf, "# site position prob prob_plus prob_minus\n");
         for (int i = active_lo; i < active_hi; i++) {
             double p = 0;
             for (int a = 0; a < 4; a++)
                 p += creal(psi[4*i+a]*conj(psi[4*i+a]));
-            fprintf(pf, "%d %.6f %.10e\n", i - center,
+            /* Project onto P+ and P- eigenspaces of tau[i] */
+            double pp = 0, pm = 0;
+            for (int a = 0; a < 4; a++) {
+                double complex sp = 0, sm = 0;
+                for (int b = 0; b < 4; b++) {
+                    double complex tau_ab = tau_arr[i][a][b];
+                    sp += (((a==b)?1:0) + tau_ab) * psi[4*i+b];  /* P+ = (I+tau)/2 */
+                    sm += (((a==b)?1:0) - tau_ab) * psi[4*i+b];  /* P- = (I-tau)/2 */
+                }
+                pp += creal(sp*conj(sp));
+                pm += creal(sm*conj(sm));
+            }
+            pp *= 0.25; pm *= 0.25;  /* P± = (I±τ)/2 so |P±ψ|² gets factor 1/4 from squaring */
+            fprintf(pf, "%d %.6f %.10e %.10e %.10e\n", i - center,
                     v3norm(pos[i]) * (i >= center ? 1 : -1),
-                    p / total);
+                    p / total, pp / total, pm / total);
         }
         fclose(pf);
         fprintf(stderr, "Density -> /tmp/walk_1d_density.dat (%d sites)\n", active_hi-active_lo);
