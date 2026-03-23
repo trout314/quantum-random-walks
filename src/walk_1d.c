@@ -5,7 +5,8 @@
  * No fixed N — allocates large arrays and tracks active region.
  *
  * Build: gcc -O2 -fopenmp -o walk_1d src/walk_1d.c -lm
- * Usage: ./walk_1d [theta] [sigma] [n_steps] [coin_type] [nu_type]
+ * Usage: ./walk_1d [theta] [sigma] [n_steps] [coin_type] [nu_type] [k0] [mix_phi] [spiral_type]
+ *        spiral_type: 0=R helix {1,3,0,2} (default), 1=L helix {0,1,2,3}
  */
 
 #include <stdio.h>
@@ -86,7 +87,10 @@ static void frame_transport(const c4x4 tf, const c4x4 tt, c4x4 U) {
 
 /* ========== Chain data (pre-allocated, built lazily) ========== */
 #define MAX_N 500000
-static int PAT[4] = {1, 3, 0, 2};
+static int PAT_R[4] = {1, 3, 0, 2};
+static int PAT_L[4] = {0, 1, 2, 3};
+static int PAT[4] = {1, 3, 0, 2};  /* active pattern, set from g_spiral_type */
+static int g_spiral_type = 0;  /* 0=R, 1=L */
 
 static vec3 pos[MAX_N];
 static vec3 dirs[MAX_N][4];
@@ -267,11 +271,19 @@ int main(int argc, char **argv) {
     if (argc > 5) nu_type = atoi(argv[5]);
     if (argc > 6) k0 = atof(argv[6]);
     if (argc > 7) { mix_phi = atof(argv[7]); g_mix_phi = mix_phi; }
+    if (argc > 8) { g_spiral_type = atoi(argv[8]); }
+
+    /* Set active helix pattern */
+    if (g_spiral_type == 1) {
+        for (int i = 0; i < 4; i++) PAT[i] = PAT_L[i];
+    } else {
+        for (int i = 0; i < 4; i++) PAT[i] = PAT_R[i];
+    }
 
     g_ct = cos(theta); g_st = sin(theta);
 
-    fprintf(stderr, "=== walk_1d adaptive: theta=%.3f sigma=%.1f steps=%d coin=%d k0=%.4f ===\n",
-            theta, sigma, n_steps, g_coin_type, k0);
+    fprintf(stderr, "=== walk_1d adaptive: theta=%.3f sigma=%.1f steps=%d coin=%d k0=%.4f spiral=%s ===\n",
+            theta, sigma, n_steps, g_coin_type, k0, g_spiral_type==1?"L":"R");
 
     init_dirac();
 
