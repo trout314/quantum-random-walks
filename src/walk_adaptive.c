@@ -527,6 +527,78 @@ static void apply_coin(int is_r, double ct, double st) {
     }
 }
 
+/* Apply post-shift V mixing: V = cos(phi)*I + i*sin(phi)*M
+ * where M swaps P+ and P- eigenspaces of the local tau.
+ * is_r: use R-face tau (1) or L-face tau (0). */
+static double g_mix_phi = 0.0;
+
+static void apply_vmix(int is_r) {
+    if (g_mix_phi == 0.0) return;
+    double cp = cos(g_mix_phi), sp = sin(g_mix_phi);
+    int ns = nsites;
+    for (int s = 0; s < ns; s++) {
+        int face = is_r ? sites[s].r_face : sites[s].l_face;
+        if (face < 0) continue;
+
+        vec3 dv = sites[s].dirs[face];
+        c4x4 tau; make_tau(tau, dv);
+
+        /* Build P+ and P- projectors */
+        c4x4 Pp, Pm; c4_eye(Pp); c4_eye(Pm);
+        for (int a=0;a<4;a++) for(int b=0;b<4;b++) {
+            Pp[a][b] = 0.5*(Pp[a][b]+tau[a][b]);
+            Pm[a][b] = 0.5*(Pm[a][b]-tau[a][b]);
+        }
+
+        /* Find orthonormal bases for P+ and P- via Gram-Schmidt */
+        double complex pp_basis[4][2], pm_basis[4][2];
+        int np_found=0, nm_found=0;
+        for (int col=0; col<4 && (np_found<2||nm_found<2); col++) {
+            if (np_found < 2) {
+                double complex v[4];
+                for(int a=0;a<4;a++) v[a]=Pp[a][col];
+                for(int j=0;j<np_found;j++){
+                    double complex dot=0;
+                    for(int a=0;a<4;a++) dot+=conj(pp_basis[a][j])*v[a];
+                    for(int a=0;a<4;a++) v[a]-=dot*pp_basis[a][j];
+                }
+                double nm=0; for(int a=0;a<4;a++) nm+=creal(v[a]*conj(v[a]));
+                if(nm>1e-10){double inv=1.0/sqrt(nm);
+                    for(int a=0;a<4;a++) pp_basis[a][np_found]=v[a]*inv; np_found++;}
+            }
+            if (nm_found < 2) {
+                double complex v[4];
+                for(int a=0;a<4;a++) v[a]=Pm[a][col];
+                for(int j=0;j<nm_found;j++){
+                    double complex dot=0;
+                    for(int a=0;a<4;a++) dot+=conj(pm_basis[a][j])*v[a];
+                    for(int a=0;a<4;a++) v[a]-=dot*pm_basis[a][j];
+                }
+                double nm=0; for(int a=0;a<4;a++) nm+=creal(v[a]*conj(v[a]));
+                if(nm>1e-10){double inv=1.0/sqrt(nm);
+                    for(int a=0;a<4;a++) pm_basis[a][nm_found]=v[a]*inv; nm_found++;}
+            }
+        }
+
+        /* M = Σ_j |pm_j><pp_j| + |pp_j><pm_j| */
+        c4x4 V; c4_zero(V);
+        for(int j=0;j<2;j++)
+            for(int a=0;a<4;a++) for(int b=0;b<4;b++){
+                V[a][b]+=pm_basis[a][j]*conj(pp_basis[b][j]);
+                V[a][b]+=pp_basis[a][j]*conj(pm_basis[b][j]);
+            }
+        /* V = cos(phi)*I + i*sin(phi)*M */
+        for(int a=0;a<4;a++) for(int b=0;b<4;b++)
+            V[a][b] = cp*(a==b?1:0) + I*sp*V[a][b];
+
+        /* Apply V to psi at site s */
+        double complex out[4] = {0};
+        for(int a=0;a<4;a++) for(int b=0;b<4;b++)
+            out[a] += V[a][b] * psi[4*s+b];
+        for(int a=0;a<4;a++) psi[4*s+a] = out[a];
+    }
+}
+
 /* ========== Main ========== */
 int main(int argc, char **argv) {
     int seed_depth = 0;  /* 0 = auto from sigma */
@@ -538,6 +610,7 @@ int main(int argc, char **argv) {
     if (argc > 4) threshold = atof(argv[4]);
     if (argc > 5) seed_depth = atoi(argv[5]);
     if (argc > 6) g_coin_type = atoi(argv[6]);
+    if (argc > 7) g_mix_phi = atof(argv[7]);
     double thresh2 = threshold * threshold;
     double ct = cos(theta), st = sin(theta);
 
@@ -548,9 +621,9 @@ int main(int argc, char **argv) {
         if (seed_depth < 4) seed_depth = 4;
     }
 
-    fprintf(stderr, "=== walk_adaptive: seed=%d theta=%.3f sigma=%.1f steps=%d thresh=%.1e coin=%s ===\n",
+    fprintf(stderr, "=== walk_adaptive: seed=%d theta=%.3f sigma=%.1f steps=%d thresh=%.1e coin=%s mix_phi=%.4f ===\n",
             seed_depth, theta, sigma, n_steps, threshold,
-            g_coin_type==0 ? "e.alpha" : "dual_parity");
+            g_coin_type==0 ? "e.alpha" : "dual_parity", g_mix_phi);
     fprintf(stderr, "Memory available: %ld MB\n", get_avail_mb());
 
     init_dirac();
@@ -735,15 +808,19 @@ int main(int argc, char **argv) {
             int cr_l=0, cr_r=0;
             double abs_l=0, abs_r=0;
 
-            /* W = S_R · C_R · S_L · C_L, applied right to left */
+            /* W = V_R · S_R · C_R · V_L · S_L · C_L, applied right to left */
             /* Step 1: C_L */
             apply_coin(0, ct, st);
             /* Step 2: S_L (adaptive) */
             apply_shift_adaptive(0, PAT_L, thresh2, &cr_l, &abs_l);
-            /* Step 3: C_R */
+            /* Step 3: V_L mixing */
+            apply_vmix(0);
+            /* Step 4: C_R */
             apply_coin(1, ct, st);
-            /* Step 4: S_R (adaptive) */
+            /* Step 5: S_R (adaptive) */
             apply_shift_adaptive(1, PAT_R, thresh2, &cr_r, &abs_r);
+            /* Step 6: V_R mixing */
+            apply_vmix(1);
 
             /* Update the output line's absorbed column for the NEXT step */
         }
