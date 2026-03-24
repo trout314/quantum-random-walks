@@ -187,68 +187,189 @@ static int prev_face(const int pat[4], int cur_face) {
     return pat[0];
 }
 
-/* Thread chain through existing sites starting from 'start'. */
-static int thread_chain(int start, const int pat[4], int is_r) {
-    int rev[4]={pat[3],pat[2],pat[1],pat[0]};
-    int linked = 1;
+/* ========== Chain-first site generation ========== */
 
-    if (is_r) sites[start].r_face = pat[0];
-    else      sites[start].l_face = pat[0];
+/* Seed queue entry: a site that needs a perpendicular chain spawned. */
+typedef struct { int site_id; int spawn_type; /* 0=L, 1=R */ } chain_seed_t;
 
-    /* Forward */
-    {
-        int cur = start;
-        vec3 p = sites[start].pos;
-        vec3 d[4]; memcpy(d, sites[start].dirs, sizeof(d));
-        for (int step = 0; step < MAX_SITES; step++) {
-            int face = pat[step % 4];
-            helix_step(&p, d, face);
-            if ((step+1) % 8 == 0) reorth(d);
-            int next = site_find(p);
-            if (next < 0) break;
-            if (is_r) {
-                if (sites[next].r_prev >= 0) break;
-                sites[cur].r_next = next;
-                sites[next].r_prev = cur;
-                sites[next].r_face = pat[(step+1) % 4];
-            } else {
-                if (sites[next].l_prev >= 0) break;
-                sites[cur].l_next = next;
-                sites[next].l_prev = cur;
-                sites[next].l_face = pat[(step+1) % 4];
-            }
-            cur = next;
-            linked++;
-        }
+/* Density grid globals (set up in main before calling generate_sites) */
+static double g_grid_half;
+static int g_grid_n;
+static int *g_grid_count;
+
+#define GRID_IDX(pos) ({ \
+    int gx = (int)((pos.x + g_grid_half) / 1.0); \
+    int gy = (int)((pos.y + g_grid_half) / 1.0); \
+    int gz = (int)((pos.z + g_grid_half) / 1.0); \
+    if (gx < 0) gx = 0; if (gx >= g_grid_n) gx = g_grid_n-1; \
+    if (gy < 0) gy = 0; if (gy >= g_grid_n) gy = g_grid_n-1; \
+    if (gz < 0) gz = 0; if (gz >= g_grid_n) gz = g_grid_n-1; \
+    gx * g_grid_n * g_grid_n + gy * g_grid_n + gz; \
+})
+
+/* Extend a chain in one direction from start_site, creating new sites as needed.
+ * For each new site created, enqueue a perpendicular chain seed.
+ * Returns the number of sites linked (including start). */
+static int extend_chain_dir(int start_site, const int pat[4], int is_r,
+                             int forward, /* 1=forward, 0=backward */
+                             double sigma, double seed_thresh, int max_per_cell,
+                             chain_seed_t *seed_queue, int *sq_tail) {
+    int linked = 0;
+    int cur = start_site;
+    int cur_face = is_r ? sites[cur].r_face : sites[cur].l_face;
+
+    /* For backward: reverse the pattern */
+    int step_pat[4];
+    if (forward) {
+        for (int i = 0; i < 4; i++) step_pat[i] = pat[i];
+    } else {
+        step_pat[0] = pat[3]; step_pat[1] = pat[2];
+        step_pat[2] = pat[1]; step_pat[3] = pat[0];
     }
 
-    /* Backward */
-    {
-        int cur = start;
-        vec3 p = sites[start].pos;
-        vec3 d[4]; memcpy(d, sites[start].dirs, sizeof(d));
-        for (int step = 0; step < MAX_SITES; step++) {
-            int face = rev[step % 4];
-            helix_step(&p, d, face);
-            if ((step+1) % 8 == 0) reorth(d);
-            int prev = site_find(p);
-            if (prev < 0) break;
-            if (is_r) {
-                if (sites[prev].r_next >= 0) break;
-                sites[cur].r_prev = prev;
-                sites[prev].r_next = cur;
-                sites[prev].r_face = pat[(((-(step+1))%4)+4)%4];
-            } else {
-                if (sites[prev].l_next >= 0) break;
-                sites[cur].l_prev = prev;
-                sites[prev].l_next = cur;
-                sites[prev].l_face = pat[(((-(step+1))%4)+4)%4];
-            }
-            cur = prev;
-            linked++;
+    vec3 p = sites[cur].pos;
+    vec3 d[4]; memcpy(d, sites[cur].dirs, sizeof(d));
+
+    for (int step = 0; step < MAX_SITES; step++) {
+        /* Determine which face to step through.
+         * Forward: step through cur_face, next site gets next_face.
+         * Backward: step through prev_face of cur_face, prev site gets that face. */
+        int step_face;
+        if (forward) {
+            step_face = cur_face;
+        } else {
+            step_face = prev_face(pat, cur_face);
         }
+
+        helix_step(&p, d, step_face);
+        if ((step+1) % 8 == 0) reorth(d);
+
+        /* Gaussian cutoff */
+        double r2 = v3dot(p, p);
+        if (exp(-r2 / (2*sigma*sigma)) < seed_thresh) break;
+
+        /* Check if site already exists */
+        int nb = site_find(p);
+        if (nb >= 0) {
+            /* Existing site — link into this chain if slot is free */
+            int nb_face;
+            if (forward) nb_face = next_face(pat, cur_face);
+            else         nb_face = step_face;
+
+            if (is_r) {
+                if (forward && sites[nb].r_prev >= 0) break;  /* already claimed */
+                if (!forward && sites[nb].r_next >= 0) break;
+                if (forward) {
+                    sites[cur].r_next = nb; sites[nb].r_prev = cur;
+                } else {
+                    sites[cur].r_prev = nb; sites[nb].r_next = cur;
+                }
+                if (sites[nb].r_face < 0) sites[nb].r_face = nb_face;
+            } else {
+                if (forward && sites[nb].l_prev >= 0) break;
+                if (!forward && sites[nb].l_next >= 0) break;
+                if (forward) {
+                    sites[cur].l_next = nb; sites[nb].l_prev = cur;
+                } else {
+                    sites[cur].l_prev = nb; sites[nb].l_next = cur;
+                }
+                if (sites[nb].l_face < 0) sites[nb].l_face = nb_face;
+            }
+            cur = nb;
+            cur_face = nb_face;
+            linked++;
+            continue;  /* chain continues through existing site */
+        }
+
+        /* New site — check density */
+        int ci = GRID_IDX(p);
+        if (g_grid_count[ci] >= max_per_cell) break;
+
+        /* Create site */
+        vec3 dd[4]; memcpy(dd, d, sizeof(dd)); reorth(dd);
+        nb = site_insert(p, dd);
+        g_grid_count[ci]++;
+
+        int nb_face;
+        if (forward) nb_face = next_face(pat, cur_face);
+        else         nb_face = step_face;
+
+        if (is_r) {
+            if (forward) {
+                sites[cur].r_next = nb; sites[nb].r_prev = cur;
+            } else {
+                sites[cur].r_prev = nb; sites[nb].r_next = cur;
+            }
+            sites[nb].r_face = nb_face;
+        } else {
+            if (forward) {
+                sites[cur].l_next = nb; sites[nb].l_prev = cur;
+            } else {
+                sites[cur].l_prev = nb; sites[nb].l_next = cur;
+            }
+            sites[nb].l_face = nb_face;
+        }
+
+        /* Enqueue perpendicular chain seed */
+        int perp_type = is_r ? 0 : 1;
+        seed_queue[*sq_tail] = (chain_seed_t){nb, perp_type};
+        (*sq_tail)++;
+
+        cur = nb;
+        cur_face = nb_face;
+        linked++;
     }
     return linked;
+}
+
+/* Generate all sites using chain-first approach.
+ * Returns number of chains created. */
+static int generate_sites_chain_first(double sigma, double seed_thresh, int max_per_cell) {
+    /* Origin */
+    vec3 d0[4]; init_tet(d0);
+    site_insert((vec3){0,0,0}, d0);
+    g_grid_count[GRID_IDX(((vec3){0,0,0}))]++;
+
+    /* Seed queue */
+    chain_seed_t *seed_queue = malloc(MAX_SITES * sizeof(chain_seed_t));
+    int sq_head = 0, sq_tail = 0;
+
+    /* Origin needs both R and L chains */
+    seed_queue[sq_tail++] = (chain_seed_t){0, 1};  /* R-chain */
+    seed_queue[sq_tail++] = (chain_seed_t){0, 0};  /* L-chain */
+
+    int n_chains = 0;
+
+    while (sq_head < sq_tail) {
+        chain_seed_t seed = seed_queue[sq_head++];
+        int s = seed.site_id;
+        int is_r = seed.spawn_type;
+
+        /* Skip if this site already has a chain of this type */
+        if (is_r && sites[s].r_face >= 0) continue;
+        if (!is_r && sites[s].l_face >= 0) continue;
+
+        const int *pat = is_r ? PAT_R : PAT_L;
+
+        /* Assign starting face */
+        if (is_r) sites[s].r_face = pat[0];
+        else      sites[s].l_face = pat[0];
+
+        /* Extend forward and backward */
+        int fwd = extend_chain_dir(s, pat, is_r, 1, sigma, seed_thresh, max_per_cell,
+                                    seed_queue, &sq_tail);
+        int bwd = extend_chain_dir(s, pat, is_r, 0, sigma, seed_thresh, max_per_cell,
+                                    seed_queue, &sq_tail);
+
+        if (fwd + bwd > 0) n_chains++;
+
+        if (nsites % 500000 == 0 && nsites > 0)
+            fprintf(stderr, "  Chain gen: %d sites, %d chains, queue %d/%d\n",
+                    nsites, n_chains, sq_head, sq_tail);
+    }
+
+    free(seed_queue);
+    return n_chains;
 }
 
 /* ========== Adaptive shift operator ========== */
@@ -629,89 +750,38 @@ int main(int argc, char **argv) {
     init_dirac();
     init_storage();
 
-    /* ---- Phase 1: BFS seed ball ---- */
-    /* Grow until the Gaussian amplitude at boundary sites is negligible.
-     * Use radial pruning (prune_ratio=0.7) to prevent exponential blowup,
-     * but keep the interior dense (no pruning below min_prune_depth=6).
-     * Only expand sites where exp(-r²/2σ²) > seed_threshold. */
+    /* ---- Generate sites via chain-first approach ---- */
+    /* Chains are the primary structure. Every site is created by extending
+     * a chain, and immediately enqueued for a perpendicular chain spawn.
+     * This guarantees every site is on at least one chain by construction. */
     double seed_thresh = 1e-4;
     double step_len = 2.0/3.0;
+    int max_per_cell = 8;
+    int max_chain_len = (int)(4.0 * sigma / step_len) + 5;
+    g_grid_half = max_chain_len * step_len + 5.0;
+    g_grid_n = (int)(2.0 * g_grid_half / 1.0) + 1;
+    if (g_grid_n > 500) g_grid_n = 500;
+    g_grid_count = calloc(g_grid_n * g_grid_n * g_grid_n, sizeof(int));
 
-    /* Density-based pruning: divide space into cells of size `cell_size`.
-     * Don't expand from a site if its cell already has >= max_per_cell sites.
-     * This gives dense coverage near the origin (where BFS fills cells early)
-     * and sparse coverage at large r (where only efficient paths reach). */
-    double cell_size = 1.0;
-    int max_per_cell = 20;
-    /* Grid: centered at origin, covering [-grid_half, grid_half]³ */
-    double grid_half = seed_depth * step_len + 5.0;
-    int grid_n = (int)(2.0 * grid_half / cell_size) + 1;
-    if (grid_n > 500) grid_n = 500;  /* cap grid size */
-    int grid_total = grid_n * grid_n * grid_n;
-    int *grid_count = calloc(grid_total, sizeof(int));
+    fprintf(stderr, "\n--- Chain-first site generation (max_per_cell=%d, grid %d³) ---\n",
+            max_per_cell, g_grid_n);
 
-    fprintf(stderr, "\n--- Phase 1: BFS seed (depth %d, Gaussian > %.1e, density grid %d³) ---\n",
-            seed_depth, seed_thresh, grid_n);
-
-    /* Helper to get grid cell index from position */
-    #define GRID_IDX(pos) ({ \
-        int gx = (int)((pos.x + grid_half) / cell_size); \
-        int gy = (int)((pos.y + grid_half) / cell_size); \
-        int gz = (int)((pos.z + grid_half) / cell_size); \
-        if (gx < 0) gx = 0; if (gx >= grid_n) gx = grid_n-1; \
-        if (gy < 0) gy = 0; if (gy >= grid_n) gy = grid_n-1; \
-        if (gz < 0) gz = 0; if (gz >= grid_n) gz = grid_n-1; \
-        gx * grid_n * grid_n + gy * grid_n + gz; \
-    })
-
-    vec3 d0[4]; init_tet(d0);
-    site_insert((vec3){0,0,0}, d0);
-    grid_count[GRID_IDX(((vec3){0,0,0}))]++;
-    int *queue = malloc(MAX_SITES * sizeof(int));
-    int qh=0, qt=0; queue[qt++] = 0;
-    int *sdepth = calloc(MAX_SITES, sizeof(int));
-    int npruned = 0;
-    while (qh < qt) {
-        int s = queue[qh++];
-        if (sdepth[s] >= seed_depth) continue;
-        double r2 = v3dot(sites[s].pos, sites[s].pos);
-        /* Stop expanding if Gaussian is negligible */
-        if (exp(-r2 / (2*sigma*sigma)) < seed_thresh) continue;
-        /* Density pruning: don't expand if this cell is already full */
-        int gi = GRID_IDX(sites[s].pos);
-        if (grid_count[gi] >= max_per_cell) { npruned++; continue; }
-        for (int f = 0; f < 4; f++) {
-            vec3 p = sites[s].pos, dd[4];
-            memcpy(dd, sites[s].dirs, sizeof(dd));
-            helix_step(&p, dd, f); reorth(dd);
-            int old_n = nsites;
-            int nid = site_insert(p, dd);
-            if (nid >= old_n) {
-                sdepth[nid] = sdepth[s]+1;
-                queue[qt++] = nid;
-                int ci = GRID_IDX(sites[nid].pos);
-                grid_count[ci]++;
-            }
-        }
-        if (nsites % 500000 == 0)
-            fprintf(stderr, "  BFS: %d sites, depth ~%d, pruned %d\n", nsites, sdepth[s], npruned);
-    }
-    free(queue); free(sdepth); free(grid_count);
+    int n_chains = generate_sites_chain_first(sigma, seed_thresh, max_per_cell);
+    free(g_grid_count);
     int n_seed = nsites;
-    fprintf(stderr, "Seed: %d sites\n", n_seed);
 
-    /* ---- Phase 2: Thread chains through seed ---- */
-    fprintf(stderr, "\n--- Phase 2: Threading chains ---\n");
-    int nrch=0, nlch=0;
+    /* Report chain coverage */
+    int no_r = 0, no_l = 0, no_both = 0;
     for (int s = 0; s < n_seed; s++) {
-        if (sites[s].r_face < 0) {
-            if (thread_chain(s, PAT_R, 1) >= 2) nrch++;
-        }
-        if (sites[s].l_face < 0) {
-            if (thread_chain(s, PAT_L, 0) >= 2) nlch++;
-        }
+        int has_r = sites[s].r_face >= 0;
+        int has_l = sites[s].l_face >= 0;
+        if (!has_r) no_r++;
+        if (!has_l) no_l++;
+        if (!has_r && !has_l) no_both++;
     }
-    fprintf(stderr, "Chains: %d R, %d L\n", nrch, nlch);
+    fprintf(stderr, "Seed: %d sites, %d chains\n", n_seed, n_chains);
+    fprintf(stderr, "Coverage: %d without R-chain, %d without L-chain, %d without either\n",
+            no_r, no_l, no_both);
 
     /* ---- Initialize wavepacket ---- */
     double norm = 0;
