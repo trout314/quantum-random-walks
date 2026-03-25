@@ -3,15 +3,15 @@
  *
  * Adaptive: chain extends on-the-fly as the wavepacket spreads.
  * Pre-computes shift blocks, coin operators, and V-mixing at each site.
+ * Uses split real/imaginary storage (no Complex!double).
  */
 module walk_1d;
 
 import std.math : sqrt, cos, sin, exp, fabs;
-import std.complex : Complex;
 import std.conv : to;
 import std.stdio : writef, writefln, stderr, stdout, File;
 import geometry : Vec3, dot, norm, helixStep, reorth, initTet;
-import dirac : Mat4, C, makeTau, projPlus, projMinus, frameTransport, mul, conj, alpha;
+import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, matVecSplit, alpha;
 
 enum MAX_N = 500_000;
 
@@ -124,7 +124,7 @@ void ensureSite(Chain1d* ch, int i) {
                 ch.coin3[n] = buildBetaCoin(ch.ct, ch.st);
                 ch.useCoin3 = true;
             } else if (ch.coinType == 5) {
-                // e·α coin
+                // e . alpha coin
                 ch.coin3[n] = buildCoinMatrix([e.x, e.y, e.z], ch.ct, ch.st);
                 ch.useCoin3 = true;
             }
@@ -145,25 +145,34 @@ void ensureSite(Chain1d* ch, int i) {
     }
 }
 
-/// Build coin matrix: exp(-iθ (d·α)) = cos(θ)I - i sin(θ)(d·α)
+/// Build coin matrix: exp(-i theta (d . alpha)) = cos(theta)I - i sin(theta)(d . alpha)
 Mat4 buildCoinMatrix(double[3] d, double ct, double st) {
-    auto m = Mat4(0);
+    Mat4 m;
     foreach (a; 0 .. 4)
         foreach (b; 0 .. 4) {
-            C ea = C(0, 0);
-            foreach (k; 0 .. 3)
-                ea = ea + C(d[k], 0) * alpha(k)[a, b];
-            m[a, b] = C(ct * (a == b ? 1.0 : 0.0), 0) - C(0, st) * ea;
+            // (d . alpha)_{ab}
+            double eaRe = 0, eaIm = 0;
+            foreach (k; 0 .. 3) {
+                auto al = alpha(k);
+                eaRe += d[k] * al.re[4*a+b];
+                eaIm += d[k] * al.im[4*a+b];
+            }
+            // C = cos(theta) delta - i sin(theta) (d.alpha)
+            // -i*st * (eaRe + i*eaIm) = st*eaIm - i*st*eaRe
+            m.re[4*a+b] = (a == b ? ct : 0.0) + st * eaIm;
+            m.im[4*a+b] = -st * eaRe;
         }
     return m;
 }
 
-/// Build beta coin: exp(-iθ β)
+/// Build beta coin: exp(-i theta beta)
 Mat4 buildBetaCoin(double ct, double st) {
-    auto m = Mat4(0);
+    Mat4 m;
     double[4] bd = [1, 1, -1, -1];
-    foreach (a; 0 .. 4)
-        m[a, a] = C(ct, -st * bd[a]);
+    foreach (a; 0 .. 4) {
+        m.re[4*a+a] = ct;
+        m.im[4*a+a] = -st * bd[a];
+    }
     return m;
 }
 
@@ -172,64 +181,84 @@ Mat4 buildVmix(Mat4 Pp, Mat4 Pm, double mixPhi) {
     double cp = cos(mixPhi), sp = sin(mixPhi);
 
     // Gram-Schmidt for P+ and P- bases
-    C[4][2] ppBasis, pmBasis;
+    double[4][2] ppBRe = 0, ppBIm = 0, pmBRe = 0, pmBIm = 0;
     int npFound = 0, nmFound = 0;
     foreach (col; 0 .. 4) {
         if (npFound >= 2 && nmFound >= 2) break;
         if (npFound < 2) {
-            C[4] v;
-            foreach (a; 0 .. 4) v[a] = Pp[a, col];
+            double[4] vRe = void, vIm = void;
+            foreach (a; 0 .. 4) { vRe[a] = Pp.re[4*a+col]; vIm[a] = Pp.im[4*a+col]; }
             foreach (j; 0 .. npFound) {
-                C d = C(0,0);
-                foreach (a; 0 .. 4) d = d + conj(ppBasis[a][j]) * v[a];
-                foreach (a; 0 .. 4) v[a] = v[a] - d * ppBasis[a][j];
+                double dRe = 0, dIm = 0;
+                foreach (a; 0 .. 4) {
+                    dRe += ppBRe[a][j] * vRe[a] + ppBIm[a][j] * vIm[a];
+                    dIm += ppBRe[a][j] * vIm[a] - ppBIm[a][j] * vRe[a];
+                }
+                foreach (a; 0 .. 4) {
+                    vRe[a] -= dRe * ppBRe[a][j] - dIm * ppBIm[a][j];
+                    vIm[a] -= dRe * ppBIm[a][j] + dIm * ppBRe[a][j];
+                }
             }
             double nm = 0;
-            foreach (a; 0 .. 4) nm += v[a].re * v[a].re + v[a].im * v[a].im;
+            foreach (a; 0 .. 4) nm += vRe[a] * vRe[a] + vIm[a] * vIm[a];
             if (nm > 1e-10) {
                 double inv = 1.0 / sqrt(nm);
-                foreach (a; 0 .. 4) ppBasis[a][npFound] = C(inv, 0) * v[a];
+                foreach (a; 0 .. 4) { ppBRe[a][npFound] = inv * vRe[a]; ppBIm[a][npFound] = inv * vIm[a]; }
                 npFound++;
             }
         }
         if (nmFound < 2) {
-            C[4] v;
-            foreach (a; 0 .. 4) v[a] = Pm[a, col];
+            double[4] vRe = void, vIm = void;
+            foreach (a; 0 .. 4) { vRe[a] = Pm.re[4*a+col]; vIm[a] = Pm.im[4*a+col]; }
             foreach (j; 0 .. nmFound) {
-                C d = C(0,0);
-                foreach (a; 0 .. 4) d = d + conj(pmBasis[a][j]) * v[a];
-                foreach (a; 0 .. 4) v[a] = v[a] - d * pmBasis[a][j];
+                double dRe = 0, dIm = 0;
+                foreach (a; 0 .. 4) {
+                    dRe += pmBRe[a][j] * vRe[a] + pmBIm[a][j] * vIm[a];
+                    dIm += pmBRe[a][j] * vIm[a] - pmBIm[a][j] * vRe[a];
+                }
+                foreach (a; 0 .. 4) {
+                    vRe[a] -= dRe * pmBRe[a][j] - dIm * pmBIm[a][j];
+                    vIm[a] -= dRe * pmBIm[a][j] + dIm * pmBRe[a][j];
+                }
             }
             double nm = 0;
-            foreach (a; 0 .. 4) nm += v[a].re * v[a].re + v[a].im * v[a].im;
+            foreach (a; 0 .. 4) nm += vRe[a] * vRe[a] + vIm[a] * vIm[a];
             if (nm > 1e-10) {
                 double inv = 1.0 / sqrt(nm);
-                foreach (a; 0 .. 4) pmBasis[a][nmFound] = C(inv, 0) * v[a];
+                foreach (a; 0 .. 4) { pmBRe[a][nmFound] = inv * vRe[a]; pmBIm[a][nmFound] = inv * vIm[a]; }
                 nmFound++;
             }
         }
     }
 
-    auto V = Mat4(0);
+    // M = sum_j |pm_j><pp_j| + |pp_j><pm_j|
+    Mat4 V;
     foreach (j; 0 .. 2)
         foreach (a; 0 .. 4)
             foreach (b; 0 .. 4) {
-                V[a, b] = V[a, b] + pmBasis[a][j] * conj(ppBasis[b][j]);
-                V[a, b] = V[a, b] + ppBasis[a][j] * conj(pmBasis[b][j]);
+                int ab = 4*a+b;
+                V.re[ab] += pmBRe[a][j] * ppBRe[b][j] + pmBIm[a][j] * ppBIm[b][j];
+                V.im[ab] += pmBIm[a][j] * ppBRe[b][j] - pmBRe[a][j] * ppBIm[b][j];
+                V.re[ab] += ppBRe[a][j] * pmBRe[b][j] + ppBIm[a][j] * pmBIm[b][j];
+                V.im[ab] += ppBIm[a][j] * pmBRe[b][j] - ppBRe[a][j] * pmBIm[b][j];
             }
+    // V = cos(phi)I + i sin(phi) M
     foreach (a; 0 .. 4)
-        foreach (b; 0 .. 4)
-            V[a, b] = C(cp * (a == b ? 1.0 : 0.0), 0) + C(0, sp) * V[a, b];
+        foreach (b; 0 .. 4) {
+            int ab = 4*a+b;
+            double mRe = V.re[ab], mIm = V.im[ab];
+            V.re[ab] = (a == b ? cp : 0.0) + sp * (-mIm);
+            V.im[ab] = sp * mRe;
+        }
     return V;
 }
 
-/// Apply a precomputed 4×4 matrix to spinor at site i, in place.
-void applyMat4InPlace(Mat4 M, C[] psi, int i) {
-    C[4] result = [C(0,0), C(0,0), C(0,0), C(0,0)];
-    foreach (a; 0 .. 4)
-        foreach (b; 0 .. 4)
-            result[a] = result[a] + M[a, b] * psi[4*i + b];
-    psi[4*i .. 4*i+4] = result[];
+/// Apply a precomputed 4x4 matrix to spinor at site i, in place.
+void applyMat4InPlace(Mat4 M, double[] psiRe, double[] psiIm, int i) {
+    double[4] resRe = 0, resIm = 0;
+    matVecSplit(M, &psiRe[4*i], &psiIm[4*i], resRe.ptr, resIm.ptr);
+    psiRe[4*i .. 4*i+4] = resRe[];
+    psiIm[4*i .. 4*i+4] = resIm[];
 }
 
 void run1d(Walk1dParams p) {
@@ -258,58 +287,68 @@ void run1d(Walk1dParams p) {
     if (hi >= MAX_N) hi = MAX_N - 1;
     ensureSite(ch, hi);
 
-    auto psi = new C[4 * MAX_N];
-    psi[] = C(0, 0);
+    auto psiRe = new double[4 * MAX_N];
+    auto psiIm = new double[4 * MAX_N];
+    psiRe[] = 0;
+    psiIm[] = 0;
 
     // Frame-transported Gaussian IC with momentum kick
     double norm2 = 0;
 
     // Forward from center
     {
-        C[4] chiCur = [C(1,0), C(0,0), C(0,0), C(0,0)];
+        double[4] chiCurRe = [1, 0, 0, 0];
+        double[4] chiCurIm = [0, 0, 0, 0];
         foreach (i; center .. hi + 1) {
             double x = cast(double)(i - center);
             double w = exp(-x*x / (2 * p.sigma * p.sigma));
-            C phase = C(cos(p.k0 * x), sin(p.k0 * x));
-            foreach (a; 0 .. 4)
-                psi[4*i + a] = C(w, 0) * phase * chiCur[a];
+            double phRe = cos(p.k0 * x), phIm = sin(p.k0 * x);
+            foreach (a; 0 .. 4) {
+                // psi = w * phase * chi
+                // (w)(phRe + i phIm)(chiRe + i chiIm)
+                psiRe[4*i + a] = w * (phRe * chiCurRe[a] - phIm * chiCurIm[a]);
+                psiIm[4*i + a] = w * (phRe * chiCurIm[a] + phIm * chiCurRe[a]);
+            }
             norm2 += w * w;
             if (i < hi) {
                 ensureSite(ch, i + 1);
                 Mat4 U = frameTransport(ch.tau[i], ch.tau[i+1]);
-                C[4] chiNext = [C(0,0), C(0,0), C(0,0), C(0,0)];
-                foreach (a; 0 .. 4)
-                    foreach (b; 0 .. 4)
-                        chiNext[a] = chiNext[a] + U[a, b] * chiCur[b];
-                chiCur = chiNext;
+                double[4] chiNextRe = 0, chiNextIm = 0;
+                matVecSplit(U, chiCurRe.ptr, chiCurIm.ptr, chiNextRe.ptr, chiNextIm.ptr);
+                chiCurRe = chiNextRe;
+                chiCurIm = chiNextIm;
             }
         }
     }
 
     // Backward from center
     {
-        C[4] chiCur = [C(1,0), C(0,0), C(0,0), C(0,0)];
+        double[4] chiCurRe = [1, 0, 0, 0];
+        double[4] chiCurIm = [0, 0, 0, 0];
         foreach_reverse (i; lo .. center) {
             ensureSite(ch, i);
             Mat4 U = frameTransport(ch.tau[i+1], ch.tau[i]);
-            C[4] chiNext = [C(0,0), C(0,0), C(0,0), C(0,0)];
-            foreach (a; 0 .. 4)
-                foreach (b; 0 .. 4)
-                    chiNext[a] = chiNext[a] + U[a, b] * chiCur[b];
-            chiCur = chiNext;
+            double[4] chiNextRe = 0, chiNextIm = 0;
+            matVecSplit(U, chiCurRe.ptr, chiCurIm.ptr, chiNextRe.ptr, chiNextIm.ptr);
+            chiCurRe = chiNextRe;
+            chiCurIm = chiNextIm;
             double x = cast(double)(i - center);
             double w = exp(-x*x / (2 * p.sigma * p.sigma));
-            C phase = C(cos(p.k0 * x), sin(p.k0 * x));
-            foreach (a; 0 .. 4)
-                psi[4*i + a] = C(w, 0) * phase * chiCur[a];
+            double phRe = cos(p.k0 * x), phIm = sin(p.k0 * x);
+            foreach (a; 0 .. 4) {
+                psiRe[4*i + a] = w * (phRe * chiCurRe[a] - phIm * chiCurIm[a]);
+                psiIm[4*i + a] = w * (phRe * chiCurIm[a] + phIm * chiCurRe[a]);
+            }
             norm2 += w * w;
         }
     }
 
     double nf = 1.0 / sqrt(norm2);
     foreach (i; lo .. hi + 1)
-        foreach (a; 0 .. 4)
-            psi[4*i + a] = C(nf, 0) * psi[4*i + a];
+        foreach (a; 0 .. 4) {
+            psiRe[4*i + a] *= nf;
+            psiIm[4*i + a] *= nf;
+        }
 
     int activeLo = lo, activeHi = hi + 1;
     immutable double ampThresh = 1e-15;
@@ -322,7 +361,8 @@ void run1d(Walk1dParams p) {
              p.theta, p.sigma, p.nSteps, p.coinType, p.k0);
     writefln("# t norm x_mean x2 active_width");
 
-    auto tmpPsi = new C[4 * MAX_N];
+    auto tmpRe = new double[4 * MAX_N];
+    auto tmpIm = new double[4 * MAX_N];
 
     foreach (t; 0 .. p.nSteps + 1) {
         // Observables
@@ -330,8 +370,9 @@ void run1d(Walk1dParams p) {
         foreach (i; activeLo .. activeHi) {
             double prob = 0;
             foreach (a; 0 .. 4) {
-                auto z = psi[4*i + a];
-                prob += z.re * z.re + z.im * z.im;
+                double re = psiRe[4*i + a];
+                double im = psiIm[4*i + a];
+                prob += re * re + im * im;
             }
             totalProb += prob;
             mx += prob * cast(double)(i - center);
@@ -344,8 +385,9 @@ void run1d(Walk1dParams p) {
         foreach (i; activeLo .. activeHi) {
             double prob = 0;
             foreach (a; 0 .. 4) {
-                auto z = psi[4*i + a];
-                prob += z.re * z.re + z.im * z.im;
+                double re = psiRe[4*i + a];
+                double im = psiIm[4*i + a];
+                prob += re * re + im * im;
             }
             double dx = cast(double)(i - center) - xMean;
             var += prob * dx * dx;
@@ -361,13 +403,13 @@ void run1d(Walk1dParams p) {
 
             // Coin
             foreach (i; alo .. ahi)
-                applyMat4InPlace(ch.coin1[i], psi, i);
+                applyMat4InPlace(ch.coin1[i], psiRe, psiIm, i);
             if (ch.useCoin2)
                 foreach (i; alo .. ahi)
-                    applyMat4InPlace(ch.coin2[i], psi, i);
+                    applyMat4InPlace(ch.coin2[i], psiRe, psiIm, i);
             if (ch.useCoin3)
                 foreach (i; alo .. ahi)
-                    applyMat4InPlace(ch.coin3[i], psi, i);
+                    applyMat4InPlace(ch.coin3[i], psiRe, psiIm, i);
 
             // Shift
             if (activeLo > 0) ensureSite(ch, activeLo - 1);
@@ -375,46 +417,65 @@ void run1d(Walk1dParams p) {
 
             int zlo = (activeLo > 0) ? activeLo - 1 : 0;
             int zhi = activeHi + 1;
-            tmpPsi[4*zlo .. 4*zhi] = C(0, 0);
+            tmpRe[4*zlo .. 4*zhi] = 0;
+            tmpIm[4*zlo .. 4*zhi] = 0;
 
             foreach (i; zlo .. zhi) {
                 foreach (a; 0 .. 4) {
-                    C s = C(0, 0);
-                    if (i-1 >= alo && i-1 < ahi)
-                        foreach (b; 0 .. 4)
-                            s = s + ch.fwdBlock[i-1][a, b] * psi[4*(i-1) + b];
-                    if (i+1 >= alo && i+1 < ahi)
-                        foreach (b; 0 .. 4)
-                            s = s + ch.bwdBlock[i+1][a, b] * psi[4*(i+1) + b];
-                    tmpPsi[4*i + a] = s;
+                    double sRe = 0, sIm = 0;
+                    if (i-1 >= alo && i-1 < ahi) {
+                        // fwdBlock[i-1] * psi[i-1]
+                        foreach (b; 0 .. 4) {
+                            int ab = 4*a+b;
+                            sRe += ch.fwdBlock[i-1].re[ab] * psiRe[4*(i-1) + b]
+                                 - ch.fwdBlock[i-1].im[ab] * psiIm[4*(i-1) + b];
+                            sIm += ch.fwdBlock[i-1].re[ab] * psiIm[4*(i-1) + b]
+                                 + ch.fwdBlock[i-1].im[ab] * psiRe[4*(i-1) + b];
+                        }
+                    }
+                    if (i+1 >= alo && i+1 < ahi) {
+                        // bwdBlock[i+1] * psi[i+1]
+                        foreach (b; 0 .. 4) {
+                            int ab = 4*a+b;
+                            sRe += ch.bwdBlock[i+1].re[ab] * psiRe[4*(i+1) + b]
+                                 - ch.bwdBlock[i+1].im[ab] * psiIm[4*(i+1) + b];
+                            sIm += ch.bwdBlock[i+1].re[ab] * psiIm[4*(i+1) + b]
+                                 + ch.bwdBlock[i+1].im[ab] * psiRe[4*(i+1) + b];
+                        }
+                    }
+                    tmpRe[4*i + a] = sRe;
+                    tmpIm[4*i + a] = sIm;
                 }
             }
 
             // V-mixing
             if (p.mixPhi != 0.0)
                 foreach (i; zlo .. zhi)
-                    applyMat4InPlace(ch.vmix[i], tmpPsi, i);
+                    applyMat4InPlace(ch.vmix[i], tmpRe, tmpIm, i);
 
             // Update active region
             if (activeLo > 0) {
                 double prob = 0;
                 foreach (a; 0 .. 4) {
-                    auto z = tmpPsi[4*(activeLo-1) + a];
-                    prob += z.re * z.re + z.im * z.im;
+                    double re = tmpRe[4*(activeLo-1) + a];
+                    double im = tmpIm[4*(activeLo-1) + a];
+                    prob += re * re + im * im;
                 }
                 if (prob > ampThresh) activeLo--;
             }
             {
                 double prob = 0;
                 foreach (a; 0 .. 4) {
-                    auto z = tmpPsi[4*activeHi + a];
-                    prob += z.re * z.re + z.im * z.im;
+                    double re = tmpRe[4*activeHi + a];
+                    double im = tmpIm[4*activeHi + a];
+                    prob += re * re + im * im;
                 }
                 if (prob > ampThresh) activeHi++;
             }
 
             // Copy tmp to psi
-            psi[4*activeLo .. 4*activeHi] = tmpPsi[4*activeLo .. 4*activeHi];
+            psiRe[4*activeLo .. 4*activeHi] = tmpRe[4*activeLo .. 4*activeHi];
+            psiIm[4*activeLo .. 4*activeHi] = tmpIm[4*activeLo .. 4*activeHi];
         }
     }
 
@@ -424,28 +485,41 @@ void run1d(Walk1dParams p) {
         double total = 0;
         foreach (i; activeLo .. activeHi)
             foreach (a; 0 .. 4) {
-                auto z = psi[4*i + a];
-                total += z.re * z.re + z.im * z.im;
+                double re = psiRe[4*i + a];
+                double im = psiIm[4*i + a];
+                total += re * re + im * im;
             }
         pf.writefln("# site position prob prob_plus prob_minus");
         foreach (i; activeLo .. activeHi) {
             double prob = 0;
             foreach (a; 0 .. 4) {
-                auto z = psi[4*i + a];
-                prob += z.re * z.re + z.im * z.im;
+                double re = psiRe[4*i + a];
+                double im = psiIm[4*i + a];
+                prob += re * re + im * im;
             }
             // P+ and P- components
             double pp = 0, pm = 0;
             foreach (a; 0 .. 4) {
-                C sp = C(0,0), sm = C(0,0);
+                double spRe = 0, spIm = 0, smRe = 0, smIm = 0;
                 foreach (b; 0 .. 4) {
-                    C tab = ch.tau[i][a, b];
-                    C dab = C(a == b ? 1.0 : 0.0, 0);
-                    sp = sp + (dab + tab) * psi[4*i + b];
-                    sm = sm + (dab - tab) * psi[4*i + b];
+                    double tRe = ch.tau[i].re[4*a+b];
+                    double tIm = ch.tau[i].im[4*a+b];
+                    double dab = (a == b) ? 1.0 : 0.0;
+                    double pRe = psiRe[4*i + b];
+                    double pIm = psiIm[4*i + b];
+                    // (dab + tau) * psi
+                    double pplusRe = (dab + tRe);
+                    double pplusIm = tIm;
+                    spRe += pplusRe * pRe - pplusIm * pIm;
+                    spIm += pplusRe * pIm + pplusIm * pRe;
+                    // (dab - tau) * psi
+                    double pminusRe = (dab - tRe);
+                    double pminusIm = -tIm;
+                    smRe += pminusRe * pRe - pminusIm * pIm;
+                    smIm += pminusRe * pIm + pminusIm * pRe;
                 }
-                pp += sp.re * sp.re + sp.im * sp.im;
-                pm += sm.re * sm.re + sm.im * sm.im;
+                pp += spRe * spRe + spIm * spIm;
+                pm += smRe * smRe + smIm * smIm;
             }
             pp *= 0.25; pm *= 0.25;
             double r = norm(ch.pos[i]);

@@ -13,10 +13,7 @@
 module lattice;
 
 import std.math : sqrt, exp, fabs;
-import std.complex : Complex;
 import geometry : Vec3, dot, norm, helixStep, reorth, initTet;
-
-alias C = Complex!double;
 
 /// BC helix face patterns.
 immutable int[4] PAT_R = [1, 3, 0, 2];
@@ -93,8 +90,8 @@ struct DensityGrid {
 /// The lattice.
 struct Lattice {
     Site[] sites;
-    C[] psi;
-    C[] tmp;
+    double[] psiRe, psiIm;   /// spinor: 4 components per site, split real/imag
+    double[] tmpRe, tmpIm;    /// scratch buffer for shift
     Chain[] chains;
     int nsites;
     int maxSites;
@@ -106,10 +103,14 @@ struct Lattice {
         Lattice lat;
         lat.maxSites = maxSites;
         lat.sites = new Site[maxSites];
-        lat.psi = new C[4 * maxSites];
-        lat.psi[] = C(0, 0);
-        lat.tmp = new C[4 * maxSites];
-        lat.tmp[] = C(0, 0);
+        lat.psiRe = new double[4 * maxSites];
+        lat.psiIm = new double[4 * maxSites];
+        lat.psiRe[] = 0;
+        lat.psiIm[] = 0;
+        lat.tmpRe = new double[4 * maxSites];
+        lat.tmpIm = new double[4 * maxSites];
+        lat.tmpRe[] = 0;
+        lat.tmpIm[] = 0;
         lat.nsites = 0;
         lat.freeList = new int[maxSites];
         lat.freeCount = 0;
@@ -125,20 +126,25 @@ struct Lattice {
             id = nsites++;
         }
         sites[id] = Site(pos, dirs);
-        psi[4*id .. 4*id+4] = C(0, 0);
+        psiRe[4*id .. 4*id+4] = 0;
+        psiIm[4*id .. 4*id+4] = 0;
         return id;
     }
 
     void removeSite(int id) {
-        psi[4*id .. 4*id+4] = C(0, 0);
+        psiRe[4*id .. 4*id+4] = 0;
+        psiIm[4*id .. 4*id+4] = 0;
         sites[id] = Site.init;
         freeList[freeCount++] = id;
     }
 
     void swapBuffers() {
-        auto swap = psi;
-        psi = tmp;
-        tmp = swap;
+        auto swapRe = psiRe;
+        auto swapIm = psiIm;
+        psiRe = tmpRe;
+        psiIm = tmpIm;
+        tmpRe = swapRe;
+        tmpIm = swapIm;
     }
 
     /// Next/prev site on a chain (implicit from chain's siteIds array).

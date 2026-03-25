@@ -4,16 +4,13 @@
 module observables;
 
 import std.math : sqrt;
-import std.complex : Complex;
 import geometry : Vec3, dot, norm;
 import lattice : Lattice;
-
-alias C = Complex!double;
 
 struct Observables {
     double totalProb = 0;
     double normPsi = 0;   // sqrt(totalProb)
-    double r2 = 0;        // <r²>
+    double r2 = 0;        // <r^2>
     double x2 = 0, y2 = 0, z2 = 0;
     double r95 = 0;       // radius enclosing 95% of probability
     int nsites = 0;
@@ -28,8 +25,9 @@ Observables computeObservables(const Lattice lat) {
     foreach (n; 0 .. lat.nsites) {
         double p = 0;
         foreach (a; 0 .. 4) {
-            auto z = lat.psi[4*n + a];
-            p += z.re * z.re + z.im * z.im;
+            double re = lat.psiRe[4*n + a];
+            double im = lat.psiIm[4*n + a];
+            p += re * re + im * im;
         }
         obs.totalProb += p;
     }
@@ -39,8 +37,9 @@ Observables computeObservables(const Lattice lat) {
     foreach (n; 0 .. lat.nsites) {
         double p = 0;
         foreach (a; 0 .. 4) {
-            auto z = lat.psi[4*n + a];
-            p += z.re * z.re + z.im * z.im;
+            double re = lat.psiRe[4*n + a];
+            double im = lat.psiIm[4*n + a];
+            p += re * re + im * im;
         }
         double pw = p / obs.totalProb;
         double x = lat.sites[n].pos.x;
@@ -68,8 +67,9 @@ Observables computeObservables(const Lattice lat) {
             double r = norm(lat.sites[n].pos);
             double p = 0;
             foreach (a; 0 .. 4) {
-                auto zz = lat.psi[4*n + a];
-                p += zz.re * zz.re + zz.im * zz.im;
+                double re = lat.psiRe[4*n + a];
+                double im = lat.psiIm[4*n + a];
+                p += re * re + im * im;
             }
             int b = cast(int)(r / dr);
             if (b > nbins) b = nbins;
@@ -103,23 +103,23 @@ unittest {
     foreach (n; 0 .. lat.nsites) {
         double r2 = dot(lat.sites[n].pos, lat.sites[n].pos);
         double w = exp(-r2 / (2 * sigma * sigma));
-        lat.psi[4*n] = C(w, 0);
+        lat.psiRe[4*n] = w;
         norm2 += w * w;
     }
     double nf = 1.0 / sqrt(norm2);
     foreach (i; 0 .. 4 * lat.nsites)
-        lat.psi[i] = C(nf, 0) * lat.psi[i];
+        lat.psiRe[i] *= nf;
 
     auto obs = computeObservables(lat);
 
     // Norm should be 1
     assert(fabs(obs.normPsi - 1.0) < 1e-12);
 
-    // r² should be roughly 3σ² for a 3D Gaussian (= 3 * 2.25 = 6.75)
+    // r^2 should be roughly 3 sigma^2 for a 3D Gaussian (= 3 * 2.25 = 6.75)
     // but discrete sampling on the lattice gives a different value
     assert(obs.r2 > 0);
 
-    // x² ≈ y² ≈ z² (approximately isotropic)
+    // x^2 approx y^2 approx z^2 (approximately isotropic)
     double avg = obs.r2 / 3.0;
     assert(fabs(obs.x2 - avg) / avg < 0.15);  // within 15%
     assert(fabs(obs.y2 - avg) / avg < 0.15);

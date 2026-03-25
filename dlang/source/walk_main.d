@@ -7,7 +7,6 @@
 module walk_main;
 
 import std.math : sqrt, cos, sin, exp;
-import std.complex : Complex;
 import std.conv : to;
 import std.stdio : writef, writefln, stderr, stdout;
 import std.format : format;
@@ -16,14 +15,12 @@ import lattice : Lattice, DensityGrid, generateSites, PAT_R, PAT_L;
 import operators : applyShift, applyCoin, applyVmix, pruneChainEnds, ShiftResult;
 import observables : computeObservables, Observables;
 
-alias C = Complex!double;
-
 struct WalkParams {
     double theta = 0.5;
     double sigma = 3.0;
     int nSteps = 50;
     double threshold = 1e-10;
-    int coinType = 1;      // 0 = e·α, 1 = dual parity
+    int coinType = 1;      // 0 = e.alpha, 1 = dual parity
     double mixPhi = 0.0;
     int pruneInterval = 0;
 }
@@ -45,12 +42,14 @@ void initWavepacket(ref Lattice lat, double sigma) {
     foreach (n; 0 .. lat.nsites) {
         double r2 = dot(lat.sites[n].pos, lat.sites[n].pos);
         double w = exp(-r2 / (2 * sigma * sigma));
-        lat.psi[4*n] = C(w, 0);
+        lat.psiRe[4*n] = w;
         norm2 += w * w;
     }
     double nf = 1.0 / sqrt(norm2);
-    foreach (i; 0 .. 4 * lat.nsites)
-        lat.psi[i] = C(nf, 0) * lat.psi[i];
+    foreach (i; 0 .. 4 * lat.nsites) {
+        lat.psiRe[i] *= nf;
+        // psiIm stays zero
+    }
 }
 
 void run(WalkParams p) {
@@ -71,7 +70,7 @@ void run(WalkParams p) {
     double gridHalf = maxChainLen * stepLen + 5.0;
     auto grid = DensityGrid.create(gridHalf, 8);
 
-    stderr.writefln("\n--- Chain-first site generation (grid %d³) ---", grid.gridN);
+    stderr.writefln("\n--- Chain-first site generation (grid %d^3) ---", grid.gridN);
     int nChains = generateSites(lat, p.sigma, 1e-4, grid);
 
     // Chain coverage report
@@ -97,7 +96,10 @@ void run(WalkParams p) {
 
     // Time evolution
     foreach (t; 0 .. p.nSteps + 1) {
+        import core.time : MonoTime;
+        auto tObsStart = MonoTime.currTime;
         auto obs = computeObservables(lat);
+        auto tObsEnd = MonoTime.currTime;
 
         writefln("%d %.6f %.2f %.2f %.2f %.2f %.2f %d %.6e %.6e",
                  t, obs.normPsi, obs.r2, obs.x2, obs.y2, obs.z2,
@@ -110,13 +112,33 @@ void run(WalkParams p) {
                                 t, p.nSteps, lat.nsites, obs.normPsi,
                                 totalAbsorbed, totalPruned);
 
-            // W = V_R · S_R · C_R · V_L · S_L · C_L
+            import core.time : MonoTime, dur;
+            auto t0 = MonoTime.currTime;
+
+            // W = V_R . S_R . C_R . V_L . S_L . C_L
             applyCoin(lat, false, ct, st, p.coinType);
+            auto tCoinL = MonoTime.currTime;
             auto resL = applyShift(lat, false, PAT_L, thresh2);
+            auto tShiftL = MonoTime.currTime;
             applyVmix(lat, false, p.mixPhi);
+            auto tVmixL = MonoTime.currTime;
             applyCoin(lat, true, ct, st, p.coinType);
+            auto tCoinR = MonoTime.currTime;
             auto resR = applyShift(lat, true, PAT_R, thresh2);
+            auto tShiftR = MonoTime.currTime;
             applyVmix(lat, true, p.mixPhi);
+            auto tVmixR = MonoTime.currTime;
+
+            auto tObs0 = MonoTime.currTime;
+            // (observables computed at top of next iteration)
+
+            if (t % 5 == 0) {
+                auto ms(MonoTime a, MonoTime b) { return (b - a).total!"msecs"; }
+                stderr.writefln("    timing: obs=%dms coinL=%dms shiftL=%dms coinR=%dms shiftR=%dms",
+                    ms(tObsStart, tObsEnd),
+                    ms(t0, tCoinL), ms(tCoinL, tShiftL),
+                    ms(tVmixL, tCoinR), ms(tCoinR, tShiftR));
+            }
 
             totalAbsorbed += resL.probAbsorbed + resR.probAbsorbed;
 
