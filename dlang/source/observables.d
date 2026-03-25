@@ -61,8 +61,11 @@ Observables computeObservables(bool hasCoin)(const Lattice!hasCoin lat) {
         double dr = 0.5;
         int nbins = cast(int)(rmax / dr) + 1;
         if (nbins < 10) nbins = 10;
-        auto bp = new double[nbins + 1];
-        bp[] = 0;
+        // Use a static buffer to avoid per-step GC allocation.
+        // Max radius for 60M sites at density ~8/cell is ~50 units, so 200 bins is safe.
+        enum MAX_BINS = 200;
+        if (nbins >= MAX_BINS) nbins = MAX_BINS - 1;
+        double[MAX_BINS] bp = 0;
         foreach (n; 0 .. lat.nsites) {
             double r = norm(lat.sites[n].pos);
             double p = 0;
