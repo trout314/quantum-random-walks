@@ -1,6 +1,13 @@
 project('quantum-walk-dlang', 'd', version: '0.1.0')
 
-add_project_arguments('-boundscheck=on', language: 'd')
+# Bounds checking on for debug builds, off for release
+if get_option('buildtype') == 'release'
+  add_project_arguments('-boundscheck=off', language: 'd')
+else
+  add_project_arguments('-boundscheck=on', language: 'd')
+endif
+add_project_arguments('-mcpu=native', language: 'd')
+add_project_arguments('--fp-contract=fast', language: 'd')
 
 sources = [
   'source/interop_test.d',
