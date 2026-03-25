@@ -42,6 +42,7 @@ struct ShiftResult {
 }
 
 /// Try to extend a chain forward from site s. Returns new site ID or -1.
+/// New sites at chain ends are guaranteed unique (BC helix no-loops property).
 private int tryExtendFwd(ref Lattice lat, int s, bool isR,
                          const int[4] pat, ref C[4] shifted, double thresh2) {
     double amp2 = 0;
@@ -54,21 +55,12 @@ private int tryExtendFwd(ref Lattice lat, int s, bool isR,
     Vec3 p = lat.sites[s].pos;
     auto d = lat.sites[s].dirs;
     helixStep(p, d, face);
-
-    int nb = lat.findSite(p);
-    if (nb >= 0) {
-        // Existing site from another chain — link but absorb
-        lat.setChainNext(s, isR, nb);
-        if (lat.chainPrev(nb, isR) < 0) {
-            lat.setChainPrev(nb, isR, s);
-            lat.setChainFace(nb, isR, nf);
-        }
-        return -1;
-    }
-
     reorth(d);
-    nb = lat.insertSite(p, d);
-    lat.linkForward(s, nb, isR, nf);
+
+    int nb = lat.allocSite(p, d);
+    lat.setChainFace(nb, isR, nf);
+    int chainId = isR ? lat.sites[s].rChain : lat.sites[s].lChain;
+    lat.chainAppend(chainId, nb);
     return nb;
 }
 
@@ -85,20 +77,12 @@ private int tryExtendBwd(ref Lattice lat, int s, bool isR,
     Vec3 p = lat.sites[s].pos;
     auto d = lat.sites[s].dirs;
     helixStep(p, d, pf);
-
-    int nb = lat.findSite(p);
-    if (nb >= 0) {
-        lat.setChainPrev(s, isR, nb);
-        if (lat.chainNext(nb, isR) < 0) {
-            lat.setChainNext(nb, isR, s);
-            lat.setChainFace(nb, isR, pf);
-        }
-        return -1;
-    }
-
     reorth(d);
-    nb = lat.insertSite(p, d);
-    lat.linkBackward(s, nb, isR, pf);
+
+    int nb = lat.allocSite(p, d);
+    lat.setChainFace(nb, isR, pf);
+    int chainId = isR ? lat.sites[s].rChain : lat.sites[s].lChain;
+    lat.chainPrepend(chainId, nb);
     return nb;
 }
 
@@ -131,11 +115,6 @@ ShiftResult applyShift(ref Lattice lat, bool isR, const int[4] pat, double thres
             matVecPsi(Pp, lat.psi, s, shifted);
 
             int nb = lat.chainNext(s, isR);
-            // Clear stale link to pruned site
-            if (nb >= 0 && lat.chainFace(nb, isR) < 0) {
-                lat.setChainNext(s, isR, -1);
-                nb = -1;
-            }
             if (nb < 0)
                 nb = tryExtendFwd(lat, s, isR, pat, shifted, thresh2);
 
@@ -164,10 +143,6 @@ ShiftResult applyShift(ref Lattice lat, bool isR, const int[4] pat, double thres
             matVecPsi(Pm, lat.psi, s, shifted);
 
             int nb = lat.chainPrev(s, isR);
-            if (nb >= 0 && lat.chainFace(nb, isR) < 0) {
-                lat.setChainPrev(s, isR, -1);
-                nb = -1;
-            }
             if (nb < 0)
                 nb = tryExtendBwd(lat, s, isR, pat, shifted, thresh2);
 
@@ -365,21 +340,35 @@ private bool checkPruneEligible(const Lattice lat, int s, bool isR, bool isFwd, 
     return flow2 < thresh2;
 }
 
-/// Unlink a chain-end site. If orphaned, remove entirely.
+/// Unlink a chain-end site by truncating the chain.
+/// If orphaned from both chains, remove the site entirely.
 private void unlinkChainEnd(ref Lattice lat, int s, bool isR, bool isFwd) {
+    int chainId = isR ? lat.sites[s].rChain : lat.sites[s].lChain;
+    if (chainId < 0) return;
+
+    auto ch = &lat.chains[chainId];
     if (isFwd) {
-        int nb = lat.chainPrev(s, isR);
-        if (nb >= 0) lat.setChainNext(nb, isR, -1);
-        lat.setChainPrev(s, isR, -1);
-        lat.setChainFace(s, isR, -1);
+        // Remove from forward end (last element)
+        assert(ch.siteIds[$ - 1] == s);
+        ch.siteIds = ch.siteIds[0 .. $ - 1];
     } else {
-        int nb = lat.chainNext(s, isR);
-        if (nb >= 0) lat.setChainPrev(nb, isR, -1);
-        lat.setChainNext(s, isR, -1);
-        lat.setChainFace(s, isR, -1);
+        // Remove from backward end (first element)
+        assert(ch.siteIds[0] == s);
+        ch.siteIds = ch.siteIds[1 .. $];
+        ch.rootIdx--;
+        // Shift indices of remaining sites
+        foreach (id; ch.siteIds) {
+            if (isR) lat.sites[id].rIdx--;
+            else     lat.sites[id].lIdx--;
+        }
     }
 
-    if (lat.chainFace(s, true) < 0 && lat.chainFace(s, false) < 0)
+    // Clear chain membership for this site
+    if (isR) { lat.sites[s].rChain = -1; lat.sites[s].rIdx = -1; lat.sites[s].rFace = -1; }
+    else     { lat.sites[s].lChain = -1; lat.sites[s].lIdx = -1; lat.sites[s].lFace = -1; }
+
+    // If orphaned from both chains, remove entirely
+    if (lat.sites[s].rChain < 0 && lat.sites[s].lChain < 0)
         lat.removeSite(s);
 }
 
@@ -446,7 +435,7 @@ unittest {
     import geometry : initTet;
 
     // Generate a small lattice and run one shift step
-    auto lat = Lattice.create(100000, 17);
+    auto lat = Lattice.create(100000);
     double sigma = 1.5;
     double stepLen = 2.0 / 3.0;
     int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;
@@ -492,7 +481,7 @@ unittest {
     import lattice : Lattice, DensityGrid, generateSites;
 
     // Coin preserves norm (theta=0 is identity)
-    auto lat = Lattice.create(100000, 17);
+    auto lat = Lattice.create(100000);
     double sigma = 1.5;
     double stepLen = 2.0 / 3.0;
     int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;

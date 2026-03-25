@@ -6,7 +6,6 @@ sources = [
   'source/interop_test.d',
   'source/geometry.d',
   'source/dirac.d',
-  'source/spatial_hash.d',
   'source/lattice.d',
   'source/operators.d',
   'source/observables.d',

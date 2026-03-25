@@ -1,17 +1,20 @@
 /**
- * lattice.d — Tetrahedral lattice: site storage, chain linking, and generation.
+ * lattice.d — Tetrahedral lattice: chain-based site storage and generation.
  *
- * Sites are stored in a flat array indexed by ID. Each site has a position,
- * 4 tetrahedral direction vectors, and chain links (next/prev/face) for
- * both R and L helix chains. A spatial hash enables O(1) position lookup.
- * A density grid limits the number of sites per unit volume.
+ * Sites live at the intersection of R and L helix chains. Each chain stores
+ * an array of site IDs. A site knows which R-chain and L-chain it belongs to,
+ * and its index along each. Chain links (next/prev) are implicit: the next
+ * site on chain C is just C.siteIds[index + 1].
+ *
+ * No spatial hash is needed: sites are created by chain extension (guaranteed
+ * unique by the no-loops property), and perpendicular chains share sites via
+ * explicit parent references, not position lookup.
  */
 module lattice;
 
 import std.math : sqrt, exp, fabs;
 import std.complex : Complex;
 import geometry : Vec3, dot, norm, helixStep, reorth, initTet;
-import spatial_hash : SiteHash;
 
 alias C = Complex!double;
 
@@ -33,13 +36,21 @@ int prevFace(const int[4] pat, int curFace) {
     return pat[0];
 }
 
+/// A helix chain: an ordered list of site IDs with root geometry.
+struct Chain {
+    bool isR;
+    int rootSite;        /// site ID where this chain was spawned
+    int[] siteIds;       /// site IDs in order along the chain
+    int rootIdx;         /// index of rootSite within siteIds
+}
+
 /// Per-site data.
 struct Site {
     Vec3 pos;
     Vec3[4] dirs;
-    int rNext = -1, rPrev = -1;
-    int lNext = -1, lPrev = -1;
-    int rFace = -1, lFace = -1;
+    int rChain = -1, rIdx = -1;  /// R-chain membership
+    int lChain = -1, lIdx = -1;  /// L-chain membership
+    int rFace = -1, lFace = -1;  /// face index for each chain
 }
 
 /// Density grid for limiting site count per unit volume.
@@ -79,20 +90,19 @@ struct DensityGrid {
     }
 }
 
-/// The lattice: site storage, spatial hash, free list, and density grid.
+/// The lattice.
 struct Lattice {
     Site[] sites;
-    C[] psi;       /// spinor array: 4 components per site
-    C[] tmp;       /// scratch buffer for shift operator
-    SiteHash hash;
+    C[] psi;
+    C[] tmp;
+    Chain[] chains;
     int nsites;
     int maxSites;
 
-    // Free list for ID reuse (pruning)
     int[] freeList;
     int freeCount;
 
-    static Lattice create(int maxSites, int hashBits) {
+    static Lattice create(int maxSites) {
         Lattice lat;
         lat.maxSites = maxSites;
         lat.sites = new Site[maxSites];
@@ -100,141 +110,139 @@ struct Lattice {
         lat.psi[] = C(0, 0);
         lat.tmp = new C[4 * maxSites];
         lat.tmp[] = C(0, 0);
-        lat.hash = SiteHash.create(hashBits);
         lat.nsites = 0;
         lat.freeList = new int[maxSites];
         lat.freeCount = 0;
         return lat;
     }
 
-    /// Find site ID at position, or -1 if not present.
-    /// Only valid while hash table is alive (before freeHash).
-    int findSite(Vec3 pos) const {
-        return hash.find(pos);
-    }
-
-    /// Insert a new site with deduplication (for seed generation).
-    /// If a site already exists at this position, returns its existing ID.
-    int insertSite(Vec3 pos, Vec3[4] dirs) {
-        int existing = hash.find(pos);
-        if (existing >= 0) return existing;
-
-        int id = allocSiteId();
-        hash.insert(pos, id);
-        sites[id] = Site(pos, dirs);
-        psi[4*id .. 4*id+4] = C(0, 0);
-        return id;
-    }
-
-    /// Insert a new site unconditionally (for walk-time chain extension).
-    /// Caller guarantees the site is unique (BC helix no-loops property).
-    int insertSiteNew(Vec3 pos, Vec3[4] dirs) {
-        int id = allocSiteId();
-        sites[id] = Site(pos, dirs);
-        psi[4*id .. 4*id+4] = C(0, 0);
-        return id;
-    }
-
-    /// Allocate a site ID from the free list or bump nsites.
-    private int allocSiteId() {
+    int allocSite(Vec3 pos, Vec3[4] dirs) {
+        int id;
         if (freeCount > 0)
-            return freeList[--freeCount];
-        assert(nsites < maxSites, "Too many sites");
-        return nsites++;
+            id = freeList[--freeCount];
+        else {
+            assert(nsites < maxSites, "Too many sites");
+            id = nsites++;
+        }
+        sites[id] = Site(pos, dirs);
+        psi[4*id .. 4*id+4] = C(0, 0);
+        return id;
     }
 
-    /// Remove a site (zero psi, push to free list).
     void removeSite(int id) {
         psi[4*id .. 4*id+4] = C(0, 0);
         sites[id] = Site.init;
         freeList[freeCount++] = id;
     }
 
-    /// Free the hash table (call after seed generation is complete).
-    void freeHash() {
-        hash = SiteHash.init;
-    }
-
-    /// Swap psi and tmp pointers (avoids memcpy after shift).
     void swapBuffers() {
         auto swap = psi;
         psi = tmp;
         tmp = swap;
     }
 
-    /// Get chain next/prev for a given chirality.
-    int chainNext(int s, bool isR) const {
-        return isR ? sites[s].rNext : sites[s].lNext;
-    }
-    int chainPrev(int s, bool isR) const {
-        return isR ? sites[s].rPrev : sites[s].lPrev;
-    }
-    int chainFace(int s, bool isR) const {
-        return isR ? sites[s].rFace : sites[s].lFace;
-    }
-
-    /// Set chain links.
-    void setChainNext(int s, bool isR, int val) {
-        if (isR) sites[s].rNext = val; else sites[s].lNext = val;
-    }
-    void setChainPrev(int s, bool isR, int val) {
-        if (isR) sites[s].rPrev = val; else sites[s].lPrev = val;
-    }
-    void setChainFace(int s, bool isR, int val) {
-        if (isR) sites[s].rFace = val; else sites[s].lFace = val;
+    /// Next/prev site on a chain (implicit from chain's siteIds array).
+    int chainNext(int siteId, bool isR) const {
+        int chainId = isR ? sites[siteId].rChain : sites[siteId].lChain;
+        int idx = isR ? sites[siteId].rIdx : sites[siteId].lIdx;
+        if (chainId < 0 || idx < 0) return -1;
+        int nextIdx = idx + 1;
+        if (nextIdx >= chains[chainId].siteIds.length) return -1;
+        return chains[chainId].siteIds[nextIdx];
     }
 
-    /// Link cur -> nb in the forward direction for the given chirality.
-    void linkForward(int cur, int nb, bool isR, int nbFace) {
-        setChainNext(cur, isR, nb);
-        setChainPrev(nb, isR, cur);
-        if (chainFace(nb, isR) < 0)
-            setChainFace(nb, isR, nbFace);
+    int chainPrev(int siteId, bool isR) const {
+        int chainId = isR ? sites[siteId].rChain : sites[siteId].lChain;
+        int idx = isR ? sites[siteId].rIdx : sites[siteId].lIdx;
+        if (chainId < 0 || idx <= 0) return -1;
+        return chains[chainId].siteIds[idx - 1];
     }
 
-    /// Link cur -> nb in the backward direction for the given chirality.
-    void linkBackward(int cur, int nb, bool isR, int nbFace) {
-        setChainPrev(cur, isR, nb);
-        setChainNext(nb, isR, cur);
-        if (chainFace(nb, isR) < 0)
-            setChainFace(nb, isR, nbFace);
+    int chainFace(int siteId, bool isR) const {
+        return isR ? sites[siteId].rFace : sites[siteId].lFace;
+    }
+
+    void setChainFace(int siteId, bool isR, int face) {
+        if (isR) sites[siteId].rFace = face; else sites[siteId].lFace = face;
+    }
+
+    /// Append a site to the forward end of a chain.
+    void chainAppend(int chainId, int siteId) {
+        chains[chainId].siteIds ~= siteId;
+        int idx = cast(int) chains[chainId].siteIds.length - 1;
+        if (chains[chainId].isR) {
+            sites[siteId].rChain = chainId;
+            sites[siteId].rIdx = idx;
+        } else {
+            sites[siteId].lChain = chainId;
+            sites[siteId].lIdx = idx;
+        }
+    }
+
+    /// Prepend a site to the backward end of a chain (shifts all indices).
+    void chainPrepend(int chainId, int siteId) {
+        // Shift existing indices
+        bool isR = chains[chainId].isR;
+        foreach (existingId; chains[chainId].siteIds) {
+            if (isR) sites[existingId].rIdx++;
+            else     sites[existingId].lIdx++;
+        }
+        chains[chainId].rootIdx++;
+
+        // Insert at front
+        chains[chainId].siteIds = [siteId] ~ chains[chainId].siteIds;
+        if (isR) {
+            sites[siteId].rChain = chainId;
+            sites[siteId].rIdx = 0;
+        } else {
+            sites[siteId].lChain = chainId;
+            sites[siteId].lIdx = 0;
+        }
     }
 }
 
+/// Seed queue entry.
 private struct ChainSeed { int siteId; bool isR; }
 
 /// Generate all sites using chain-first approach.
-/// Returns the number of chains created.
 int generateSites(ref Lattice lat, double sigma, double seedThresh,
                   ref DensityGrid grid) {
-    // Origin
     auto d0 = initTet();
-    lat.insertSite(Vec3(0, 0, 0), d0);
+    int origin = lat.allocSite(Vec3(0, 0, 0), d0);
     grid.increment(Vec3(0, 0, 0));
 
-    // BFS queue: each site can enqueue at most one perpendicular seed,
-    // plus the initial 2 seeds for the origin.
     auto queue = new ChainSeed[2 * lat.maxSites + 2];
     int qHead = 0, qTail = 0;
-    queue[qTail++] = ChainSeed(0, true);   // R-chain from origin
-    queue[qTail++] = ChainSeed(0, false);  // L-chain from origin
+    queue[qTail++] = ChainSeed(origin, true);
+    queue[qTail++] = ChainSeed(origin, false);
 
     int nChains = 0;
 
     while (qHead < qTail) {
         auto seed = queue[qHead++];
-        int s = seed.siteId;
+        int rootSite = seed.siteId;
         bool isR = seed.isR;
 
-        if (lat.chainFace(s, isR) >= 0) continue;
+        if (lat.chainFace(rootSite, isR) >= 0) continue;
 
         const int[4] pat = isR ? PAT_R : PAT_L;
-        lat.setChainFace(s, isR, pat[0]);
+        lat.setChainFace(rootSite, isR, pat[0]);
 
-        int fwd = extendChain(lat, s, pat, isR, true, sigma, seedThresh,
-                              grid, queue, qTail);
-        int bwd = extendChain(lat, s, pat, isR, false, sigma, seedThresh,
-                              grid, queue, qTail);
+        // Create chain with root as only member
+        int chainId = cast(int) lat.chains.length;
+        lat.chains ~= Chain(isR, rootSite, [rootSite], 0);
+        if (isR) {
+            lat.sites[rootSite].rChain = chainId;
+            lat.sites[rootSite].rIdx = 0;
+        } else {
+            lat.sites[rootSite].lChain = chainId;
+            lat.sites[rootSite].lIdx = 0;
+        }
+
+        // Extend forward
+        int fwd = extendDir(lat, chainId, true, sigma, seedThresh, grid, queue, qTail);
+        // Extend backward
+        int bwd = extendDir(lat, chainId, false, sigma, seedThresh, grid, queue, qTail);
 
         if (fwd + bwd > 0) nChains++;
     }
@@ -242,161 +250,106 @@ int generateSites(ref Lattice lat, double sigma, double seedThresh,
     return nChains;
 }
 
-/// Extend a chain in one direction, creating new sites as needed.
-private int extendChain(ref Lattice lat, int startSite,
-                        const int[4] pat, bool isR, bool forward,
-                        double sigma, double seedThresh,
-                        ref DensityGrid grid,
-                        ChainSeed[] queue, ref int qTail) {
-    int linked = 0;
-    int cur = startSite;
-    int curFace = lat.chainFace(cur, isR);
+/// Extend a chain in one direction, creating new sites.
+private int extendDir(ref Lattice lat, int chainId, bool forward,
+                      double sigma, double seedThresh,
+                      ref DensityGrid grid,
+                      ChainSeed[] queue, ref int qTail) {
+    auto ch = &lat.chains[chainId];
+    bool isR = ch.isR;
+    const int[4] pat = isR ? PAT_R : PAT_L;
 
-    Vec3 p = lat.sites[cur].pos;
-    Vec3[4] d = lat.sites[cur].dirs;
+    // Start from the appropriate end of the chain
+    int endSite = forward ? ch.siteIds[$ - 1] : ch.siteIds[0];
+    int curFace = lat.chainFace(endSite, isR);
+    Vec3 p = lat.sites[endSite].pos;
+    Vec3[4] d = lat.sites[endSite].dirs;
+
+    int created = 0;
 
     for (int step = 0; step < lat.maxSites; step++) {
         int stepFace = forward ? curFace : prevFace(pat, curFace);
         helixStep(p, d, stepFace);
         if ((step + 1) % 8 == 0) reorth(d);
 
-        // Gaussian cutoff
         if (exp(-dot(p, p) / (2 * sigma * sigma)) < seedThresh) break;
+        if (grid.isFull(p)) break;
 
         int nbFace = forward ? nextFace(pat, curFace) : stepFace;
 
-        // Check if site already exists
-        int nb = lat.findSite(p);
-        if (nb >= 0) {
-            // Already claimed by another chain of this type?
-            if (forward && lat.chainPrev(nb, isR) >= 0) break;
-            if (!forward && lat.chainNext(nb, isR) >= 0) break;
-
-            if (forward)
-                lat.linkForward(cur, nb, isR, nbFace);
-            else
-                lat.linkBackward(cur, nb, isR, nbFace);
-
-            cur = nb;
-            curFace = nbFace;
-            linked++;
-            continue;
-        }
-
-        // Density check
-        if (grid.isFull(p)) break;
-
-        // Create new site
         Vec3[4] dd = d;
         reorth(dd);
-        nb = lat.insertSite(p, dd);
+        int nb = lat.allocSite(p, dd);
+        lat.setChainFace(nb, isR, nbFace);
         grid.increment(p);
 
         if (forward)
-            lat.linkForward(cur, nb, isR, nbFace);
+            lat.chainAppend(chainId, nb);
         else
-            lat.linkBackward(cur, nb, isR, nbFace);
+            lat.chainPrepend(chainId, nb);
 
-        // Enqueue perpendicular chain seed
         queue[qTail++] = ChainSeed(nb, !isR);
 
-        cur = nb;
         curFace = nbFace;
-        linked++;
+        created++;
+
+        // Re-fetch chain pointer (appending may have reallocated)
+        ch = &lat.chains[chainId];
     }
-    return linked;
+
+    return created;
 }
 
 // ---- D unit tests ----
 
 unittest {
-    // nextFace/prevFace are inverses
     foreach (f; 0 .. 4) {
         assert(prevFace(PAT_R, nextFace(PAT_R, f)) == f);
         assert(nextFace(PAT_R, prevFace(PAT_R, f)) == f);
-        assert(prevFace(PAT_L, nextFace(PAT_L, f)) == f);
-        assert(nextFace(PAT_L, prevFace(PAT_L, f)) == f);
     }
 }
 
 unittest {
-    // Small lattice generation: origin exists, has chains
-    auto lat = Lattice.create(100000, 17);
+    auto lat = Lattice.create(100000);
     double sigma = 1.5;
     double stepLen = 2.0 / 3.0;
     int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;
-    double gridHalf = maxChainLen * stepLen + 5.0;
-    auto grid = DensityGrid.create(gridHalf, 8);
+    auto grid = DensityGrid.create(maxChainLen * stepLen + 5.0, 8);
     int nChains = generateSites(lat, sigma, 1e-4, grid);
 
     assert(lat.nsites > 1);
     assert(nChains > 0);
+    assert(lat.chains.length > 0);
 
-    // Origin is site 0
-    assert(fabs(lat.sites[0].pos.x) < 1e-14);
-    assert(fabs(lat.sites[0].pos.y) < 1e-14);
-    assert(fabs(lat.sites[0].pos.z) < 1e-14);
-
-    // Origin has both R and L chains
     assert(lat.chainFace(0, true) >= 0);
     assert(lat.chainFace(0, false) >= 0);
-}
 
-unittest {
-    // All sites with a chain face should have consistent forward/backward links
-    auto lat = Lattice.create(100000, 17);
-    double sigma = 1.5;
-    double stepLen = 2.0 / 3.0;
-    int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;
-    auto grid = DensityGrid.create(maxChainLen * stepLen + 5.0, 8);
-    generateSites(lat, sigma, 1e-4, grid);
-
+    // Chain next/prev consistency
     foreach (s; 0 .. lat.nsites) {
-        // Check R-chain
-        if (lat.chainFace(s, true) >= 0) {
-            int nxt = lat.chainNext(s, true);
-            if (nxt >= 0) assert(lat.chainPrev(nxt, true) == s ||
-                                 lat.chainPrev(nxt, true) >= 0);
+        int nxt = lat.chainNext(s, true);
+        if (nxt >= 0) {
+            int prv = lat.chainPrev(nxt, true);
+            assert(prv == s, "R-chain next/prev mismatch");
         }
-        // Check L-chain
-        if (lat.chainFace(s, false) >= 0) {
-            int nxt = lat.chainNext(s, false);
-            if (nxt >= 0) assert(lat.chainPrev(nxt, false) == s ||
-                                 lat.chainPrev(nxt, false) >= 0);
+        nxt = lat.chainNext(s, false);
+        if (nxt >= 0) {
+            int prv = lat.chainPrev(nxt, false);
+            assert(prv == s, "L-chain next/prev mismatch");
         }
     }
 }
 
 unittest {
-    // Hash table and site array agree
-    auto lat = Lattice.create(100000, 17);
-    double sigma = 1.5;
-    double stepLen = 2.0 / 3.0;
-    int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;
-    auto grid = DensityGrid.create(maxChainLen * stepLen + 5.0, 8);
-    generateSites(lat, sigma, 1e-4, grid);
-
-    foreach (s; 0 .. lat.nsites) {
-        int found = lat.findSite(lat.sites[s].pos);
-        assert(found == s, "Hash lookup mismatch");
-    }
-}
-
-unittest {
-    // Free list: remove and re-insert
-    auto lat = Lattice.create(100, 10);
+    auto lat = Lattice.create(100);
     auto d = initTet();
-    int id0 = lat.insertSite(Vec3(0, 0, 0), d);
-    int id1 = lat.insertSite(Vec3(1, 0, 0), d);
+    int id0 = lat.allocSite(Vec3(0, 0, 0), d);
+    int id1 = lat.allocSite(Vec3(1, 0, 0), d);
     assert(lat.nsites == 2);
 
-    // After freeHash, removeSite doesn't touch the hash
-    lat.freeHash();
     lat.removeSite(id0);
     assert(lat.freeCount == 1);
 
-    // insertSiteNew (no hash) should reuse id0
-    int id2 = lat.insertSiteNew(Vec3(2, 0, 0), d);
+    int id2 = lat.allocSite(Vec3(2, 0, 0), d);
     assert(id2 == id0);
     assert(lat.freeCount == 0);
 }

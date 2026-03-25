@@ -91,7 +91,7 @@ unittest {
     import lattice : Lattice, DensityGrid, generateSites;
     import std.math : exp, fabs;
 
-    auto lat = Lattice.create(100000, 17);
+    auto lat = Lattice.create(100000);
     double sigma = 1.5;
     double stepLen = 2.0 / 3.0;
     int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;

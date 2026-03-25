@@ -64,8 +64,7 @@ void run(WalkParams p) {
 
     // Generate lattice
     enum int MAX_SITES = 60_000_000;
-    enum int HASH_BITS = 27;
-    auto lat = Lattice.create(MAX_SITES, HASH_BITS);
+    auto lat = Lattice.create(MAX_SITES);
 
     double stepLen = 2.0 / 3.0;
     int maxChainLen = cast(int)(4.0 * p.sigma / stepLen) + 5;
