@@ -7,7 +7,7 @@
  * propagating wavepacket.
  *
  * Build: clang -O2 -o walk_adaptive src/walk_adaptive.c -lm
- * Usage: ./walk_adaptive [seed_depth] [theta] [sigma] [n_steps] [threshold]
+ * Usage: ./walk_adaptive theta sigma n_steps threshold seed_depth coin_type mix_phi prune_interval
  */
 
 #include <stdio.h>
@@ -26,15 +26,6 @@ static long get_avail_mb(void) {
     }
     fclose(f);
     return avail;
-}
-static void mem_check(const char *label, long reserve_mb) {
-    long avail = get_avail_mb();
-    if (avail < 0) return;
-    if (avail < reserve_mb) {
-        fprintf(stderr,"\n*** ABORT at %s: only %ld MB available (need > %ld MB). ***\n",
-                label, avail, reserve_mb);
-        exit(2);
-    }
 }
 
 /* ========== 3D vector ========== */
@@ -64,95 +55,6 @@ static void init_tet(vec3 d[4]) {
 static void helix_step(vec3 *pos, vec3 d[4], int face) {
     vec3 e=d[face]; *pos=v3add(*pos,v3scale(e,-2.0/3.0));
     for(int a=0;a<4;a++) d[a]=v3reflect(d[a],e);
-}
-
-/* ========== A4 symmetry (tetrahedral wedge seeding) ========== */
-static int g_use_sym = 0;
-static double g_a4_rot[12][3][3];
-
-/* 12 even permutations of {0,1,2,3} */
-static const int A4_PERMS[12][4] = {
-    {0,1,2,3}, /* identity */
-    {1,2,0,3}, {2,0,1,3}, /* (012), (021) */
-    {1,3,2,0}, {3,0,2,1}, /* (013), (031) */
-    {2,1,3,0}, {3,1,0,2}, /* (023), (032) */
-    {0,2,3,1}, {0,3,1,2}, /* (123), (132) */
-    {1,0,3,2}, {2,3,0,1}, {3,2,1,0}  /* (01)(23), (02)(13), (03)(12) */
-};
-
-static void mat3_inv(double M[3][3], double R[3][3]) {
-    double det = M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1])
-               - M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0])
-               + M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]);
-    double inv = 1.0/det;
-    R[0][0]= inv*(M[1][1]*M[2][2]-M[1][2]*M[2][1]);
-    R[0][1]=-inv*(M[0][1]*M[2][2]-M[0][2]*M[2][1]);
-    R[0][2]= inv*(M[0][1]*M[1][2]-M[0][2]*M[1][1]);
-    R[1][0]=-inv*(M[1][0]*M[2][2]-M[1][2]*M[2][0]);
-    R[1][1]= inv*(M[0][0]*M[2][2]-M[0][2]*M[2][0]);
-    R[1][2]=-inv*(M[0][0]*M[1][2]-M[0][2]*M[1][0]);
-    R[2][0]= inv*(M[1][0]*M[2][1]-M[1][1]*M[2][0]);
-    R[2][1]=-inv*(M[0][0]*M[2][1]-M[0][1]*M[2][0]);
-    R[2][2]= inv*(M[0][0]*M[1][1]-M[0][1]*M[1][0]);
-}
-
-static void init_a4_rotations(void) {
-    vec3 d[4]; init_tet(d);
-    /* D = [d[0] | d[1] | d[2]] as column matrix */
-    double D[3][3] = {
-        {d[0].x, d[1].x, d[2].x},
-        {d[0].y, d[1].y, d[2].y},
-        {d[0].z, d[1].z, d[2].z}
-    };
-    double Dinv[3][3];
-    mat3_inv(D, Dinv);
-
-    vec3 dv[4]; /* all 4 directions for permuted lookup */
-    dv[0]=d[0]; dv[1]=d[1]; dv[2]=d[2]; dv[3]=d[3];
-
-    for (int p = 0; p < 12; p++) {
-        /* R_p = [d[sigma(0)] | d[sigma(1)] | d[sigma(2)]] · Dinv */
-        double Dp[3][3] = {
-            {dv[A4_PERMS[p][0]].x, dv[A4_PERMS[p][1]].x, dv[A4_PERMS[p][2]].x},
-            {dv[A4_PERMS[p][0]].y, dv[A4_PERMS[p][1]].y, dv[A4_PERMS[p][2]].y},
-            {dv[A4_PERMS[p][0]].z, dv[A4_PERMS[p][1]].z, dv[A4_PERMS[p][2]].z}
-        };
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++) {
-                g_a4_rot[p][i][j] = 0;
-                for (int k = 0; k < 3; k++)
-                    g_a4_rot[p][i][j] += Dp[i][k] * Dinv[k][j];
-            }
-    }
-}
-
-static int in_wedge(vec3 p) {
-    static vec3 dw[4];
-    static int init = 0;
-    if (!init) { init_tet(dw); init = 1; }
-    double lam[4];
-    for (int i = 0; i < 4; i++) lam[i] = v3dot(p, dw[i]);
-    /* Vertex 0 closest, vertex 1 second closest */
-    return lam[0] >= lam[1] && lam[0] >= lam[2] && lam[0] >= lam[3]
-        && lam[1] >= lam[2] && lam[1] >= lam[3];
-}
-
-/* Number of distinct A4 images for a site.
- * Site 0 (origin): 1 image. Site 1 (on vertex axis): 4 images.
- * All others: 12 (generic position, trivial stabilizer). */
-static inline int site_images(int id) {
-    if (!g_use_sym) return 1;
-    if (id == 0) return 1;
-    if (id == 1) return 4;
-    return 12;
-}
-
-static vec3 apply_a4_rot(int idx, vec3 p) {
-    return (vec3){
-        g_a4_rot[idx][0][0]*p.x + g_a4_rot[idx][0][1]*p.y + g_a4_rot[idx][0][2]*p.z,
-        g_a4_rot[idx][1][0]*p.x + g_a4_rot[idx][1][1]*p.y + g_a4_rot[idx][1][2]*p.z,
-        g_a4_rot[idx][2][0]*p.x + g_a4_rot[idx][2][1]*p.y + g_a4_rot[idx][2][2]*p.z
-    };
 }
 
 /* ========== 4x4 complex matrix ========== */
@@ -278,10 +180,9 @@ static int site_insert(vec3 pos, vec3 dirs[4]) {
 
 /* ========== Site removal (for pruning) ========== */
 static void site_remove(int id) {
-    /* Find and tombstone the hash entry */
     long kx,ky,kz; poskey(sites[id].pos,&kx,&ky,&kz); unsigned h=hfn(kx,ky,kz);
     for(int p=0;p<HASH_SIZE;p++){unsigned i=(h+p)&HASH_MASK;
-        if(htab[i].id==-1) break;  /* shouldn't happen */
+        if(htab[i].id==-1) break;
         if(htab[i].id==-2) continue;
         if(htab[i].kx==kx&&htab[i].ky==ky&&htab[i].kz==kz){
             htab[i].id=-2; break;
@@ -297,13 +198,11 @@ static void site_remove(int id) {
 /* ========== Chain threading ========== */
 static const int PAT_R[4]={1,3,0,2}, PAT_L[4]={0,1,2,3};
 
-/* Compute the next face in the pattern given current face */
 static int next_face(const int pat[4], int cur_face) {
     for (int i = 0; i < 4; i++)
         if (pat[i] == cur_face) return pat[(i+1)%4];
     return pat[0];
 }
-/* Compute the prev face in the pattern given current face */
 static int prev_face(const int pat[4], int cur_face) {
     for (int i = 0; i < 4; i++)
         if (pat[i] == cur_face) return pat[(i+3)%4];
@@ -312,38 +211,32 @@ static int prev_face(const int pat[4], int cur_face) {
 
 /* ========== Chain-first site generation ========== */
 
-/* Seed queue entry: a site that needs a perpendicular chain spawned. */
 typedef struct { int site_id; int spawn_type; /* 0=L, 1=R */ } chain_seed_t;
 
-/* Density grid globals (set up in main before calling generate_sites) */
+/* Density grid globals */
 static double g_grid_half;
 static int g_grid_n;
-static double g_grid_cell;  /* cell side length */
 static int *g_grid_count;
+#define MAX_PER_CELL 8
 
 #define GRID_IDX(pos) ({ \
-    int gx = (int)((pos.x + g_grid_half) / g_grid_cell); \
-    int gy = (int)((pos.y + g_grid_half) / g_grid_cell); \
-    int gz = (int)((pos.z + g_grid_half) / g_grid_cell); \
+    int gx = (int)((pos.x + g_grid_half) / 1.0); \
+    int gy = (int)((pos.y + g_grid_half) / 1.0); \
+    int gz = (int)((pos.z + g_grid_half) / 1.0); \
     if (gx < 0) gx = 0; if (gx >= g_grid_n) gx = g_grid_n-1; \
     if (gy < 0) gy = 0; if (gy >= g_grid_n) gy = g_grid_n-1; \
     if (gz < 0) gz = 0; if (gz >= g_grid_n) gz = g_grid_n-1; \
     gx * g_grid_n * g_grid_n + gy * g_grid_n + gz; \
 })
 
-
-/* Extend a chain in one direction from start_site, creating new sites as needed.
- * For each new site created, enqueue a perpendicular chain seed.
- * Returns the number of sites linked (including start). */
 static int extend_chain_dir(int start_site, const int pat[4], int is_r,
-                             int forward, /* 1=forward, 0=backward */
-                             double sigma, double seed_thresh, int max_per_cell,
+                             int forward,
+                             double sigma, double seed_thresh,
                              chain_seed_t *seed_queue, int *sq_tail) {
     int linked = 0;
     int cur = start_site;
     int cur_face = is_r ? sites[cur].r_face : sites[cur].l_face;
 
-    /* For backward: reverse the pattern */
     int step_pat[4];
     if (forward) {
         for (int i = 0; i < 4; i++) step_pat[i] = pat[i];
@@ -356,9 +249,6 @@ static int extend_chain_dir(int start_site, const int pat[4], int is_r,
     vec3 d[4]; memcpy(d, sites[cur].dirs, sizeof(d));
 
     for (int step = 0; step < MAX_SITES; step++) {
-        /* Determine which face to step through.
-         * Forward: step through cur_face, next site gets next_face.
-         * Backward: step through prev_face of cur_face, prev site gets that face. */
         int step_face;
         if (forward) {
             step_face = cur_face;
@@ -376,13 +266,12 @@ static int extend_chain_dir(int start_site, const int pat[4], int is_r,
         /* Check if site already exists */
         int nb = site_find(p);
         if (nb >= 0) {
-            /* Existing site — link into this chain if slot is free */
             int nb_face;
             if (forward) nb_face = next_face(pat, cur_face);
             else         nb_face = step_face;
 
             if (is_r) {
-                if (forward && sites[nb].r_prev >= 0) break;  /* already claimed */
+                if (forward && sites[nb].r_prev >= 0) break;
                 if (!forward && sites[nb].r_next >= 0) break;
                 if (forward) {
                     sites[cur].r_next = nb; sites[nb].r_prev = cur;
@@ -403,12 +292,12 @@ static int extend_chain_dir(int start_site, const int pat[4], int is_r,
             cur = nb;
             cur_face = nb_face;
             linked++;
-            continue;  /* chain continues through existing site */
+            continue;
         }
 
         /* New site — check density */
         int ci = GRID_IDX(p);
-        if (g_grid_count[ci] >= max_per_cell) break;
+        if (g_grid_count[ci] >= MAX_PER_CELL) break;
 
         /* Create site */
         vec3 dd[4]; memcpy(dd, d, sizeof(dd)); reorth(dd);
@@ -447,19 +336,14 @@ static int extend_chain_dir(int start_site, const int pat[4], int is_r,
     return linked;
 }
 
-/* Generate all sites using chain-first approach.
- * Returns number of chains created. */
-static int generate_sites_chain_first(double sigma, double seed_thresh, int max_per_cell) {
-    /* Origin */
+static int generate_sites_chain_first(double sigma, double seed_thresh) {
     vec3 d0[4]; init_tet(d0);
     site_insert((vec3){0,0,0}, d0);
     g_grid_count[GRID_IDX(((vec3){0,0,0}))]++;
 
-    /* Seed queue */
     chain_seed_t *seed_queue = malloc(MAX_SITES * sizeof(chain_seed_t));
     int sq_head = 0, sq_tail = 0;
 
-    /* Origin needs both R and L chains */
     seed_queue[sq_tail++] = (chain_seed_t){0, 1};  /* R-chain */
     seed_queue[sq_tail++] = (chain_seed_t){0, 0};  /* L-chain */
 
@@ -470,20 +354,17 @@ static int generate_sites_chain_first(double sigma, double seed_thresh, int max_
         int s = seed.site_id;
         int is_r = seed.spawn_type;
 
-        /* Skip if this site already has a chain of this type */
         if (is_r && sites[s].r_face >= 0) continue;
         if (!is_r && sites[s].l_face >= 0) continue;
 
         const int *pat = is_r ? PAT_R : PAT_L;
 
-        /* Assign starting face */
         if (is_r) sites[s].r_face = pat[0];
         else      sites[s].l_face = pat[0];
 
-        /* Extend forward and backward */
-        int fwd = extend_chain_dir(s, pat, is_r, 1, sigma, seed_thresh, max_per_cell,
+        int fwd = extend_chain_dir(s, pat, is_r, 1, sigma, seed_thresh,
                                     seed_queue, &sq_tail);
-        int bwd = extend_chain_dir(s, pat, is_r, 0, sigma, seed_thresh, max_per_cell,
+        int bwd = extend_chain_dir(s, pat, is_r, 0, sigma, seed_thresh,
                                     seed_queue, &sq_tail);
 
         if (fwd + bwd > 0) n_chains++;
@@ -499,19 +380,14 @@ static int generate_sites_chain_first(double sigma, double seed_thresh, int max_
 
 /* ========== Chain-end pruning ========== */
 
-/* Check if a chain-end site is eligible for pruning.
- * is_fwd=1: s is a forward end (next==-1), check P+ flow from predecessor.
- * is_fwd=0: s is a backward end (prev==-1), check P- flow from successor. */
 static int check_prune_eligible(int s, int is_r, int is_fwd, double thresh2) {
-    /* Check amplitude at s */
     double amp2 = 0;
     for (int a = 0; a < 4; a++) amp2 += creal(psi[4*s+a]*conj(psi[4*s+a]));
     if (amp2 >= thresh2) return 0;
 
-    /* Check flow from neighbor */
     int nb = is_fwd ? (is_r ? sites[s].r_prev : sites[s].l_prev)
                     : (is_r ? sites[s].r_next : sites[s].l_next);
-    if (nb < 0) return 1;  /* no neighbor — isolated end, safe to prune */
+    if (nb < 0) return 1;
 
     int face = is_r ? sites[nb].r_face : sites[nb].l_face;
     if (face < 0) return 1;
@@ -519,14 +395,12 @@ static int check_prune_eligible(int s, int is_r, int is_fwd, double thresh2) {
     vec3 dv = sites[nb].dirs[face];
     c4x4 tau; make_tau(tau, dv);
 
-    /* Build projector: P+ for forward flow, P- for backward flow */
     c4x4 P; c4_eye(P);
     double sign = is_fwd ? 1.0 : -1.0;
     for (int a = 0; a < 4; a++)
         for (int b = 0; b < 4; b++)
             P[a][b] = 0.5*(P[a][b] + sign*tau[a][b]);
 
-    /* Compute |P · psi_nb|² */
     double flow2 = 0;
     for (int a = 0; a < 4; a++) {
         double complex v = 0;
@@ -536,8 +410,6 @@ static int check_prune_eligible(int s, int is_r, int is_fwd, double thresh2) {
     return flow2 < thresh2;
 }
 
-/* Unlink a chain-end site from one chain.
- * If the site becomes orphaned (no chains), remove it entirely. */
 static void unlink_chain_end(int s, int is_r, int is_fwd) {
     if (is_fwd) {
         int nb = is_r ? sites[s].r_prev : sites[s].l_prev;
@@ -557,22 +429,17 @@ static void unlink_chain_end(int s, int is_r, int is_fwd) {
         else      { sites[s].l_next = -1; sites[s].l_face = -1; }
     }
 
-    /* If orphaned from all chains, remove entirely */
     if (sites[s].r_face < 0 && sites[s].l_face < 0)
         site_remove(s);
 }
 
-/* Prune low-amplitude chain-end sites. Iterates until no more prunable.
- * Returns count of pruned sites, accumulates pruned probability. */
 static int prune_chain_ends(double thresh2, double *prob_pruned) {
     int total_pruned = 0, pruned_this_pass;
     do {
         pruned_this_pass = 0;
         for (int s = 0; s < nsites; s++) {
-            /* Skip dead sites */
             if (sites[s].r_face < 0 && sites[s].l_face < 0) continue;
 
-            /* R-chain forward end */
             if (sites[s].r_face >= 0 && sites[s].r_next == -1) {
                 if (check_prune_eligible(s, 1, 1, thresh2)) {
                     for (int a = 0; a < 4; a++)
@@ -582,7 +449,6 @@ static int prune_chain_ends(double thresh2, double *prob_pruned) {
                     continue;
                 }
             }
-            /* R-chain backward end */
             if (sites[s].r_face >= 0 && sites[s].r_prev == -1) {
                 if (check_prune_eligible(s, 1, 0, thresh2)) {
                     for (int a = 0; a < 4; a++)
@@ -592,7 +458,6 @@ static int prune_chain_ends(double thresh2, double *prob_pruned) {
                     continue;
                 }
             }
-            /* L-chain forward end */
             if (sites[s].l_face >= 0 && sites[s].l_next == -1) {
                 if (check_prune_eligible(s, 0, 1, thresh2)) {
                     for (int a = 0; a < 4; a++)
@@ -602,7 +467,6 @@ static int prune_chain_ends(double thresh2, double *prob_pruned) {
                     continue;
                 }
             }
-            /* L-chain backward end */
             if (sites[s].l_face >= 0 && sites[s].l_prev == -1) {
                 if (check_prune_eligible(s, 0, 0, thresh2)) {
                     for (int a = 0; a < 4; a++)
@@ -620,12 +484,8 @@ static int prune_chain_ends(double thresh2, double *prob_pruned) {
 
 /* ========== Adaptive shift operator ========== */
 
-/* Try to extend a chain from site s in the forward (+) direction.
- * Returns the new/existing neighbor site id, or -1 if amplitude too small.
- * If a new site is created, it's linked and its psi is zeroed. */
 static int try_extend_fwd(int s, int is_r, const int pat[4],
                            double complex shifted[4], double thresh2) {
-    /* Check amplitude */
     double amp2 = 0;
     for (int a = 0; a < 4; a++) amp2 += creal(shifted[a]*conj(shifted[a]));
     if (amp2 < thresh2) return -1;
@@ -633,22 +493,17 @@ static int try_extend_fwd(int s, int is_r, const int pat[4],
     int face = is_r ? sites[s].r_face : sites[s].l_face;
     int nf = next_face(pat, face);
 
-    /* Compute neighbor position */
     vec3 p = sites[s].pos;
     vec3 d[4]; memcpy(d, sites[s].dirs, sizeof(d));
     helix_step(&p, d, face);
 
-    /* Find or create */
     int nb = site_find(p);
     if (nb >= 0) {
-        /* Site already exists — link for future steps. One-directional links are OK;
-         * the shift operator handles stale links to pruned sites gracefully. */
         if (is_r) { sites[s].r_next = nb; if (sites[nb].r_prev<0) { sites[nb].r_prev=s; sites[nb].r_face=nf; } }
         else      { sites[s].l_next = nb; if (sites[nb].l_prev<0) { sites[nb].l_prev=s; sites[nb].l_face=nf; } }
-        return -1;  /* absorb this step's amplitude */
+        return -1;
     }
 
-    /* Genuinely new site */
     reorth(d);
     nb = site_insert(p, d);
     if (is_r) { sites[s].r_next = nb; sites[nb].r_prev = s; sites[nb].r_face = nf; }
@@ -656,11 +511,6 @@ static int try_extend_fwd(int s, int is_r, const int pat[4],
     return nb;
 }
 
-/* Same for backward (-) direction.
- *
- * The predecessor stepped with face pf = prev_face(pat, face) to reach s.
- * From s, helix_step(pf) goes back to the predecessor (since the step
- * is its own inverse when using the same face). */
 static int try_extend_bwd(int s, int is_r, const int pat[4],
                            double complex shifted[4], double thresh2) {
     double amp2 = 0;
@@ -676,7 +526,6 @@ static int try_extend_bwd(int s, int is_r, const int pat[4],
 
     int nb = site_find(p);
     if (nb >= 0) {
-        /* Existing site — link for future but absorb this step */
         if (is_r) { sites[s].r_prev = nb; if (sites[nb].r_next<0) { sites[nb].r_next=s; sites[nb].r_face=pf; } }
         else      { sites[s].l_prev = nb; if (sites[nb].l_next<0) { sites[nb].l_next=s; sites[nb].l_face=pf; } }
         return -1;
@@ -689,28 +538,22 @@ static int try_extend_bwd(int s, int is_r, const int pat[4],
     return nb;
 }
 
-/* Apply shift operator for one chirality with adaptive site creation.
- * Reads from psi, writes to tmp. */
 static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
                                   int *n_created, double *prob_absorbed) {
-    int ns = nsites;  /* snapshot — don't process sites created during this pass */
+    int ns = nsites;
     *n_created = 0;
     *prob_absorbed = 0;
 
-    /* Norm accounting */
     double norm_in = 0, norm_identity = 0, norm_fwd = 0, norm_bwd = 0;
 
-    /* Zero tmp for all current sites */
     memset(tmp, 0, 4 * (size_t)ns * sizeof(double complex));
 
     for (int s = 0; s < ns; s++) {
         int face = is_r ? sites[s].r_face : sites[s].l_face;
 
-        /* Accumulate input norm */
         for (int a = 0; a < 4; a++) norm_in += creal(psi[4*s+a]*conj(psi[4*s+a]));
 
         if (face < 0) {
-            /* Not on a chain of this type — identity */
             for (int a = 0; a < 4; a++) tmp[4*s+a] = psi[4*s+a];
             for (int a = 0; a < 4; a++) norm_identity += creal(psi[4*s+a]*conj(psi[4*s+a]));
             continue;
@@ -739,7 +582,6 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
                     nb = -1;
                 }
             }
-            /* Try to extend if at chain end */
             if (nb < 0)
                 nb = try_extend_fwd(s, is_r, pat, shifted, thresh2);
 
@@ -762,7 +604,6 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
                 norm_fwd += ns2;
                 if (nb >= ns) (*n_created)++;
             } else {
-                /* Absorbed */
                 for (int a=0;a<4;a++)
                     *prob_absorbed += creal(shifted[a]*conj(shifted[a]));
             }
@@ -802,11 +643,10 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
         }
     }
 
-    /* Check: how many new sites received from 2 sources? */
+    /* Diagnostic: new sites receiving from 2+ sources */
     {
         int double_recv = 0;
         char *recv_count = calloc(nsites, 1);
-        /* Re-scan: not ideal but diagnostic only */
         for (int s = 0; s < ns; s++) {
             int face = is_r ? sites[s].r_face : sites[s].l_face;
             if (face < 0) continue;
@@ -822,27 +662,21 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
         free(recv_count);
     }
 
-    /* Compute output norm, separating old vs new sites */
-    double norm_out = 0, norm_out_old = 0, norm_out_new = 0;
-    for (int s = 0; s < nsites; s++) {
-        double sn = 0;
+    /* Norm check */
+    double norm_out = 0;
+    for (int s = 0; s < nsites; s++)
         for (int a = 0; a < 4; a++)
-            sn += creal(tmp[4*s+a]*conj(tmp[4*s+a]));
-        norm_out += sn;
-        if (s < ns) norm_out_old += sn;
-        else norm_out_new += sn;
-    }
+            norm_out += creal(tmp[4*s+a]*conj(tmp[4*s+a]));
 
     if (fabs(norm_out/norm_in - 1.0) > 0.001)
-        fprintf(stderr, "    %s shift: ratio=%.6f (in=%.6f out=%.6f old=%.6f new=%.6f)\n",
-                is_r?"R":"L", norm_out/norm_in, norm_in, norm_out,
-                norm_out_old, norm_out_new);
+        fprintf(stderr, "    %s shift: ratio=%.6f (in=%.6f out=%.6f)\n",
+                is_r?"R":"L", norm_out/norm_in, norm_in, norm_out);
 
-    /* Copy tmp to psi (including any new sites created beyond ns) */
     memcpy(psi, tmp, 4 * (size_t)nsites * sizeof(double complex));
 }
 
-/* Apply one coin pass using direction vector d[3] */
+/* ========== Coin operator ========== */
+
 static void apply_coin_dir(double *d, int n, double ct, double st) {
     double complex out[4];
     for (int a = 0; a < 4; a++) {
@@ -857,15 +691,14 @@ static void apply_coin_dir(double *d, int n, double ct, double st) {
     for (int a = 0; a < 4; a++) psi[4*n+a] = out[a];
 }
 
-/* Apply coin operator (in-place).
- * coin_type: 0 = e·α (original), 1 = dual parity f·α (f₁,f₂ ⊥ e) */
-static int g_coin_type = 1;  /* default to dual parity */
+/* coin_type: 0 = e·α (original), 1 = dual parity f·α (f₁,f₂ ⊥ e) */
+static int g_coin_type = 1;
 
 static void apply_coin(int is_r, double ct, double st) {
     int ns = nsites;
     for (int n = 0; n < ns; n++) {
         int face = is_r ? sites[n].r_face : sites[n].l_face;
-        if (face < 0) continue;  /* no chain = identity */
+        if (face < 0) continue;
 
         vec3 e = sites[n].dirs[face];
         double en = v3norm(e);
@@ -873,12 +706,10 @@ static void apply_coin(int is_r, double ct, double st) {
         vec3 ehat = v3scale(e, 1.0/en);
 
         if (g_coin_type == 0) {
-            /* Original e·α coin */
             double d[3] = {e.x, e.y, e.z};
             apply_coin_dir(d, n, ct, st);
         } else {
             /* Dual parity coin: f₁·α then f₂·α, both ⊥ e */
-            /* f₁ = cross(ê, ẑ), fallback to cross(ê, ŷ) */
             vec3 f1;
             f1.x = ehat.y; f1.y = -ehat.x; f1.z = 0;
             double fn = v3norm(f1);
@@ -887,7 +718,6 @@ static void apply_coin(int is_r, double ct, double st) {
                 fn = v3norm(f1);
             }
             f1 = v3scale(f1, 1.0/fn);
-            /* f₂ = cross(ê, f₁) */
             vec3 f2;
             f2.x = ehat.y*f1.z - ehat.z*f1.y;
             f2.y = ehat.z*f1.x - ehat.x*f1.z;
@@ -903,9 +733,8 @@ static void apply_coin(int is_r, double ct, double st) {
     }
 }
 
-/* Apply post-shift V mixing: V = cos(phi)*I + i*sin(phi)*M
- * where M swaps P+ and P- eigenspaces of the local tau.
- * is_r: use R-face tau (1) or L-face tau (0). */
+/* ========== V mixing ========== */
+
 static double g_mix_phi = 0.0;
 
 static void apply_vmix(int is_r) {
@@ -919,7 +748,6 @@ static void apply_vmix(int is_r) {
         vec3 dv = sites[s].dirs[face];
         c4x4 tau; make_tau(tau, dv);
 
-        /* Build P+ and P- projectors */
         c4x4 Pp, Pm; c4_eye(Pp); c4_eye(Pm);
         for (int a=0;a<4;a++) for(int b=0;b<4;b++) {
             Pp[a][b] = 0.5*(Pp[a][b]+tau[a][b]);
@@ -963,11 +791,9 @@ static void apply_vmix(int is_r) {
                 V[a][b]+=pm_basis[a][j]*conj(pp_basis[b][j]);
                 V[a][b]+=pp_basis[a][j]*conj(pm_basis[b][j]);
             }
-        /* V = cos(phi)*I + i*sin(phi)*M */
         for(int a=0;a<4;a++) for(int b=0;b<4;b++)
             V[a][b] = cp*(a==b?1:0) + I*sp*V[a][b];
 
-        /* Apply V to psi at site s */
         double complex out[4] = {0};
         for(int a=0;a<4;a++) for(int b=0;b<4;b++)
             out[a] += V[a][b] * psi[4*s+b];
@@ -977,7 +803,7 @@ static void apply_vmix(int is_r) {
 
 /* ========== Main ========== */
 int main(int argc, char **argv) {
-    int seed_depth = 0;  /* 0 = auto from sigma */
+    int seed_depth = 0;
     double theta = 0.5, sigma = 3.0, threshold = 1e-10;
     int n_steps = 50;
     if (argc > 1) theta = atof(argv[1]);
@@ -987,70 +813,36 @@ int main(int argc, char **argv) {
     if (argc > 5) seed_depth = atoi(argv[5]);
     if (argc > 6) g_coin_type = atoi(argv[6]);
     if (argc > 7) g_mix_phi = atof(argv[7]);
-    if (argc > 8) g_use_sym = atoi(argv[8]);
-    if (argc > 9) g_prune_interval = atoi(argv[9]);
+    if (argc > 8) g_prune_interval = atoi(argv[8]);
     double thresh2 = threshold * threshold;
-    /* With sym, per-site amplitudes are √12 smaller (physical norm includes
-     * 12 image copies). Adjust creation threshold so the same physical
-     * amplitude triggers site creation as in the non-symmetric case. */
     double ct = cos(theta), st = sin(theta);
 
-    /* Auto seed depth: ensure Gaussian has decayed to < exp(-8) ~ 3e-4
-     * at the boundary. Need r > 4σ, and r ~ depth * 2/3 (step length). */
     if (seed_depth <= 0) {
         seed_depth = (int)(4.0 * sigma / (2.0/3.0)) + 2;
         if (seed_depth < 4) seed_depth = 4;
     }
 
-    fprintf(stderr, "=== walk_adaptive: seed=%d theta=%.3f sigma=%.1f steps=%d thresh=%.1e coin=%s mix_phi=%.4f sym=%d prune=%d ===\n",
-            seed_depth, theta, sigma, n_steps, threshold,
+    fprintf(stderr, "=== walk_adaptive: theta=%.3f sigma=%.1f steps=%d thresh=%.1e coin=%s mix_phi=%.4f prune=%d ===\n",
+            theta, sigma, n_steps, threshold,
             g_coin_type==0 ? "e.alpha" : "dual_parity", g_mix_phi,
-            g_use_sym, g_prune_interval);
+            g_prune_interval);
     fprintf(stderr, "Memory available: %ld MB\n", get_avail_mb());
 
     init_dirac();
-    if (g_use_sym) init_a4_rotations();
     init_storage();
 
     /* ---- Generate sites via chain-first approach ---- */
-    /* Chains are the primary structure. Every site is created by extending
-     * a chain, and immediately enqueued for a perpendicular chain spawn.
-     * This guarantees every site is on at least one chain by construction. */
     double seed_thresh = 1e-4;
     double step_len = 2.0/3.0;
-    /* With sym, count actual sites per cell. Cell size and limit are chosen
-     * so that actual_density × 12 ≈ baseline_density (8/unit³).
-     * cell_size=2, max_per_cell=5 → actual 5/8=0.625/unit³ → phys 7.5/unit³. */
-    int max_per_cell = g_use_sym ? 5 : 8;
-    g_grid_cell = g_use_sym ? 2.0 : 1.0;
     int max_chain_len = (int)(4.0 * sigma / step_len) + 5;
     g_grid_half = max_chain_len * step_len + 5.0;
-    g_grid_n = (int)(2.0 * g_grid_half / g_grid_cell) + 1;
+    g_grid_n = (int)(2.0 * g_grid_half / 1.0) + 1;
     if (g_grid_n > 500) g_grid_n = 500;
     g_grid_count = calloc(g_grid_n * g_grid_n * g_grid_n, sizeof(int));
 
-    fprintf(stderr, "\n--- Chain-first site generation (max_per_cell=%d, cell=%.1f, grid %d³) ---\n",
-            max_per_cell, g_grid_cell, g_grid_n);
+    fprintf(stderr, "\n--- Chain-first site generation (grid %d³) ---\n", g_grid_n);
 
-    int n_chains = generate_sites_chain_first(sigma, seed_thresh, max_per_cell);
-
-    /* Grid count diagnostics */
-    {
-        int gmax = 0; long gtotal = 0; int gcells_used = 0;
-        int gn3 = g_grid_n * g_grid_n * g_grid_n;
-        int hist[20] = {0};
-        for (int i = 0; i < gn3; i++) {
-            if (g_grid_count[i] > 0) { gcells_used++; gtotal += g_grid_count[i]; }
-            if (g_grid_count[i] > gmax) gmax = g_grid_count[i];
-            if (g_grid_count[i] < 20) hist[g_grid_count[i]]++;
-        }
-        fprintf(stderr, "Grid: %d cells used, total count=%ld, max=%d, avg=%.1f\n",
-                gcells_used, gtotal, gmax, gcells_used > 0 ? (double)gtotal/gcells_used : 0);
-        fprintf(stderr, "  histogram: ");
-        for (int i = 1; i <= 12; i++) fprintf(stderr, "%d:%d ", i, hist[i]);
-        fprintf(stderr, "\n");
-    }
-
+    int n_chains = generate_sites_chain_first(sigma, seed_thresh);
     free(g_grid_count);
     int n_seed = nsites;
 
@@ -1078,40 +870,7 @@ int main(int argc, char **argv) {
     }
     norm = sqrt(norm);
     for (int i = 0; i < 4*nsites; i++) psi[i] /= norm;
-    fprintf(stderr, "Wavepacket initialized (sigma=%.1f, sym=%d)\n", sigma, g_use_sym);
-
-    /* ---- Radial site density output ---- */
-    {
-        const char *sf = getenv("SITE_DENSITY");
-        if (sf) {
-            FILE *sdf = fopen(sf, "w");
-            if (sdf) {
-                fprintf(sdf, "# Radial site density: r n_sites phys_sites shell_vol density\n");
-                double dr = 0.5, rmax = 0;
-                for (int n = 0; n < nsites; n++) {
-                    double r = v3norm(sites[n].pos);
-                    if (r > rmax) rmax = r;
-                }
-                int nbins = (int)(rmax / dr) + 1;
-                int *cnt = calloc(nbins+1, sizeof(int));
-                double *pcnt = calloc(nbins+1, sizeof(double));
-                for (int n = 0; n < nsites; n++) {
-                    int b = (int)(v3norm(sites[n].pos) / dr);
-                    if (b > nbins) b = nbins;
-                    cnt[b]++;
-                    pcnt[b] += site_images(n);
-                }
-                for (int b = 0; b <= nbins; b++) {
-                    double r = (b + 0.5) * dr;
-                    double vol = (4.0/3.0)*M_PI*(pow((b+1)*dr,3) - pow(b*dr,3));
-                    fprintf(sdf, "%.3f %d %.1f %.4f %.4f\n", r, cnt[b], pcnt[b], vol, pcnt[b]/vol);
-                }
-                free(cnt); free(pcnt);
-                fclose(sdf);
-                fprintf(stderr, "Site density -> %s\n", sf);
-            }
-        }
-    }
+    fprintf(stderr, "Wavepacket initialized (sigma=%.1f)\n", sigma);
 
     /* ---- Radial histogram output ---- */
     FILE *radf = NULL;
@@ -1121,8 +880,8 @@ int main(int argc, char **argv) {
     }
 
     /* ---- Time evolution ---- */
-    printf("# theta=%.4f sigma=%.1f n_steps=%d seed=%d thresh=%.1e sym=%d prune=%d\n",
-           theta, sigma, n_steps, seed_depth, threshold, g_use_sym, g_prune_interval);
+    printf("# theta=%.4f sigma=%.1f n_steps=%d thresh=%.1e prune=%d\n",
+           theta, sigma, n_steps, threshold, g_prune_interval);
     printf("# t norm r2 x2 y2 z2 r95 nsites absorbed pruned\n");
 
     for (int t = 0; t <= n_steps; t++) {
@@ -1141,22 +900,11 @@ int main(int argc, char **argv) {
             for (int a = 0; a < 4; a++)
                 p += creal(psi[4*n+a]*conj(psi[4*n+a]));
             double pw = p / total_prob;
-            if (g_use_sym) {
-                /* Average x²,y²,z² over all 12 A4 images.
-                 * Each image site carries the same pw, but at a rotated position. */
-                for (int gi = 0; gi < 12; gi++) {
-                    vec3 img = apply_a4_rot(gi, sites[n].pos);
-                    mx2 += (pw/12.0)*img.x*img.x;
-                    my2 += (pw/12.0)*img.y*img.y;
-                    mz2 += (pw/12.0)*img.z*img.z;
-                }
-            } else {
-                double x=sites[n].pos.x, y=sites[n].pos.y, z=sites[n].pos.z;
-                mx2 += pw*x*x; my2 += pw*y*y; mz2 += pw*z*z;
-            }
+            double x=sites[n].pos.x, y=sites[n].pos.y, z=sites[n].pos.z;
+            mx2 += pw*x*x; my2 += pw*y*y; mz2 += pw*z*z;
         }
 
-        /* r95 — r is invariant under A4 rotations */
+        /* r95 */
         double r95 = 0;
         {
             double rmax = 0;
@@ -1164,7 +912,7 @@ int main(int argc, char **argv) {
                 double r = v3norm(sites[n].pos);
                 if (r > rmax) rmax = r;
             }
-            double dr = 0.5;  /* fixed bin width */
+            double dr = 0.5;
             int nbins = (int)(rmax / dr) + 1;
             if (nbins < 10) nbins = 10;
             double *bp = calloc(nbins+1, sizeof(double));
@@ -1183,7 +931,6 @@ int main(int argc, char **argv) {
                 if (cum >= 0.95) { r95 = b * dr; break; }
             }
 
-            /* Radial histogram */
             if (radf) {
                 fprintf(radf, "# t=%d norm=%.6f\n", t, pnorm);
                 for (int b = 0; b <= nbins; b++) {
@@ -1209,23 +956,15 @@ int main(int argc, char **argv) {
             double abs_l=0, abs_r=0;
 
             /* W = V_R · S_R · C_R · V_L · S_L · C_L, applied right to left */
-            /* Step 1: C_L */
             apply_coin(0, ct, st);
-            /* Step 2: S_L (adaptive) */
             apply_shift_adaptive(0, PAT_L, thresh2, &cr_l, &abs_l);
-            /* Step 3: V_L mixing */
             apply_vmix(0);
-            /* Step 4: C_R */
             apply_coin(1, ct, st);
-            /* Step 5: S_R (adaptive) */
             apply_shift_adaptive(1, PAT_R, thresh2, &cr_r, &abs_r);
-            /* Step 6: V_R mixing */
             apply_vmix(1);
 
-            /* Accumulate absorbed probability */
             g_total_absorbed += abs_l + abs_r;
 
-            /* Periodic pruning */
             if (g_prune_interval > 0 && t > 0 && t % g_prune_interval == 0) {
                 double pp = 0;
                 int pruned = prune_chain_ends(thresh2, &pp);

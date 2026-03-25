@@ -7,5 +7,16 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
-lattice_gen
 *.txt
+
+# Compiled binaries
+walk_adaptive
+walk_1d
+walk_gen
+walk_evolve
+walk_gen_old
+lattice_gen
+site_density
+
+# Logs
+*.log
