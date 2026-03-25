@@ -8,17 +8,6 @@ dist/
 build/
 .pytest_cache/
 *.txt
-
-# Compiled binaries
-walk_adaptive
-walk_1d
-walk_gen
-walk_evolve
-walk_gen_old
-lattice_gen
-site_density
-
-# Logs
 *.log
 
 # D build artifacts
