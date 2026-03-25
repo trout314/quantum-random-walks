@@ -991,6 +991,10 @@ int main(int argc, char **argv) {
     if (argc > 8) g_use_sym = atoi(argv[8]);
     if (argc > 9) g_prune_interval = atoi(argv[9]);
     double thresh2 = threshold * threshold;
+    /* With sym, per-site amplitudes are √12 smaller (physical norm includes
+     * 12 image copies). Adjust creation threshold so the same physical
+     * amplitude triggers site creation as in the non-symmetric case. */
+    if (g_use_sym) thresh2 /= 12.0;
     double ct = cos(theta), st = sin(theta);
 
     /* Auto seed depth: ensure Gaussian has decayed to < exp(-8) ~ 3e-4
@@ -1044,6 +1048,9 @@ int main(int argc, char **argv) {
             no_r, no_l, no_both);
 
     /* ---- Initialize wavepacket ---- */
+    /* Physical norm = sym_factor × Σ|ψ_i|² where sym_factor accounts for
+     * the 12 image copies of each site under A4. */
+    int sym_factor = g_use_sym ? 12 : 1;
     double norm = 0;
     for (int n = 0; n < nsites; n++) {
         double x = sites[n].pos.x, y = sites[n].pos.y, z = sites[n].pos.z;
@@ -1052,9 +1059,41 @@ int main(int argc, char **argv) {
         psi[4*n] = w;
         norm += w*w;
     }
-    norm = sqrt(norm);
+    norm = sqrt(sym_factor * norm);
     for (int i = 0; i < 4*nsites; i++) psi[i] /= norm;
-    fprintf(stderr, "Wavepacket initialized (sigma=%.1f)\n", sigma);
+    fprintf(stderr, "Wavepacket initialized (sigma=%.1f, sym_factor=%d)\n", sigma, sym_factor);
+
+    /* ---- Radial site density output ---- */
+    {
+        const char *sf = getenv("SITE_DENSITY");
+        if (sf) {
+            FILE *sdf = fopen(sf, "w");
+            if (sdf) {
+                fprintf(sdf, "# Radial site density: r n_sites shell_vol density (physical)\n");
+                double dr = 0.5, rmax = 0;
+                for (int n = 0; n < nsites; n++) {
+                    double r = v3norm(sites[n].pos);
+                    if (r > rmax) rmax = r;
+                }
+                int nbins = (int)(rmax / dr) + 1;
+                int *cnt = calloc(nbins+1, sizeof(int));
+                for (int n = 0; n < nsites; n++) {
+                    int b = (int)(v3norm(sites[n].pos) / dr);
+                    if (b > nbins) b = nbins;
+                    cnt[b]++;
+                }
+                for (int b = 0; b <= nbins; b++) {
+                    double r = (b + 0.5) * dr;
+                    double vol = (4.0/3.0)*M_PI*(pow((b+1)*dr,3) - pow(b*dr,3));
+                    double phys_count = cnt[b] * sym_factor;
+                    fprintf(sdf, "%.3f %d %.4f %.4f\n", r, cnt[b], vol, phys_count/vol);
+                }
+                free(cnt);
+                fclose(sdf);
+                fprintf(stderr, "Site density -> %s\n", sf);
+            }
+        }
+    }
 
     /* ---- Radial histogram output ---- */
     FILE *radf = NULL;
@@ -1069,7 +1108,9 @@ int main(int argc, char **argv) {
     printf("# t norm r2 x2 y2 z2 r95 nsites absorbed pruned\n");
 
     for (int t = 0; t <= n_steps; t++) {
-        /* Compute observables */
+        /* Compute observables.
+         * With sym, physical probability = sym_factor × Σ|ψ_i|².
+         * For ⟨x²⟩ etc, average over all 12 images of each site. */
         double total_prob = 0;
         double mx2=0, my2=0, mz2=0;
         for (int n = 0; n < nsites; n++) {
@@ -1078,17 +1119,29 @@ int main(int argc, char **argv) {
                 p += creal(psi[4*n+a]*conj(psi[4*n+a]));
             total_prob += p;
         }
+        total_prob *= sym_factor;
         double pnorm = sqrt(total_prob);
         for (int n = 0; n < nsites; n++) {
             double p = 0;
             for (int a = 0; a < 4; a++)
                 p += creal(psi[4*n+a]*conj(psi[4*n+a]));
+            p *= sym_factor;
             p /= total_prob;
-            double x=sites[n].pos.x, y=sites[n].pos.y, z=sites[n].pos.z;
-            mx2 += p*x*x; my2 += p*y*y; mz2 += p*z*z;
+            if (g_use_sym) {
+                /* Average x²,y²,z² over all 12 A4 images */
+                for (int gi = 0; gi < 12; gi++) {
+                    vec3 img = apply_a4_rot(gi, sites[n].pos);
+                    mx2 += (p/12.0)*img.x*img.x;
+                    my2 += (p/12.0)*img.y*img.y;
+                    mz2 += (p/12.0)*img.z*img.z;
+                }
+            } else {
+                double x=sites[n].pos.x, y=sites[n].pos.y, z=sites[n].pos.z;
+                mx2 += p*x*x; my2 += p*y*y; mz2 += p*z*z;
+            }
         }
 
-        /* r95 */
+        /* r95 — r is invariant under A4 rotations */
         double r95 = 0;
         {
             double rmax = 0;
@@ -1107,7 +1160,7 @@ int main(int argc, char **argv) {
                     p += creal(psi[4*n+a]*conj(psi[4*n+a]));
                 int b = (int)(r / dr);
                 if (b > nbins) b = nbins;
-                bp[b] += p / total_prob;
+                bp[b] += p * sym_factor / total_prob;
             }
             double cum = 0;
             for (int b = 0; b <= nbins; b++) {
@@ -1154,14 +1207,14 @@ int main(int argc, char **argv) {
             /* Step 6: V_R mixing */
             apply_vmix(1);
 
-            /* Accumulate absorbed probability */
-            g_total_absorbed += abs_l + abs_r;
+            /* Accumulate absorbed probability (physical = sym_factor × per-site) */
+            g_total_absorbed += sym_factor * (abs_l + abs_r);
 
             /* Periodic pruning */
             if (g_prune_interval > 0 && t > 0 && t % g_prune_interval == 0) {
                 double pp = 0;
                 int pruned = prune_chain_ends(thresh2, &pp);
-                g_total_pruned += pp;
+                g_total_pruned += sym_factor * pp;
                 if (pruned > 0)
                     fprintf(stderr, "  step %d: pruned %d sites (free=%d, prob=%.2e)\n",
                             t, pruned, free_count, pp);
