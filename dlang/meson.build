@@ -11,6 +11,7 @@ sources = [
   'source/operators.d',
   'source/observables.d',
   'source/walk_main.d',
+  'source/walk_1d.d',
 ]
 
 lib = shared_library(
@@ -33,12 +34,22 @@ test_exe = executable(
 )
 test('d-unittests', test_exe)
 
-# Standalone walk executable
+# Standalone 3D walk executable
 walk_exe = executable(
   'walk_d',
   sources,
   include_directories: include_directories('source'),
   d_args: ['-d-version=walk_exe'],
+  link_args: ['-link-defaultlib-shared=false'],
+  install: false,
+)
+
+# Standalone 1D walk executable
+walk_1d_exe = executable(
+  'walk_1d_d',
+  sources,
+  include_directories: include_directories('source'),
+  d_args: ['-d-version=walk_1d_exe'],
   link_args: ['-link-defaultlib-shared=false'],
   install: false,
 )
