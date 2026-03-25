@@ -40,15 +40,17 @@ Walk1dParams parseArgs1d(string[] args) {
 }
 
 /// All per-site precomputed data for the 1D chain.
+/// Arrays are heap-allocated slices carved from a single GC block
+/// to avoid a 1.2 GB .init blob in the binary.
 struct Chain1d {
-    Vec3[MAX_N] pos;
-    Vec3[4][MAX_N] dirs;
-    int[MAX_N] faceIdx;
-    Mat4[MAX_N] tau;
-    Mat4[MAX_N] Pp, Pm;
-    Mat4[MAX_N] fwdBlock, bwdBlock;
-    Mat4[MAX_N] coin1, coin2, coin3;
-    Mat4[MAX_N] vmix;
+    Vec3[] pos;
+    Vec3[4][] dirs;
+    int[] faceIdx;
+    Mat4[] tau;
+    Mat4[] Pp, Pm;
+    Mat4[] fwdBlock, bwdBlock;
+    Mat4[] coin1, coin2, coin3;
+    Mat4[] vmix;
     int builtUpTo;
 
     int[4] pat;
@@ -58,14 +60,45 @@ struct Chain1d {
     double mixPhi;
 }
 
-// These are too large for the stack; allocate on the heap.
+/// Allocate all Chain1d arrays from a single GC buffer.
 Chain1d* newChain1d() {
-    import core.stdc.stdlib : calloc;
-    auto ch = cast(Chain1d*) calloc(1, Chain1d.sizeof);
-    ch.builtUpTo = 0;
-    ch.useCoin2 = false;
-    ch.useCoin3 = false;
-    ch.mixPhi = 0.0;
+    import core.stdc.string : memset;
+
+    // Compute total bytes needed, then allocate once.
+    enum size_t VEC3_SZ   = Vec3.sizeof;               // 24
+    enum size_t DIR4_SZ   = (Vec3[4]).sizeof;           // 96
+    enum size_t INT_SZ    = int.sizeof;                 // 4
+    enum size_t MAT4_SZ   = Mat4.sizeof;                // 256
+    enum size_t TOTAL_PER = VEC3_SZ + DIR4_SZ + INT_SZ
+                          + MAT4_SZ * 9;                // 9 Mat4 arrays
+
+    auto buf = new ubyte[TOTAL_PER * MAX_N];
+    buf[] = 0;
+
+    // Carve slices from the buffer.
+    size_t off = 0;
+
+    T[] carve(T)(ref size_t offset) {
+        auto slice = (cast(T*)(buf.ptr + offset))[0 .. MAX_N];
+        offset += T.sizeof * MAX_N;
+        return slice;
+    }
+
+    auto ch = new Chain1d;
+    ch.pos      = carve!Vec3(off);
+    ch.dirs     = carve!(Vec3[4])(off);
+    ch.faceIdx  = carve!int(off);
+    ch.tau      = carve!Mat4(off);
+    ch.Pp       = carve!Mat4(off);
+    ch.Pm       = carve!Mat4(off);
+    ch.fwdBlock = carve!Mat4(off);
+    ch.bwdBlock = carve!Mat4(off);
+    ch.coin1    = carve!Mat4(off);
+    ch.coin2    = carve!Mat4(off);
+    ch.coin3    = carve!Mat4(off);
+    ch.vmix     = carve!Mat4(off);
+    assert(off == buf.length);
+
     return ch;
 }
 
@@ -530,8 +563,7 @@ void run1d(Walk1dParams p) {
         stderr.writefln("Density -> /tmp/walk_1d_density.dat (%d sites)", activeHi - activeLo);
     }
 
-    import core.stdc.stdlib : free;
-    free(ch);
+    // ch is GC-allocated; no manual free needed.
 }
 
 version(walk_1d_exe) {
