@@ -544,18 +544,13 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
     *n_created = 0;
     *prob_absorbed = 0;
 
-    double norm_in = 0, norm_identity = 0, norm_fwd = 0, norm_bwd = 0;
-
     memset(tmp, 0, 4 * (size_t)ns * sizeof(double complex));
 
     for (int s = 0; s < ns; s++) {
         int face = is_r ? sites[s].r_face : sites[s].l_face;
 
-        for (int a = 0; a < 4; a++) norm_in += creal(psi[4*s+a]*conj(psi[4*s+a]));
-
         if (face < 0) {
             for (int a = 0; a < 4; a++) tmp[4*s+a] = psi[4*s+a];
-            for (int a = 0; a < 4; a++) norm_identity += creal(psi[4*s+a]*conj(psi[4*s+a]));
             continue;
         }
 
@@ -574,7 +569,6 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
                 shifted[a] += Pp[a][b] * psi[4*s+b];
 
             int nb = is_r ? sites[s].r_next : sites[s].l_next;
-            /* Clear stale link to pruned site */
             if (nb >= 0) {
                 int fn = is_r ? sites[nb].r_face : sites[nb].l_face;
                 if (fn < 0) {
@@ -593,15 +587,7 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
                 double complex result[4] = {0};
                 for (int a=0;a<4;a++) for(int b=0;b<4;b++)
                     result[a] += bl[a][b] * psi[4*s+b];
-                double nr = 0;
-                for (int a=0;a<4;a++) nr += creal(result[a]*conj(result[a]));
-                double ns2 = 0;
-                for (int a=0;a<4;a++) ns2 += creal(shifted[a]*conj(shifted[a]));
-                if (fabs(nr - ns2) > 1e-10)
-                    fprintf(stderr, "NORM MISMATCH fwd s=%d nb=%d: ||bl·psi||²=%.10f ||Pp·psi||²=%.10f diff=%.2e\n",
-                            s, nb, nr, ns2, nr-ns2);
                 for (int a=0;a<4;a++) tmp[4*nb+a] += result[a];
-                norm_fwd += ns2;
                 if (nb >= ns) (*n_created)++;
             } else {
                 for (int a=0;a<4;a++)
@@ -616,7 +602,6 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
                 shifted[a] += Pm[a][b] * psi[4*s+b];
 
             int nb = is_r ? sites[s].r_prev : sites[s].l_prev;
-            /* Clear stale link to pruned site */
             if (nb >= 0) {
                 int fp = is_r ? sites[nb].r_face : sites[nb].l_face;
                 if (fp < 0) {
@@ -634,7 +619,6 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
                 c4x4 U, bl; frame_transport(tau, tp, U); c4_mul(bl, U, Pm);
                 for (int a=0;a<4;a++) for(int b=0;b<4;b++)
                     tmp[4*nb+a] += bl[a][b] * psi[4*s+b];
-                for (int a=0;a<4;a++) norm_bwd += creal(shifted[a]*conj(shifted[a]));
                 if (nb >= ns) (*n_created)++;
             } else {
                 for (int a=0;a<4;a++)
@@ -643,36 +627,10 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
         }
     }
 
-    /* Diagnostic: new sites receiving from 2+ sources */
-    {
-        int double_recv = 0;
-        char *recv_count = calloc(nsites, 1);
-        for (int s = 0; s < ns; s++) {
-            int face = is_r ? sites[s].r_face : sites[s].l_face;
-            if (face < 0) continue;
-            int nb_fwd = is_r ? sites[s].r_next : sites[s].l_next;
-            int nb_bwd = is_r ? sites[s].r_prev : sites[s].l_prev;
-            if (nb_fwd >= ns) recv_count[nb_fwd]++;
-            if (nb_bwd >= ns) recv_count[nb_bwd]++;
-        }
-        for (int s = ns; s < nsites; s++)
-            if (recv_count[s] > 1) double_recv++;
-        if (double_recv > 0)
-            fprintf(stderr, "    %d new sites received from 2+ sources\n", double_recv);
-        free(recv_count);
-    }
-
-    /* Norm check */
-    double norm_out = 0;
-    for (int s = 0; s < nsites; s++)
-        for (int a = 0; a < 4; a++)
-            norm_out += creal(tmp[4*s+a]*conj(tmp[4*s+a]));
-
-    if (fabs(norm_out/norm_in - 1.0) > 0.001)
-        fprintf(stderr, "    %s shift: ratio=%.6f (in=%.6f out=%.6f)\n",
-                is_r?"R":"L", norm_out/norm_in, norm_in, norm_out);
-
-    memcpy(psi, tmp, 4 * (size_t)nsites * sizeof(double complex));
+    /* Swap psi and tmp pointers (avoids full memcpy) */
+    double complex *swap = psi;
+    psi = tmp;
+    tmp = swap;
 }
 
 /* ========== Coin operator ========== */
