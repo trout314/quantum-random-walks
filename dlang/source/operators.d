@@ -250,7 +250,7 @@ void applyVmix(bool hasCoin)(ref Lattice!hasCoin lat, bool isR, double mixPhi) {
         Mat4 Pm = projMinus(tau);
 
         // Gram-Schmidt for P+ and P- bases
-        double[4][2] ppBRe = 0, ppBIm = 0, pmBRe = 0, pmBIm = 0;
+        double[2][4] ppBRe = 0, ppBIm = 0, pmBRe = 0, pmBIm = 0;
         int npFound = 0, nmFound = 0;
         foreach (col; 0 .. 4) {
             if (npFound >= 2 && nmFound >= 2) break;

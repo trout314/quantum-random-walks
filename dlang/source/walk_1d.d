@@ -208,7 +208,7 @@ Mat4 buildVmix(Mat4 Pp, Mat4 Pm, double mixPhi) {
     double cp = cos(mixPhi), sp = sin(mixPhi);
 
     // Gram-Schmidt for P+ and P- bases
-    double[4][2] ppBRe = 0, ppBIm = 0, pmBRe = 0, pmBIm = 0;
+    double[2][4] ppBRe = 0, ppBIm = 0, pmBRe = 0, pmBIm = 0;
     int npFound = 0, nmFound = 0;
     foreach (col; 0 .. 4) {
         if (npFound >= 2 && nmFound >= 2) break;
