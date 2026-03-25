@@ -5,6 +5,7 @@ add_project_arguments('-boundscheck=on', language: 'd')
 sources = [
   'source/walk.d',
   'source/geometry.d',
+  'source/dirac.d',
 ]
 
 lib = shared_library(
