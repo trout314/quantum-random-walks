@@ -110,9 +110,10 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
             chainIds[nci++] = cast(int) ci;
     auto activeChains = chainIds[0 .. nci];
 
-    // Pass 1: interior gather (parallel-safe: each site writes only to its own tmp)
+    // Pass 1: interior gather (parallel across chains, batched for efficiency)
     import std.parallelism : parallel;
-    foreach (ci; parallel(activeChains)) {
+    int batchSize = (nci > 16) ? nci / 16 : 1;  // ~1 batch per core
+    foreach (ci; parallel(activeChains, batchSize)) {
         auto ch = &lat.chains[ci];
         int n = ch.ops.length;
 
