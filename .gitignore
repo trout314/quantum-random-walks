@@ -20,3 +20,6 @@ site_density
 
 # Logs
 *.log
+
+# D build artifacts
+dlang/build/
