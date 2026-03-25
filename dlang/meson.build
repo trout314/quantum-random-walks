@@ -7,6 +7,7 @@ sources = [
   'source/geometry.d',
   'source/dirac.d',
   'source/spatial_hash.d',
+  'source/lattice.d',
 ]
 
 lib = shared_library(
