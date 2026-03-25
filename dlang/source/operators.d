@@ -99,68 +99,82 @@ ShiftResult applyShift(ref Lattice lat, bool isR, const int[4] pat, double thres
             continue;
         }
 
-        Vec3 dv = lat.sites[s].dirs[face];
-        Mat4 tau = makeTau(dv);
-        Mat4 Pp = projPlus(tau);
-        Mat4 Pm = projMinus(tau);
-
         // P+ component -> forward
         {
-            double[4] shiftedRe = 0, shiftedIm = 0;
-            matVecSplit(Pp, &lat.psiRe[4*s], &lat.psiIm[4*s],
-                        shiftedRe.ptr, shiftedIm.ptr);
-
             int nb = lat.chainNext(s, isR);
-            if (nb < 0)
-                nb = tryExtendFwd(lat, s, isR, pat, shiftedRe, shiftedIm, thresh2);
+            auto blk = lat.fwdBlock(s, isR);
 
-            if (nb >= 0) {
-                int fn = lat.chainFace(nb, isR);
-                Vec3 dn = lat.sites[nb].dirs[fn];
-                Mat4 tn = makeTau(dn);
-                Mat4 U = frameTransport(tau, tn);
-                Mat4 bl = mul(U, Pp);
+            if (nb >= 0 && blk !is null) {
+                // Use precomputed block
                 double[4] resRe = 0, resIm = 0;
-                matVecSplit(bl, &lat.psiRe[4*s], &lat.psiIm[4*s],
+                matVecSplit(*blk, &lat.psiRe[4*s], &lat.psiIm[4*s],
                             resRe.ptr, resIm.ptr);
                 foreach (a; 0 .. 4) {
                     lat.tmpRe[4*nb + a] += resRe[a];
                     lat.tmpIm[4*nb + a] += resIm[a];
                 }
-                if (nb >= ns) result.nCreated++;
-            } else {
-                foreach (a; 0 .. 4)
-                    result.probAbsorbed += shiftedRe[a] * shiftedRe[a] + shiftedIm[a] * shiftedIm[a];
+            } else if (nb < 0) {
+                // Chain end — try to extend
+                Vec3 dv = lat.sites[s].dirs[face];
+                Mat4 tau = makeTau(dv);
+                Mat4 Pp = projPlus(tau);
+                double[4] shiftedRe = 0, shiftedIm = 0;
+                matVecSplit(Pp, &lat.psiRe[4*s], &lat.psiIm[4*s],
+                            shiftedRe.ptr, shiftedIm.ptr);
+                nb = tryExtendFwd(lat, s, isR, pat, shiftedRe, shiftedIm, thresh2);
+                if (nb >= 0) {
+                    // Block was precomputed by chainAppend — use it
+                    auto newBlk = lat.fwdBlock(s, isR);
+                    double[4] resRe = 0, resIm = 0;
+                    matVecSplit(*newBlk, &lat.psiRe[4*s], &lat.psiIm[4*s],
+                                resRe.ptr, resIm.ptr);
+                    foreach (a; 0 .. 4) {
+                        lat.tmpRe[4*nb + a] += resRe[a];
+                        lat.tmpIm[4*nb + a] += resIm[a];
+                    }
+                    result.nCreated++;
+                } else {
+                    foreach (a; 0 .. 4)
+                        result.probAbsorbed += shiftedRe[a]*shiftedRe[a] + shiftedIm[a]*shiftedIm[a];
+                }
             }
         }
 
         // P- component -> backward
         {
-            double[4] shiftedRe = 0, shiftedIm = 0;
-            matVecSplit(Pm, &lat.psiRe[4*s], &lat.psiIm[4*s],
-                        shiftedRe.ptr, shiftedIm.ptr);
-
             int nb = lat.chainPrev(s, isR);
-            if (nb < 0)
-                nb = tryExtendBwd(lat, s, isR, pat, shiftedRe, shiftedIm, thresh2);
+            auto blk = lat.bwdBlock(s, isR);
 
-            if (nb >= 0) {
-                int fp = lat.chainFace(nb, isR);
-                Vec3 dp = lat.sites[nb].dirs[fp];
-                Mat4 tp = makeTau(dp);
-                Mat4 U = frameTransport(tau, tp);
-                Mat4 bl = mul(U, Pm);
+            if (nb >= 0 && blk !is null) {
                 double[4] resRe = 0, resIm = 0;
-                matVecSplit(bl, &lat.psiRe[4*s], &lat.psiIm[4*s],
+                matVecSplit(*blk, &lat.psiRe[4*s], &lat.psiIm[4*s],
                             resRe.ptr, resIm.ptr);
                 foreach (a; 0 .. 4) {
                     lat.tmpRe[4*nb + a] += resRe[a];
                     lat.tmpIm[4*nb + a] += resIm[a];
                 }
-                if (nb >= ns) result.nCreated++;
-            } else {
-                foreach (a; 0 .. 4)
-                    result.probAbsorbed += shiftedRe[a] * shiftedRe[a] + shiftedIm[a] * shiftedIm[a];
+            } else if (nb < 0) {
+                Vec3 dv = lat.sites[s].dirs[face];
+                Mat4 tau = makeTau(dv);
+                Mat4 Pm = projMinus(tau);
+                double[4] shiftedRe = 0, shiftedIm = 0;
+                matVecSplit(Pm, &lat.psiRe[4*s], &lat.psiIm[4*s],
+                            shiftedRe.ptr, shiftedIm.ptr);
+                nb = tryExtendBwd(lat, s, isR, pat, shiftedRe, shiftedIm, thresh2);
+                if (nb >= 0) {
+                    auto newBlk = lat.bwdBlock(s, isR);
+                    double[4] resRe = 0, resIm = 0;
+                    matVecSplit(*newBlk, &lat.psiRe[4*s], &lat.psiIm[4*s],
+                                resRe.ptr, resIm.ptr);
+                    foreach (a; 0 .. 4) {
+                        lat.tmpRe[4*nb + a] += resRe[a];
+                        lat.tmpIm[4*nb + a] += resIm[a];
+                    }
+                    result.nCreated++;
+                } else {
+                    foreach (a; 0 .. 4)
+                        result.probAbsorbed += shiftedRe[a]*shiftedRe[a] + shiftedIm[a]*shiftedIm[a];
+                }
             }
         }
     }
@@ -376,16 +390,21 @@ private void unlinkChainEnd(ref Lattice lat, int s, bool isR, bool isFwd) {
 
     auto ch = &lat.chains[chainId];
     if (isFwd) {
-        // Remove from forward end (last element)
-        assert(ch.siteIds[$ - 1] == s);
-        ch.siteIds = ch.siteIds[0 .. $ - 1];
+        // Remove from forward end
+        assert(ch.siteIds[ch.siteIds.length - 1] == s);
+        ch.siteIds.popBack();
+        ch.fwdBlocks.popBack();
+        ch.bwdBlocks.popBack();
     } else {
-        // Remove from backward end (first element)
+        // Remove from backward end
         assert(ch.siteIds[0] == s);
-        ch.siteIds = ch.siteIds[1 .. $];
+        ch.siteIds.popFront();
+        ch.fwdBlocks.popFront();
+        ch.bwdBlocks.popFront();
         ch.rootIdx--;
         // Shift indices of remaining sites
-        foreach (id; ch.siteIds) {
+        for (int i = 0; i < ch.siteIds.length; i++) {
+            int id = ch.siteIds[i];
             if (isR) lat.sites[id].rIdx--;
             else     lat.sites[id].lIdx--;
         }

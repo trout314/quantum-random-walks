@@ -14,6 +14,7 @@ module lattice;
 
 import std.math : sqrt, exp, fabs;
 import geometry : Vec3, dot, norm, helixStep, reorth, initTet;
+import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul;
 
 /// BC helix face patterns.
 immutable int[4] PAT_R = [1, 3, 0, 2];
@@ -33,12 +34,70 @@ int prevFace(const int[4] pat, int curFace) {
     return pat[0];
 }
 
-/// A helix chain: an ordered list of site IDs with root geometry.
+/// Deque backed by a flat array. Active elements are buf[lo .. hi].
+/// Grows by doubling and centering when either end is exhausted.
+struct Deque(T) {
+    T[] buf;
+    int lo, hi;  /// active range [lo, hi)
+
+    @property int length() const { return hi - lo; }
+
+    ref inout(T) opIndex(int i) inout { return buf[lo + i]; }
+
+    void pushBack(T val) {
+        if (hi >= buf.length) expand();
+        buf[hi++] = val;
+    }
+
+    void pushFront(T val) {
+        if (lo <= 0) expand();
+        buf[--lo] = val;
+    }
+
+    void popBack() { hi--; }
+    void popFront() { lo++; }
+
+    @property T back() const { return buf[hi - 1]; }
+    @property T front() const { return buf[lo]; }
+
+    /// Ensure at least minCap total buffer slots.
+    void reserve(int minCap) {
+        if (buf.length >= minCap) return;
+        int n = length;
+        auto newBuf = new T[minCap];
+        int newLo = (minCap - n) / 2;
+        if (n > 0)
+            newBuf[newLo .. newLo + n] = buf[lo .. hi];
+        buf = newBuf;
+        lo = newLo;
+        hi = newLo + n;
+    }
+
+    /// Double the buffer, centering the active range.
+    private void expand() {
+        int n = length;
+        int newCap = (buf.length < 16) ? 32 : cast(int)(buf.length * 2);
+        auto newBuf = new T[newCap];
+        int newLo = (newCap - n) / 2;
+        if (n > 0)
+            newBuf[newLo .. newLo + n] = buf[lo .. hi];
+        buf = newBuf;
+        lo = newLo;
+        hi = newLo + n;
+    }
+}
+
+/// A helix chain with precomputed shift blocks.
 struct Chain {
     bool isR;
-    int rootSite;        /// site ID where this chain was spawned
-    int[] siteIds;       /// site IDs in order along the chain
-    int rootIdx;         /// index of rootSite within siteIds
+    int rootSite;
+    Deque!int siteIds;
+    int rootIdx;
+
+    /// Shift blocks for each link. fwdBlocks[i] applied to ψ(siteIds[i]),
+    /// result added to tmp(siteIds[i+1]). Length = siteIds.length - 1.
+    Deque!Mat4 fwdBlocks;
+    Deque!Mat4 bwdBlocks;
 }
 
 /// Per-site data.
@@ -172,11 +231,42 @@ struct Lattice {
         if (isR) sites[siteId].rFace = face; else sites[siteId].lFace = face;
     }
 
-    /// Append a site to the forward end of a chain.
+    /// Get the precomputed forward block for the link from siteId to its successor.
+    const(Mat4)* fwdBlock(int siteId, bool isR) const {
+        int chainId = isR ? sites[siteId].rChain : sites[siteId].lChain;
+        int idx = isR ? sites[siteId].rIdx : sites[siteId].lIdx;
+        if (chainId < 0 || idx < 0) return null;
+        if (idx >= chains[chainId].fwdBlocks.length) return null;
+        return &chains[chainId].fwdBlocks[idx];
+    }
+
+    /// Get the precomputed backward block for the link from siteId to its predecessor.
+    const(Mat4)* bwdBlock(int siteId, bool isR) const {
+        int chainId = isR ? sites[siteId].rChain : sites[siteId].lChain;
+        int idx = isR ? sites[siteId].rIdx : sites[siteId].lIdx;
+        if (chainId < 0 || idx <= 0) return null;
+        if (idx - 1 >= chains[chainId].bwdBlocks.length) return null;
+        return &chains[chainId].bwdBlocks[idx - 1];
+    }
+
+    /// Append a site to the forward end of a chain with shift block.
     void chainAppend(int chainId, int siteId) {
-        chains[chainId].siteIds ~= siteId;
-        int idx = cast(int) chains[chainId].siteIds.length - 1;
-        if (chains[chainId].isR) {
+        auto ch = &chains[chainId];
+
+        // Compute shift block for the new link before appending
+        if (ch.siteIds.length > 0) {
+            int prev = ch.siteIds[ch.siteIds.length - 1];
+            int facePrev = ch.isR ? sites[prev].rFace : sites[prev].lFace;
+            int faceNew = ch.isR ? sites[siteId].rFace : sites[siteId].lFace;
+            Mat4 tauPrev = makeTau(sites[prev].dirs[facePrev]);
+            Mat4 tauNew = makeTau(sites[siteId].dirs[faceNew]);
+            ch.fwdBlocks.pushBack(mul(frameTransport(tauPrev, tauNew), projPlus(tauPrev)));
+            ch.bwdBlocks.pushBack(mul(frameTransport(tauNew, tauPrev), projMinus(tauNew)));
+        }
+
+        ch.siteIds.pushBack(siteId);
+        int idx = ch.siteIds.length - 1;
+        if (ch.isR) {
             sites[siteId].rChain = chainId;
             sites[siteId].rIdx = idx;
         } else {
@@ -185,18 +275,31 @@ struct Lattice {
         }
     }
 
-    /// Prepend a site to the backward end of a chain (shifts all indices).
+    /// Prepend a site to the backward end of a chain with shift block.
     void chainPrepend(int chainId, int siteId) {
+        auto ch = &chains[chainId];
+        bool isR = ch.isR;
+
+        // Compute shift block for the new link before prepending
+        if (ch.siteIds.length > 0) {
+            int next = ch.siteIds[0];
+            int faceNext = isR ? sites[next].rFace : sites[next].lFace;
+            int faceNew = isR ? sites[siteId].rFace : sites[siteId].lFace;
+            Mat4 tauNew = makeTau(sites[siteId].dirs[faceNew]);
+            Mat4 tauNext = makeTau(sites[next].dirs[faceNext]);
+            ch.fwdBlocks.pushFront(mul(frameTransport(tauNew, tauNext), projPlus(tauNew)));
+            ch.bwdBlocks.pushFront(mul(frameTransport(tauNext, tauNew), projMinus(tauNext)));
+        }
+
         // Shift existing indices
-        bool isR = chains[chainId].isR;
-        foreach (existingId; chains[chainId].siteIds) {
+        for (int i = 0; i < ch.siteIds.length; i++) {
+            int existingId = ch.siteIds[i];
             if (isR) sites[existingId].rIdx++;
             else     sites[existingId].lIdx++;
         }
-        chains[chainId].rootIdx++;
+        ch.rootIdx++;
 
-        // Insert at front
-        chains[chainId].siteIds = [siteId] ~ chains[chainId].siteIds;
+        ch.siteIds.pushFront(siteId);
         if (isR) {
             sites[siteId].rChain = chainId;
             sites[siteId].rIdx = 0;
@@ -236,7 +339,12 @@ int generateSites(ref Lattice lat, double sigma, double seedThresh,
 
         // Create chain with root as only member
         int chainId = cast(int) lat.chains.length;
-        lat.chains ~= Chain(isR, rootSite, [rootSite], 0);
+        Chain newChain;
+        newChain.isR = isR;
+        newChain.rootSite = rootSite;
+        newChain.siteIds.pushBack(rootSite);
+        newChain.rootIdx = 0;
+        lat.chains ~= newChain;
         if (isR) {
             lat.sites[rootSite].rChain = chainId;
             lat.sites[rootSite].rIdx = 0;
@@ -253,6 +361,15 @@ int generateSites(ref Lattice lat, double sigma, double seedThresh,
         if (fwd + bwd > 0) nChains++;
     }
 
+    // Reserve extra capacity in all chain deques for walk-time growth.
+    // Each chain may grow by ~nSteps sites on each end.
+    foreach (ref ch; lat.chains) {
+        int extra = ch.siteIds.length + 200;  // room for ~200 steps of growth
+        ch.siteIds.reserve(extra);
+        ch.fwdBlocks.reserve(extra);
+        ch.bwdBlocks.reserve(extra);
+    }
+
     return nChains;
 }
 
@@ -266,7 +383,7 @@ private int extendDir(ref Lattice lat, int chainId, bool forward,
     const int[4] pat = isR ? PAT_R : PAT_L;
 
     // Start from the appropriate end of the chain
-    int endSite = forward ? ch.siteIds[$ - 1] : ch.siteIds[0];
+    int endSite = forward ? ch.siteIds[ch.siteIds.length - 1] : ch.siteIds[0];
     int curFace = lat.chainFace(endSite, isR);
     Vec3 p = lat.sites[endSite].pos;
     Vec3[4] d = lat.sites[endSite].dirs;
