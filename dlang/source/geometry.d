@@ -10,6 +10,15 @@ module geometry;
 
 import std.math : sqrt, fabs;
 
+/// BC helix step length: each step displaces by (2/3) of a tetrahedral direction.
+enum double STEP_LEN = 2.0 / 3.0;
+
+/// Re-orthogonalize direction frame every this many helix steps to correct FP drift.
+enum int REORTH_INTERVAL = 8;
+
+/// Tolerance for safe normalization (avoid division by near-zero).
+enum double NORM_TOL = 1e-15;
+
 struct Vec3 {
     double x = 0, y = 0, z = 0;
 
@@ -63,7 +72,7 @@ Vec3[4] initTet() {
 /// all 4 direction vectors through d[face].
 void helixStep(ref Vec3 pos, ref Vec3[4] dirs, int face) {
     Vec3 e = dirs[face];
-    pos = pos + e * (-2.0 / 3.0);
+    pos = pos + e * (-STEP_LEN);
     foreach (ref d; dirs)
         d = reflect(d, e);
 }
@@ -79,7 +88,7 @@ void reorth(ref Vec3[4] dirs) {
     foreach (ref d; dirs) {
         d = d - m;
         double n = norm(d);
-        if (n > 1e-15)
+        if (n > NORM_TOL)
             d = d * (1.0 / n);
     }
 }

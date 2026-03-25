@@ -9,7 +9,7 @@ module operators;
 import std.math : sqrt, fabs, cos, sin, exp;
 import geometry : Vec3, dot, norm, helixStep, reorth;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, matVecSplit, alpha;
-import lattice : Lattice, nextFace, prevFace, PAT_R, PAT_L;
+import lattice : Lattice, nextFace, prevFace, PAT_R, PAT_L, IS_R, IS_L;
 
 // ---- Spinor helpers ----
 
@@ -112,7 +112,8 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
 
     // Pass 1: interior gather (parallel across chains, batched for efficiency)
     import std.parallelism : parallel;
-    int batchSize = (nci > 16) ? nci / 16 : 1;  // ~1 batch per core
+    enum BATCH_DIVISOR = 16;  // ~1 batch per core
+    int batchSize = (nci > BATCH_DIVISOR) ? nci / BATCH_DIVISOR : 1;
     foreach (ci; parallel(activeChains, batchSize)) {
         auto ch = &lat.chains[ci];
         int n = ch.ops.length;

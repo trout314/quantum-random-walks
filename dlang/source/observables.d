@@ -51,16 +51,20 @@ Observables computeObservables(bool hasCoin)(const Lattice!hasCoin lat) {
     }
     obs.r2 = obs.x2 + obs.y2 + obs.z2;
 
-    // r95
+    // r95: radius enclosing R95_FRAC of total probability
     {
+        enum double R95_FRAC = 0.95;
+        enum double R95_BIN_WIDTH = 0.5;
+        enum int MIN_HIST_BINS = 10;
+
         double rmax = 0;
         foreach (n; 0 .. lat.nsites) {
             double r = norm(lat.sites[n].pos);
             if (r > rmax) rmax = r;
         }
-        double dr = 0.5;
+        double dr = R95_BIN_WIDTH;
         int nbins = cast(int)(rmax / dr) + 1;
-        if (nbins < 10) nbins = 10;
+        if (nbins < MIN_HIST_BINS) nbins = MIN_HIST_BINS;
         // Use a static buffer to avoid per-step GC allocation.
         // Max radius for 60M sites at density ~8/cell is ~50 units, so 200 bins is safe.
         enum MAX_BINS = 200;
@@ -81,7 +85,7 @@ Observables computeObservables(bool hasCoin)(const Lattice!hasCoin lat) {
         double cum = 0;
         foreach (b; 0 .. nbins + 1) {
             cum += bp[b];
-            if (cum >= 0.95) { obs.r95 = b * dr; break; }
+            if (cum >= R95_FRAC) { obs.r95 = b * dr; break; }
         }
     }
 

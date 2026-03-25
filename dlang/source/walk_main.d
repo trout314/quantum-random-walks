@@ -9,20 +9,22 @@ module walk_main;
 import std.math : sqrt, cos, sin, exp;
 import std.conv : to;
 import std.stdio : writef, writefln, stderr, stdout;
-import geometry : Vec3, dot;
-import lattice : Lattice, DensityGrid, generateSites, PAT_R, PAT_L;
+import geometry : Vec3, dot, STEP_LEN;
+import lattice : Lattice, DensityGrid, generateSites, PAT_R, PAT_L, IS_R, IS_L;
 import operators : applyShift, applyCoin, applyVmix, pruneChainEnds, ShiftResult;
 import observables : computeObservables, Observables;
 
 enum bool HAS_COIN = false;
 
 struct WalkParams {
-    double theta = 0.0;   // default: no coin (V-mixing only)
+    double theta = 0.0;        // default: no coin (V-mixing only)
     double sigma = 3.0;
     int nSteps = 50;
     double threshold = 1e-10;
     double mixPhi = 0.0;
     int pruneInterval = 0;
+    int maxSites = 60_000_000; // lattice capacity
+    double seedThresh = 1e-4;  // amplitude cutoff for site generation
 }
 
 WalkParams parseArgs(string[] args) {
@@ -33,6 +35,8 @@ WalkParams parseArgs(string[] args) {
     if (args.length > 4) p.threshold = args[4].to!double;
     if (args.length > 5) p.mixPhi = args[5].to!double;
     if (args.length > 6) p.pruneInterval = args[6].to!int;
+    if (args.length > 7) p.maxSites = args[7].to!int;
+    if (args.length > 8) p.seedThresh = args[8].to!double;
     return p;
 }
 
@@ -55,21 +59,24 @@ void run(WalkParams p) {
     stderr.writefln("=== walk_d: theta=%.3f sigma=%.1f steps=%d thresh=%.1e mix_phi=%.4f prune=%d ===",
                     p.theta, p.sigma, p.nSteps, p.threshold, p.mixPhi, p.pruneInterval);
 
-    enum int MAX_SITES = 60_000_000;
-    auto lat = Lattice!HAS_COIN.create(MAX_SITES);
+    auto lat = Lattice!HAS_COIN.create(p.maxSites);
 
-    double stepLen = 2.0 / 3.0;
-    int maxChainLen = cast(int)(4.0 * p.sigma / stepLen) + 5;
-    double gridHalf = maxChainLen * stepLen + 5.0;
-    auto grid = DensityGrid.create(gridHalf, 8);
+    enum double SIGMA_RANGE = 4.0;   // extend chains to this many sigma
+    enum int CHAIN_PAD = 5;          // extra sites beyond sigma range
+    enum double GRID_PAD = 5.0;      // extra extent for density grid
+    enum int MAX_DENSITY_PER_CELL = 8;
+
+    int maxChainLen = cast(int)(SIGMA_RANGE * p.sigma / STEP_LEN) + CHAIN_PAD;
+    double gridHalf = maxChainLen * STEP_LEN + GRID_PAD;
+    auto grid = DensityGrid.create(gridHalf, MAX_DENSITY_PER_CELL);
 
     stderr.writefln("\n--- Chain-first site generation (grid %d^3) ---", grid.gridN);
-    int nChains = generateSites(lat, p.sigma, 1e-4, grid);
+    int nChains = generateSites(lat, p.sigma, p.seedThresh, grid);
 
     int noR = 0, noL = 0;
     foreach (s; 0 .. lat.nsites) {
-        if (lat.chainFace(s, true) < 0) noR++;
-        if (lat.chainFace(s, false) < 0) noL++;
+        if (lat.chainFace(s, IS_R) < 0) noR++;
+        if (lat.chainFace(s, IS_L) < 0) noL++;
     }
     stderr.writefln("Seed: %d sites, %d chains", lat.nsites, nChains);
     stderr.writefln("Coverage: %d without R-chain, %d without L-chain", noR, noL);
@@ -96,7 +103,8 @@ void run(WalkParams p) {
         stdout.flush();
 
         if (t < p.nSteps) {
-            if (t % 5 == 0)
+            enum STATUS_INTERVAL = 5;
+            if (t % STATUS_INTERVAL == 0)
                 stderr.writefln("  step %d/%d: %d sites, norm=%.6f absorbed=%.2e pruned=%.2e",
                                 t, p.nSteps, lat.nsites, obs.normPsi,
                                 totalAbsorbed, totalPruned);
@@ -105,20 +113,20 @@ void run(WalkParams p) {
 
             // W = V_R · S_R · C_R · V_L · S_L · C_L
             // With HAS_COIN=false, applyCoin is a no-op (compiled out)
-            applyCoin(lat, false);
+            applyCoin(lat, IS_L);
             auto tCoinL = MonoTime.currTime;
-            auto resL = applyShift(lat, false, PAT_L, thresh2);
+            auto resL = applyShift(lat, IS_L, PAT_L, thresh2);
             auto tShiftL = MonoTime.currTime;
-            applyVmix(lat, false, p.mixPhi);
+            applyVmix(lat, IS_L, p.mixPhi);
             auto tVmixL = MonoTime.currTime;
-            applyCoin(lat, true);
+            applyCoin(lat, IS_R);
             auto tCoinR = MonoTime.currTime;
-            auto resR = applyShift(lat, true, PAT_R, thresh2);
+            auto resR = applyShift(lat, IS_R, PAT_R, thresh2);
             auto tShiftR = MonoTime.currTime;
-            applyVmix(lat, true, p.mixPhi);
+            applyVmix(lat, IS_R, p.mixPhi);
             auto tVmixR = MonoTime.currTime;
 
-            if (t % 5 == 0) {
+            if (t % STATUS_INTERVAL == 0) {
                 auto ms(MonoTime a, MonoTime b) { return (b - a).total!"msecs"; }
                 stderr.writefln("    timing: obs=%dms coinL=%dms shiftL=%dms coinR=%dms shiftR=%dms",
                     ms(tObsStart, tObsEnd),

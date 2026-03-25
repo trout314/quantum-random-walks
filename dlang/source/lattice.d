@@ -11,12 +11,19 @@
 module lattice;
 
 import std.math : sqrt, exp, fabs, cos, sin;
-import geometry : Vec3, dot, norm, helixStep, reorth, initTet;
+import geometry : Vec3, dot, norm, helixStep, reorth, initTet, REORTH_INTERVAL;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, alpha;
+
+/// Chirality flags for R/L helix chains.
+enum bool IS_R = true;
+enum bool IS_L = false;
 
 /// BC helix face patterns.
 immutable int[4] PAT_R = [1, 3, 0, 2];
 immutable int[4] PAT_L = [0, 1, 2, 3];
+
+/// Tolerance for detecting degenerate cross products (near-parallel vectors).
+enum double DEGEN_TOL = 1e-10;
 
 int nextFace(const int[4] pat, int curFace) {
     foreach (i; 0 .. 4)
@@ -63,9 +70,13 @@ struct Deque(T) {
         hi = newLo + n;
     }
 
+    private enum DEQUE_INIT_CAP = 32;
+    private enum DEQUE_GROW_FACTOR = 2;
+
     private void expand() {
         int n = length;
-        int newCap = (buf.length < 16) ? 32 : cast(int)(buf.length * 2);
+        int newCap = (buf.length < DEQUE_INIT_CAP / 2) ? DEQUE_INIT_CAP
+                     : cast(int)(buf.length * DEQUE_GROW_FACTOR);
         auto newBuf = new T[newCap];
         int newLo = (newCap - n) / 2;
         if (n > 0)
@@ -94,7 +105,7 @@ Mat4[2] buildDualParityCoins(Vec3 e, double ct, double st) {
 
     Vec3 f1 = Vec3(ehat.y, -ehat.x, 0);
     double fn = norm(f1);
-    if (fn < 1e-10) { f1 = Vec3(-ehat.z, 0, ehat.x); fn = norm(f1); }
+    if (fn < DEGEN_TOL) { f1 = Vec3(-ehat.z, 0, ehat.x); fn = norm(f1); }
     f1 = f1 * (1.0 / fn);
 
     Vec3 f2 = Vec3(ehat.y*f1.z - ehat.z*f1.y,
@@ -145,6 +156,11 @@ struct Site {
 
 /// Density grid for limiting site count per unit volume.
 struct DensityGrid {
+    /// Side length of each cubic grid cell.
+    enum double GRID_CELL_SIZE = 1.0;
+    /// Maximum grid dimension along each axis.
+    enum int MAX_GRID_DIM = 500;
+
     int[] counts;
     double gridHalf;
     int gridN;
@@ -153,8 +169,8 @@ struct DensityGrid {
     static DensityGrid create(double halfExtent, int maxPer) {
         DensityGrid g;
         g.gridHalf = halfExtent;
-        g.gridN = cast(int)(2.0 * halfExtent / 1.0) + 1;
-        if (g.gridN > 500) g.gridN = 500;
+        g.gridN = cast(int)(2.0 * halfExtent / GRID_CELL_SIZE) + 1;
+        if (g.gridN > MAX_GRID_DIM) g.gridN = MAX_GRID_DIM;
         g.counts = new int[g.gridN * g.gridN * g.gridN];
         g.counts[] = 0;
         g.maxPerCell = maxPer;
@@ -162,9 +178,9 @@ struct DensityGrid {
     }
 
     int idx(Vec3 pos) const {
-        int gx = cast(int)((pos.x + gridHalf) / 1.0);
-        int gy = cast(int)((pos.y + gridHalf) / 1.0);
-        int gz = cast(int)((pos.z + gridHalf) / 1.0);
+        int gx = cast(int)((pos.x + gridHalf) / GRID_CELL_SIZE);
+        int gy = cast(int)((pos.y + gridHalf) / GRID_CELL_SIZE);
+        int gz = cast(int)((pos.z + gridHalf) / GRID_CELL_SIZE);
         if (gx < 0) gx = 0; if (gx >= gridN) gx = gridN - 1;
         if (gy < 0) gy = 0; if (gy >= gridN) gy = gridN - 1;
         if (gz < 0) gz = 0; if (gz >= gridN) gz = gridN - 1;
@@ -403,9 +419,10 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         if (fwd + bwd > 0) nChains++;
     }
 
-    // Reserve extra capacity
+    // Reserve extra capacity for runtime chain extension
+    enum CHAIN_RESERVE_PAD = 200;
     foreach (ref ch; lat.chains) {
-        int extra = ch.ops.length + 200;
+        int extra = ch.ops.length + CHAIN_RESERVE_PAD;
         ch.ops.reserve(extra);
     }
 
@@ -430,7 +447,7 @@ private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool f
     for (int step = 0; step < lat.maxSites; step++) {
         int stepFace = forward ? curFace : prevFace(pat, curFace);
         helixStep(p, d, stepFace);
-        if ((step + 1) % 8 == 0) reorth(d);
+        if ((step + 1) % REORTH_INTERVAL == 0) reorth(d);
 
         if (exp(-dot(p, p) / (2 * sigma * sigma)) < seedThresh) break;
         if (grid.isFull(p)) break;

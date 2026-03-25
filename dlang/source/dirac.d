@@ -73,7 +73,8 @@ Mat4 alpha(int idx) {
 
 /// Construct τ = (√7/4)β + (3/4)(d · α) for direction vector d.
 Mat4 makeTau(Vec3 d) {
-    enum double nu = sqrt(7.0) / 4.0;
+    enum double nu = sqrt(7.0) / 4.0;          // β coefficient
+    enum double ALPHA_COEFF = 3.0 / 4.0;       // α coefficient
     Mat4 tau;
     // β contribution: diag(ν, ν, -ν, -ν)
     tau.re[0] = nu; tau.re[5] = nu; tau.re[10] = -nu; tau.re[15] = -nu;
@@ -81,7 +82,7 @@ Mat4 makeTau(Vec3 d) {
     double[3] dd = [d.x, d.y, d.z];
     foreach (a; 0 .. 3) {
         auto al = alpha(a);
-        double c = 0.75 * dd[a];
+        double c = ALPHA_COEFF * dd[a];
         foreach (idx; 0 .. 16) {
             tau.re[idx] += c * al.re[idx];
             tau.im[idx] += c * al.im[idx];
