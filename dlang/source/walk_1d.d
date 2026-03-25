@@ -39,18 +39,21 @@ Walk1dParams parseArgs1d(string[] args) {
     return p;
 }
 
+/// Bundled per-site operators for cache locality (mirrors 3D SiteOps).
+struct Site1dOps {
+    Mat4 fwdBlock, bwdBlock;
+    Mat4 coin1, coin2, coin3;
+    Mat4 vmix;
+}
+
 /// All per-site precomputed data for the 1D chain.
 /// Arrays are heap-allocated slices carved from a single GC block
-/// to avoid a 1.2 GB .init blob in the binary.
+/// to avoid a large .init blob in the binary.
 struct Chain1d {
     Vec3[] pos;
     Vec3[4][] dirs;
     int[] faceIdx;
-    Mat4[] tau;
-    Mat4[] Pp, Pm;
-    Mat4[] fwdBlock, bwdBlock;
-    Mat4[] coin1, coin2, coin3;
-    Mat4[] vmix;
+    Site1dOps[] ops;
     int builtUpTo;
 
     int[4] pat;
@@ -62,15 +65,11 @@ struct Chain1d {
 
 /// Allocate all Chain1d arrays from a single GC buffer.
 Chain1d* newChain1d() {
-    import core.stdc.string : memset;
-
-    // Compute total bytes needed, then allocate once.
     enum size_t VEC3_SZ   = Vec3.sizeof;               // 24
     enum size_t DIR4_SZ   = (Vec3[4]).sizeof;           // 96
     enum size_t INT_SZ    = int.sizeof;                 // 4
-    enum size_t MAT4_SZ   = Mat4.sizeof;                // 256
-    enum size_t TOTAL_PER = VEC3_SZ + DIR4_SZ + INT_SZ
-                          + MAT4_SZ * 9;                // 9 Mat4 arrays
+    enum size_t OPS_SZ    = Site1dOps.sizeof;
+    enum size_t TOTAL_PER = VEC3_SZ + DIR4_SZ + INT_SZ + OPS_SZ;
 
     auto buf = new ubyte[TOTAL_PER * MAX_N];
     buf[] = 0;
@@ -88,18 +87,15 @@ Chain1d* newChain1d() {
     ch.pos      = carve!Vec3(off);
     ch.dirs     = carve!(Vec3[4])(off);
     ch.faceIdx  = carve!int(off);
-    ch.tau      = carve!Mat4(off);
-    ch.Pp       = carve!Mat4(off);
-    ch.Pm       = carve!Mat4(off);
-    ch.fwdBlock = carve!Mat4(off);
-    ch.bwdBlock = carve!Mat4(off);
-    ch.coin1    = carve!Mat4(off);
-    ch.coin2    = carve!Mat4(off);
-    ch.coin3    = carve!Mat4(off);
-    ch.vmix     = carve!Mat4(off);
+    ch.ops      = carve!Site1dOps(off);
     assert(off == buf.length);
 
     return ch;
+}
+
+/// Compute tau from stored geometry at site n.
+Mat4 siteTau(const Chain1d* ch, int n) {
+    return makeTau(ch.dirs[n][ch.faceIdx[n]]);
 }
 
 /// Build chain geometry and operators up to and including site i.
@@ -119,17 +115,17 @@ void ensureSite(Chain1d* ch, int i) {
             ch.faceIdx[n] = ch.pat[n % 4];
         }
 
-        // tau and projectors
-        ch.tau[n] = makeTau(ch.dirs[n][ch.faceIdx[n]]);
-        ch.Pp[n] = projPlus(ch.tau[n]);
-        ch.Pm[n] = projMinus(ch.tau[n]);
+        // tau and projectors (local — not stored per-site)
+        Mat4 tau = siteTau(ch, n);
+        Mat4 Pp = projPlus(tau);
+        Mat4 Pm = projMinus(tau);
 
         // Shift blocks
         if (n > 0) {
-            Mat4 U = frameTransport(ch.tau[n], ch.tau[n-1]);
-            ch.bwdBlock[n] = mul(U, ch.Pm[n]);
-            U = frameTransport(ch.tau[n-1], ch.tau[n]);
-            ch.fwdBlock[n-1] = mul(U, ch.Pp[n-1]);
+            Mat4 tauPrev = siteTau(ch, n - 1);
+            ch.ops[n].bwdBlock = mul(frameTransport(tau, tauPrev), Pm);
+            Mat4 PpPrev = projPlus(tauPrev);
+            ch.ops[n-1].fwdBlock = mul(frameTransport(tauPrev, tau), PpPrev);
         }
 
         // Coins
@@ -148,30 +144,28 @@ void ensureSite(Chain1d* ch, int i) {
                            ehat.x*f1.y - ehat.y*f1.x);
             fn = norm(f2); f2 = f2 * (1.0 / fn);
 
-            ch.coin1[n] = buildCoinMatrix([f1.x, f1.y, f1.z], ch.ct, ch.st);
-            ch.coin2[n] = buildCoinMatrix([f2.x, f2.y, f2.z], ch.ct, ch.st);
+            ch.ops[n].coin1 = buildCoinMatrix([f1.x, f1.y, f1.z], ch.ct, ch.st);
+            ch.ops[n].coin2 = buildCoinMatrix([f2.x, f2.y, f2.z], ch.ct, ch.st);
             ch.useCoin2 = true;
 
             if (ch.coinType == 4) {
-                // Beta coin
-                ch.coin3[n] = buildBetaCoin(ch.ct, ch.st);
+                ch.ops[n].coin3 = buildBetaCoin(ch.ct, ch.st);
                 ch.useCoin3 = true;
             } else if (ch.coinType == 5) {
-                // e . alpha coin
-                ch.coin3[n] = buildCoinMatrix([e.x, e.y, e.z], ch.ct, ch.st);
+                ch.ops[n].coin3 = buildCoinMatrix([e.x, e.y, e.z], ch.ct, ch.st);
                 ch.useCoin3 = true;
             }
         } else if (ch.coinType == 1) {
-            ch.coin1[n] = buildCoinMatrix([e.x, e.y, e.z], ch.ct, ch.st);
+            ch.ops[n].coin1 = buildCoinMatrix([e.x, e.y, e.z], ch.ct, ch.st);
         } else {
-            ch.coin1[n] = buildBetaCoin(ch.ct, ch.st);
+            ch.ops[n].coin1 = buildBetaCoin(ch.ct, ch.st);
         }
 
         // V-mixing
         if (ch.mixPhi != 0.0) {
-            ch.vmix[n] = buildVmix(ch.Pp[n], ch.Pm[n], ch.mixPhi);
+            ch.ops[n].vmix = buildVmix(Pp, Pm, ch.mixPhi);
         } else {
-            ch.vmix[n] = Mat4.eye();
+            ch.ops[n].vmix = Mat4.eye();
         }
 
         ch.builtUpTo++;
@@ -345,7 +339,7 @@ void run1d(Walk1dParams p) {
             norm2 += w * w;
             if (i < hi) {
                 ensureSite(ch, i + 1);
-                Mat4 U = frameTransport(ch.tau[i], ch.tau[i+1]);
+                Mat4 U = frameTransport(siteTau(ch, i), siteTau(ch, i+1));
                 double[4] chiNextRe = 0, chiNextIm = 0;
                 matVecSplit(U, chiCurRe.ptr, chiCurIm.ptr, chiNextRe.ptr, chiNextIm.ptr);
                 chiCurRe = chiNextRe;
@@ -360,7 +354,7 @@ void run1d(Walk1dParams p) {
         double[4] chiCurIm = [0, 0, 0, 0];
         foreach_reverse (i; lo .. center) {
             ensureSite(ch, i);
-            Mat4 U = frameTransport(ch.tau[i+1], ch.tau[i]);
+            Mat4 U = frameTransport(siteTau(ch, i+1), siteTau(ch, i));
             double[4] chiNextRe = 0, chiNextIm = 0;
             matVecSplit(U, chiCurRe.ptr, chiCurIm.ptr, chiNextRe.ptr, chiNextIm.ptr);
             chiCurRe = chiNextRe;
@@ -436,13 +430,13 @@ void run1d(Walk1dParams p) {
 
             // Coin
             foreach (i; alo .. ahi)
-                applyMat4InPlace(ch.coin1[i], psiRe, psiIm, i);
+                applyMat4InPlace(ch.ops[i].coin1, psiRe, psiIm, i);
             if (ch.useCoin2)
                 foreach (i; alo .. ahi)
-                    applyMat4InPlace(ch.coin2[i], psiRe, psiIm, i);
+                    applyMat4InPlace(ch.ops[i].coin2, psiRe, psiIm, i);
             if (ch.useCoin3)
                 foreach (i; alo .. ahi)
-                    applyMat4InPlace(ch.coin3[i], psiRe, psiIm, i);
+                    applyMat4InPlace(ch.ops[i].coin3, psiRe, psiIm, i);
 
             // Shift
             if (activeLo > 0) ensureSite(ch, activeLo - 1);
@@ -454,37 +448,33 @@ void run1d(Walk1dParams p) {
             tmpIm[4*zlo .. 4*zhi] = 0;
 
             foreach (i; zlo .. zhi) {
-                foreach (a; 0 .. 4) {
-                    double sRe = 0, sIm = 0;
-                    if (i-1 >= alo && i-1 < ahi) {
-                        // fwdBlock[i-1] * psi[i-1]
-                        foreach (b; 0 .. 4) {
-                            int ab = 4*a+b;
-                            sRe += ch.fwdBlock[i-1].re[ab] * psiRe[4*(i-1) + b]
-                                 - ch.fwdBlock[i-1].im[ab] * psiIm[4*(i-1) + b];
-                            sIm += ch.fwdBlock[i-1].re[ab] * psiIm[4*(i-1) + b]
-                                 + ch.fwdBlock[i-1].im[ab] * psiRe[4*(i-1) + b];
-                        }
-                    }
-                    if (i+1 >= alo && i+1 < ahi) {
-                        // bwdBlock[i+1] * psi[i+1]
-                        foreach (b; 0 .. 4) {
-                            int ab = 4*a+b;
-                            sRe += ch.bwdBlock[i+1].re[ab] * psiRe[4*(i+1) + b]
-                                 - ch.bwdBlock[i+1].im[ab] * psiIm[4*(i+1) + b];
-                            sIm += ch.bwdBlock[i+1].re[ab] * psiIm[4*(i+1) + b]
-                                 + ch.bwdBlock[i+1].im[ab] * psiRe[4*(i+1) + b];
-                        }
-                    }
-                    tmpRe[4*i + a] = sRe;
-                    tmpIm[4*i + a] = sIm;
+                double[4] accRe = 0, accIm = 0;
+
+                if (i-1 >= alo && i-1 < ahi) {
+                    matVecSplit(ch.ops[i-1].fwdBlock,
+                                &psiRe[4*(i-1)], &psiIm[4*(i-1)],
+                                accRe.ptr, accIm.ptr);
                 }
+
+                if (i+1 >= alo && i+1 < ahi) {
+                    double[4] bRe = 0, bIm = 0;
+                    matVecSplit(ch.ops[i+1].bwdBlock,
+                                &psiRe[4*(i+1)], &psiIm[4*(i+1)],
+                                bRe.ptr, bIm.ptr);
+                    foreach (a; 0 .. 4) {
+                        accRe[a] += bRe[a];
+                        accIm[a] += bIm[a];
+                    }
+                }
+
+                tmpRe[4*i .. 4*i+4] = accRe[];
+                tmpIm[4*i .. 4*i+4] = accIm[];
             }
 
             // V-mixing
             if (p.mixPhi != 0.0)
                 foreach (i; zlo .. zhi)
-                    applyMat4InPlace(ch.vmix[i], tmpRe, tmpIm, i);
+                    applyMat4InPlace(ch.ops[i].vmix, tmpRe, tmpIm, i);
 
             // Update active region
             if (activeLo > 0) {
@@ -532,11 +522,12 @@ void run1d(Walk1dParams p) {
             }
             // P+ and P- components
             double pp = 0, pm = 0;
+            Mat4 tau = siteTau(ch, i);
             foreach (a; 0 .. 4) {
                 double spRe = 0, spIm = 0, smRe = 0, smIm = 0;
                 foreach (b; 0 .. 4) {
-                    double tRe = ch.tau[i].re[4*a+b];
-                    double tIm = ch.tau[i].im[4*a+b];
+                    double tRe = tau.re[4*a+b];
+                    double tIm = tau.im[4*a+b];
                     double dab = (a == b) ? 1.0 : 0.0;
                     double pRe = psiRe[4*i + b];
                     double pIm = psiIm[4*i + b];
