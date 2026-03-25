@@ -3,12 +3,14 @@ project('quantum-walk-dlang', 'd', version: '0.1.0')
 add_project_arguments('-boundscheck=on', language: 'd')
 
 sources = [
-  'source/walk.d',
+  'source/interop_test.d',
   'source/geometry.d',
   'source/dirac.d',
   'source/spatial_hash.d',
   'source/lattice.d',
   'source/operators.d',
+  'source/observables.d',
+  'source/walk_main.d',
 ]
 
 lib = shared_library(
@@ -30,3 +32,13 @@ test_exe = executable(
   install: false,
 )
 test('d-unittests', test_exe)
+
+# Standalone walk executable
+walk_exe = executable(
+  'walk_d',
+  sources,
+  include_directories: include_directories('source'),
+  d_args: ['-d-version=walk_exe'],
+  link_args: ['-link-defaultlib-shared=false'],
+  install: false,
+)

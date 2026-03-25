@@ -4,7 +4,7 @@
  * Dummy roundtrip functions to verify D/Python interop via ctypes.
  * Will be replaced with the actual walk implementation.
  */
-module walk;
+module interop_test;
 
 import core.stdc.stdio : printf;
 
