@@ -108,36 +108,51 @@ struct Lattice {
     }
 
     /// Find site ID at position, or -1 if not present.
+    /// Only valid while hash table is alive (before freeHash).
     int findSite(Vec3 pos) const {
         return hash.find(pos);
     }
 
-    /// Insert a new site. Returns the site ID.
+    /// Insert a new site with deduplication (for seed generation).
     /// If a site already exists at this position, returns its existing ID.
     int insertSite(Vec3 pos, Vec3[4] dirs) {
         int existing = hash.find(pos);
         if (existing >= 0) return existing;
 
-        int id;
-        if (freeCount > 0) {
-            id = freeList[--freeCount];
-        } else {
-            assert(nsites < maxSites, "Too many sites");
-            id = nsites++;
-        }
-
+        int id = allocSiteId();
         hash.insert(pos, id);
         sites[id] = Site(pos, dirs);
         psi[4*id .. 4*id+4] = C(0, 0);
         return id;
     }
 
-    /// Remove a site (tombstone hash, zero psi, push to free list).
+    /// Insert a new site unconditionally (for walk-time chain extension).
+    /// Caller guarantees the site is unique (BC helix no-loops property).
+    int insertSiteNew(Vec3 pos, Vec3[4] dirs) {
+        int id = allocSiteId();
+        sites[id] = Site(pos, dirs);
+        psi[4*id .. 4*id+4] = C(0, 0);
+        return id;
+    }
+
+    /// Allocate a site ID from the free list or bump nsites.
+    private int allocSiteId() {
+        if (freeCount > 0)
+            return freeList[--freeCount];
+        assert(nsites < maxSites, "Too many sites");
+        return nsites++;
+    }
+
+    /// Remove a site (zero psi, push to free list).
     void removeSite(int id) {
-        hash.remove(sites[id].pos);
         psi[4*id .. 4*id+4] = C(0, 0);
         sites[id] = Site.init;
         freeList[freeCount++] = id;
+    }
+
+    /// Free the hash table (call after seed generation is complete).
+    void freeHash() {
+        hash = SiteHash.init;
     }
 
     /// Swap psi and tmp pointers (avoids memcpy after shift).
@@ -375,12 +390,13 @@ unittest {
     int id1 = lat.insertSite(Vec3(1, 0, 0), d);
     assert(lat.nsites == 2);
 
+    // After freeHash, removeSite doesn't touch the hash
+    lat.freeHash();
     lat.removeSite(id0);
     assert(lat.freeCount == 1);
-    assert(lat.findSite(Vec3(0, 0, 0)) == -1);
 
-    // Next insert should reuse id0
-    int id2 = lat.insertSite(Vec3(2, 0, 0), d);
+    // insertSiteNew (no hash) should reuse id0
+    int id2 = lat.insertSiteNew(Vec3(2, 0, 0), d);
     assert(id2 == id0);
     assert(lat.freeCount == 0);
 }

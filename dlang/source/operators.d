@@ -57,13 +57,13 @@ private int tryExtendFwd(ref Lattice lat, int s, bool isR,
 
     int nb = lat.findSite(p);
     if (nb >= 0) {
-        // Existing site — create one-directional link
+        // Existing site from another chain — link but absorb
         lat.setChainNext(s, isR, nb);
         if (lat.chainPrev(nb, isR) < 0) {
             lat.setChainPrev(nb, isR, s);
             lat.setChainFace(nb, isR, nf);
         }
-        return -1;  // absorb
+        return -1;
     }
 
     reorth(d);
