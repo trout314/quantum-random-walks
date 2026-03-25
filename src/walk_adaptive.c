@@ -66,6 +66,85 @@ static void helix_step(vec3 *pos, vec3 d[4], int face) {
     for(int a=0;a<4;a++) d[a]=v3reflect(d[a],e);
 }
 
+/* ========== A4 symmetry (tetrahedral wedge seeding) ========== */
+static int g_use_sym = 0;
+static double g_a4_rot[12][3][3];
+
+/* 12 even permutations of {0,1,2,3} */
+static const int A4_PERMS[12][4] = {
+    {0,1,2,3}, /* identity */
+    {1,2,0,3}, {2,0,1,3}, /* (012), (021) */
+    {1,3,2,0}, {3,0,2,1}, /* (013), (031) */
+    {2,1,3,0}, {3,1,0,2}, /* (023), (032) */
+    {0,2,3,1}, {0,3,1,2}, /* (123), (132) */
+    {1,0,3,2}, {2,3,0,1}, {3,2,1,0}  /* (01)(23), (02)(13), (03)(12) */
+};
+
+static void mat3_inv(double M[3][3], double R[3][3]) {
+    double det = M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1])
+               - M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0])
+               + M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]);
+    double inv = 1.0/det;
+    R[0][0]= inv*(M[1][1]*M[2][2]-M[1][2]*M[2][1]);
+    R[0][1]=-inv*(M[0][1]*M[2][2]-M[0][2]*M[2][1]);
+    R[0][2]= inv*(M[0][1]*M[1][2]-M[0][2]*M[1][1]);
+    R[1][0]=-inv*(M[1][0]*M[2][2]-M[1][2]*M[2][0]);
+    R[1][1]= inv*(M[0][0]*M[2][2]-M[0][2]*M[2][0]);
+    R[1][2]=-inv*(M[0][0]*M[1][2]-M[0][2]*M[1][0]);
+    R[2][0]= inv*(M[1][0]*M[2][1]-M[1][1]*M[2][0]);
+    R[2][1]=-inv*(M[0][0]*M[2][1]-M[0][1]*M[2][0]);
+    R[2][2]= inv*(M[0][0]*M[1][1]-M[0][1]*M[1][0]);
+}
+
+static void init_a4_rotations(void) {
+    vec3 d[4]; init_tet(d);
+    /* D = [d[0] | d[1] | d[2]] as column matrix */
+    double D[3][3] = {
+        {d[0].x, d[1].x, d[2].x},
+        {d[0].y, d[1].y, d[2].y},
+        {d[0].z, d[1].z, d[2].z}
+    };
+    double Dinv[3][3];
+    mat3_inv(D, Dinv);
+
+    vec3 dv[4]; /* all 4 directions for permuted lookup */
+    dv[0]=d[0]; dv[1]=d[1]; dv[2]=d[2]; dv[3]=d[3];
+
+    for (int p = 0; p < 12; p++) {
+        /* R_p = [d[sigma(0)] | d[sigma(1)] | d[sigma(2)]] · Dinv */
+        double Dp[3][3] = {
+            {dv[A4_PERMS[p][0]].x, dv[A4_PERMS[p][1]].x, dv[A4_PERMS[p][2]].x},
+            {dv[A4_PERMS[p][0]].y, dv[A4_PERMS[p][1]].y, dv[A4_PERMS[p][2]].y},
+            {dv[A4_PERMS[p][0]].z, dv[A4_PERMS[p][1]].z, dv[A4_PERMS[p][2]].z}
+        };
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++) {
+                g_a4_rot[p][i][j] = 0;
+                for (int k = 0; k < 3; k++)
+                    g_a4_rot[p][i][j] += Dp[i][k] * Dinv[k][j];
+            }
+    }
+}
+
+static int in_wedge(vec3 p) {
+    static vec3 dw[4];
+    static int init = 0;
+    if (!init) { init_tet(dw); init = 1; }
+    double lam[4];
+    for (int i = 0; i < 4; i++) lam[i] = v3dot(p, dw[i]);
+    /* Vertex 0 closest, vertex 1 second closest */
+    return lam[0] >= lam[1] && lam[0] >= lam[2] && lam[0] >= lam[3]
+        && lam[1] >= lam[2] && lam[1] >= lam[3];
+}
+
+static vec3 apply_a4_rot(int idx, vec3 p) {
+    return (vec3){
+        g_a4_rot[idx][0][0]*p.x + g_a4_rot[idx][0][1]*p.y + g_a4_rot[idx][0][2]*p.z,
+        g_a4_rot[idx][1][0]*p.x + g_a4_rot[idx][1][1]*p.y + g_a4_rot[idx][1][2]*p.z,
+        g_a4_rot[idx][2][0]*p.x + g_a4_rot[idx][2][1]*p.y + g_a4_rot[idx][2][2]*p.z
+    };
+}
+
 /* ========== 4x4 complex matrix ========== */
 typedef double complex c4x4[4][4];
 static void c4_zero(c4x4 M){memset(M,0,sizeof(c4x4));}
@@ -107,10 +186,10 @@ static void frame_transport(const c4x4 tf, const c4x4 tt, c4x4 U) {
 }
 
 /* ========== Hash table and sites ========== */
-#define HASH_BITS 25
+#define HASH_BITS 27
 #define HASH_SIZE (1<<HASH_BITS)
 #define HASH_MASK (HASH_SIZE-1)
-#define MAX_SITES 20000000
+#define MAX_SITES 60000000
 
 typedef struct { long kx,ky,kz; int id; } hentry;
 static hentry *htab;
@@ -126,13 +205,23 @@ static int nsites = 0;
 
 static double complex *psi, *tmp;  /* spinor arrays, 4 components per site */
 
+/* Free list for site ID reuse (pruning) */
+static int *free_list;
+static int free_count = 0;
+static int g_prune_interval = 0;
+
+/* Cumulative probability accounting */
+static double g_total_absorbed = 0;  /* too small to create new site */
+static double g_total_pruned = 0;    /* removed by chain-end pruning */
+
 static void init_storage(void) {
     htab = calloc(HASH_SIZE, sizeof(hentry));
     for (int i = 0; i < HASH_SIZE; i++) htab[i].id = -1;
     sites = malloc(MAX_SITES * sizeof(site_t));
     psi = calloc(4 * (size_t)MAX_SITES, sizeof(double complex));
     tmp = calloc(4 * (size_t)MAX_SITES, sizeof(double complex));
-    if (!htab || !sites || !psi || !tmp) {
+    free_list = malloc(MAX_SITES * sizeof(int));
+    if (!htab || !sites || !psi || !tmp || !free_list) {
         fprintf(stderr, "Failed to allocate storage\n"); exit(2);
     }
     fprintf(stderr, "Storage: sites=%.0f MB, psi+tmp=%.0f MB\n",
@@ -152,15 +241,21 @@ static int site_find(vec3 pos) {
     long kx,ky,kz; poskey(pos,&kx,&ky,&kz); unsigned h=hfn(kx,ky,kz);
     for(int p=0;p<HASH_SIZE;p++){unsigned i=(h+p)&HASH_MASK;
         if(htab[i].id==-1) return -1;
+        if(htab[i].id==-2) continue;  /* tombstone — skip */
         if(htab[i].kx==kx&&htab[i].ky==ky&&htab[i].kz==kz) return htab[i].id;}
     return -1;
 }
 static int site_insert(vec3 pos, vec3 dirs[4]) {
     long kx,ky,kz; poskey(pos,&kx,&ky,&kz); unsigned h=hfn(kx,ky,kz);
+    int first_tomb = -1;
     for(int p=0;p<HASH_SIZE;p++){unsigned i=(h+p)&HASH_MASK;
+        if(htab[i].id==-2) { if(first_tomb<0) first_tomb=(int)i; continue; }
         if(htab[i].id==-1){
-            if(nsites>=MAX_SITES){fprintf(stderr,"Too many sites\n");exit(1);}
-            int id=nsites++; htab[i]=(hentry){kx,ky,kz,id};
+            int slot = (first_tomb >= 0) ? first_tomb : (int)i;
+            int id;
+            if (free_count > 0) id = free_list[--free_count];
+            else { if(nsites>=MAX_SITES){fprintf(stderr,"Too many sites\n");exit(1);} id=nsites++; }
+            htab[slot]=(hentry){kx,ky,kz,id};
             sites[id].pos=pos; memcpy(sites[id].dirs,dirs,sizeof(vec3)*4);
             sites[id].r_next=sites[id].r_prev=-1;
             sites[id].l_next=sites[id].l_prev=-1;
@@ -169,6 +264,24 @@ static int site_insert(vec3 pos, vec3 dirs[4]) {
             return id;}
         if(htab[i].kx==kx&&htab[i].ky==ky&&htab[i].kz==kz) return htab[i].id;}
     fprintf(stderr,"Hash full\n"); exit(1);
+}
+
+/* ========== Site removal (for pruning) ========== */
+static void site_remove(int id) {
+    /* Find and tombstone the hash entry */
+    long kx,ky,kz; poskey(sites[id].pos,&kx,&ky,&kz); unsigned h=hfn(kx,ky,kz);
+    for(int p=0;p<HASH_SIZE;p++){unsigned i=(h+p)&HASH_MASK;
+        if(htab[i].id==-1) break;  /* shouldn't happen */
+        if(htab[i].id==-2) continue;
+        if(htab[i].kx==kx&&htab[i].ky==ky&&htab[i].kz==kz){
+            htab[i].id=-2; break;
+        }
+    }
+    memset(&psi[4*id], 0, 4*sizeof(double complex));
+    sites[id].r_next=sites[id].r_prev=-1;
+    sites[id].l_next=sites[id].l_prev=-1;
+    sites[id].r_face=sites[id].l_face=-1;
+    free_list[free_count++] = id;
 }
 
 /* ========== Chain threading ========== */
@@ -288,7 +401,15 @@ static int extend_chain_dir(int start_site, const int pat[4], int is_r,
         /* Create site */
         vec3 dd[4]; memcpy(dd, d, sizeof(dd)); reorth(dd);
         nb = site_insert(p, dd);
-        g_grid_count[ci]++;
+        if (g_use_sym) {
+            for (int ri = 0; ri < 12; ri++) {
+                vec3 img = apply_a4_rot(ri, p);
+                int img_ci = GRID_IDX(img);
+                g_grid_count[img_ci]++;
+            }
+        } else {
+            g_grid_count[ci]++;
+        }
 
         int nb_face;
         if (forward) nb_face = next_face(pat, cur_face);
@@ -328,7 +449,12 @@ static int generate_sites_chain_first(double sigma, double seed_thresh, int max_
     /* Origin */
     vec3 d0[4]; init_tet(d0);
     site_insert((vec3){0,0,0}, d0);
-    g_grid_count[GRID_IDX(((vec3){0,0,0}))]++;
+    if (g_use_sym) {
+        /* Origin maps to itself under all 12 rotations — count 12x */
+        g_grid_count[GRID_IDX(((vec3){0,0,0}))] += 12;
+    } else {
+        g_grid_count[GRID_IDX(((vec3){0,0,0}))]++;
+    }
 
     /* Seed queue */
     chain_seed_t *seed_queue = malloc(MAX_SITES * sizeof(chain_seed_t));
@@ -372,6 +498,127 @@ static int generate_sites_chain_first(double sigma, double seed_thresh, int max_
     return n_chains;
 }
 
+/* ========== Chain-end pruning ========== */
+
+/* Check if a chain-end site is eligible for pruning.
+ * is_fwd=1: s is a forward end (next==-1), check P+ flow from predecessor.
+ * is_fwd=0: s is a backward end (prev==-1), check P- flow from successor. */
+static int check_prune_eligible(int s, int is_r, int is_fwd, double thresh2) {
+    /* Check amplitude at s */
+    double amp2 = 0;
+    for (int a = 0; a < 4; a++) amp2 += creal(psi[4*s+a]*conj(psi[4*s+a]));
+    if (amp2 >= thresh2) return 0;
+
+    /* Check flow from neighbor */
+    int nb = is_fwd ? (is_r ? sites[s].r_prev : sites[s].l_prev)
+                    : (is_r ? sites[s].r_next : sites[s].l_next);
+    if (nb < 0) return 1;  /* no neighbor — isolated end, safe to prune */
+
+    int face = is_r ? sites[nb].r_face : sites[nb].l_face;
+    if (face < 0) return 1;
+
+    vec3 dv = sites[nb].dirs[face];
+    c4x4 tau; make_tau(tau, dv);
+
+    /* Build projector: P+ for forward flow, P- for backward flow */
+    c4x4 P; c4_eye(P);
+    double sign = is_fwd ? 1.0 : -1.0;
+    for (int a = 0; a < 4; a++)
+        for (int b = 0; b < 4; b++)
+            P[a][b] = 0.5*(P[a][b] + sign*tau[a][b]);
+
+    /* Compute |P · psi_nb|² */
+    double flow2 = 0;
+    for (int a = 0; a < 4; a++) {
+        double complex v = 0;
+        for (int b = 0; b < 4; b++) v += P[a][b] * psi[4*nb+b];
+        flow2 += creal(v*conj(v));
+    }
+    return flow2 < thresh2;
+}
+
+/* Unlink a chain-end site from one chain.
+ * If the site becomes orphaned (no chains), remove it entirely. */
+static void unlink_chain_end(int s, int is_r, int is_fwd) {
+    if (is_fwd) {
+        int nb = is_r ? sites[s].r_prev : sites[s].l_prev;
+        if (nb >= 0) {
+            if (is_r) sites[nb].r_next = -1;
+            else      sites[nb].l_next = -1;
+        }
+        if (is_r) { sites[s].r_prev = -1; sites[s].r_face = -1; }
+        else      { sites[s].l_prev = -1; sites[s].l_face = -1; }
+    } else {
+        int nb = is_r ? sites[s].r_next : sites[s].l_next;
+        if (nb >= 0) {
+            if (is_r) sites[nb].r_prev = -1;
+            else      sites[nb].l_prev = -1;
+        }
+        if (is_r) { sites[s].r_next = -1; sites[s].r_face = -1; }
+        else      { sites[s].l_next = -1; sites[s].l_face = -1; }
+    }
+
+    /* If orphaned from all chains, remove entirely */
+    if (sites[s].r_face < 0 && sites[s].l_face < 0)
+        site_remove(s);
+}
+
+/* Prune low-amplitude chain-end sites. Iterates until no more prunable.
+ * Returns count of pruned sites, accumulates pruned probability. */
+static int prune_chain_ends(double thresh2, double *prob_pruned) {
+    int total_pruned = 0, pruned_this_pass;
+    do {
+        pruned_this_pass = 0;
+        for (int s = 0; s < nsites; s++) {
+            /* Skip dead sites */
+            if (sites[s].r_face < 0 && sites[s].l_face < 0) continue;
+
+            /* R-chain forward end */
+            if (sites[s].r_face >= 0 && sites[s].r_next == -1) {
+                if (check_prune_eligible(s, 1, 1, thresh2)) {
+                    for (int a = 0; a < 4; a++)
+                        *prob_pruned += creal(psi[4*s+a]*conj(psi[4*s+a]));
+                    unlink_chain_end(s, 1, 1);
+                    pruned_this_pass++;
+                    continue;
+                }
+            }
+            /* R-chain backward end */
+            if (sites[s].r_face >= 0 && sites[s].r_prev == -1) {
+                if (check_prune_eligible(s, 1, 0, thresh2)) {
+                    for (int a = 0; a < 4; a++)
+                        *prob_pruned += creal(psi[4*s+a]*conj(psi[4*s+a]));
+                    unlink_chain_end(s, 1, 0);
+                    pruned_this_pass++;
+                    continue;
+                }
+            }
+            /* L-chain forward end */
+            if (sites[s].l_face >= 0 && sites[s].l_next == -1) {
+                if (check_prune_eligible(s, 0, 1, thresh2)) {
+                    for (int a = 0; a < 4; a++)
+                        *prob_pruned += creal(psi[4*s+a]*conj(psi[4*s+a]));
+                    unlink_chain_end(s, 0, 1);
+                    pruned_this_pass++;
+                    continue;
+                }
+            }
+            /* L-chain backward end */
+            if (sites[s].l_face >= 0 && sites[s].l_prev == -1) {
+                if (check_prune_eligible(s, 0, 0, thresh2)) {
+                    for (int a = 0; a < 4; a++)
+                        *prob_pruned += creal(psi[4*s+a]*conj(psi[4*s+a]));
+                    unlink_chain_end(s, 0, 0);
+                    pruned_this_pass++;
+                    continue;
+                }
+            }
+        }
+        total_pruned += pruned_this_pass;
+    } while (pruned_this_pass > 0);
+    return total_pruned;
+}
+
 /* ========== Adaptive shift operator ========== */
 
 /* Try to extend a chain from site s in the forward (+) direction.
@@ -395,10 +642,8 @@ static int try_extend_fwd(int s, int is_r, const int pat[4],
     /* Find or create */
     int nb = site_find(p);
     if (nb >= 0) {
-        /* Site already exists — it's either on this chain already (gap from
-         * thread_chain stopping early) or a site created by BFS/other chain.
-         * Don't send amplitude to it — it's already handled by its own chain
-         * segment. Link for future steps but return -1 to absorb this step. */
+        /* Site already exists — link for future steps. One-directional links are OK;
+         * the shift operator handles stale links to pruned sites gracefully. */
         if (is_r) { sites[s].r_next = nb; if (sites[nb].r_prev<0) { sites[nb].r_prev=s; sites[nb].r_face=nf; } }
         else      { sites[s].l_next = nb; if (sites[nb].l_prev<0) { sites[nb].l_prev=s; sites[nb].l_face=nf; } }
         return -1;  /* absorb this step's amplitude */
@@ -487,20 +732,23 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
                 shifted[a] += Pp[a][b] * psi[4*s+b];
 
             int nb = is_r ? sites[s].r_next : sites[s].l_next;
+            /* Clear stale link to pruned site */
+            if (nb >= 0) {
+                int fn = is_r ? sites[nb].r_face : sites[nb].l_face;
+                if (fn < 0) {
+                    if (is_r) sites[s].r_next = -1; else sites[s].l_next = -1;
+                    nb = -1;
+                }
+            }
             /* Try to extend if at chain end */
             if (nb < 0)
                 nb = try_extend_fwd(s, is_r, pat, shifted, thresh2);
 
             if (nb >= 0) {
                 int fn = is_r ? sites[nb].r_face : sites[nb].l_face;
-                if (fn < 0) {
-                    fprintf(stderr, "BUG: nb=%d has no face for %s chain (from fwd extend of s=%d)\n",
-                            nb, is_r?"R":"L", s);
-                }
-                vec3 dn = sites[nb].dirs[fn >= 0 ? fn : 0];
+                vec3 dn = sites[nb].dirs[fn];
                 c4x4 tn; make_tau(tn, dn);
                 c4x4 U, bl; frame_transport(tau, tn, U); c4_mul(bl, U, Pp);
-                /* Check: ||bl·psi||² should equal ||Pp·psi||² since U is unitary */
                 double complex result[4] = {0};
                 for (int a=0;a<4;a++) for(int b=0;b<4;b++)
                     result[a] += bl[a][b] * psi[4*s+b];
@@ -528,6 +776,14 @@ static void apply_shift_adaptive(int is_r, const int pat[4], double thresh2,
                 shifted[a] += Pm[a][b] * psi[4*s+b];
 
             int nb = is_r ? sites[s].r_prev : sites[s].l_prev;
+            /* Clear stale link to pruned site */
+            if (nb >= 0) {
+                int fp = is_r ? sites[nb].r_face : sites[nb].l_face;
+                if (fp < 0) {
+                    if (is_r) sites[s].r_prev = -1; else sites[s].l_prev = -1;
+                    nb = -1;
+                }
+            }
             if (nb < 0)
                 nb = try_extend_bwd(s, is_r, pat, shifted, thresh2);
 
@@ -732,6 +988,8 @@ int main(int argc, char **argv) {
     if (argc > 5) seed_depth = atoi(argv[5]);
     if (argc > 6) g_coin_type = atoi(argv[6]);
     if (argc > 7) g_mix_phi = atof(argv[7]);
+    if (argc > 8) g_use_sym = atoi(argv[8]);
+    if (argc > 9) g_prune_interval = atoi(argv[9]);
     double thresh2 = threshold * threshold;
     double ct = cos(theta), st = sin(theta);
 
@@ -742,12 +1000,14 @@ int main(int argc, char **argv) {
         if (seed_depth < 4) seed_depth = 4;
     }
 
-    fprintf(stderr, "=== walk_adaptive: seed=%d theta=%.3f sigma=%.1f steps=%d thresh=%.1e coin=%s mix_phi=%.4f ===\n",
+    fprintf(stderr, "=== walk_adaptive: seed=%d theta=%.3f sigma=%.1f steps=%d thresh=%.1e coin=%s mix_phi=%.4f sym=%d prune=%d ===\n",
             seed_depth, theta, sigma, n_steps, threshold,
-            g_coin_type==0 ? "e.alpha" : "dual_parity", g_mix_phi);
+            g_coin_type==0 ? "e.alpha" : "dual_parity", g_mix_phi,
+            g_use_sym, g_prune_interval);
     fprintf(stderr, "Memory available: %ld MB\n", get_avail_mb());
 
     init_dirac();
+    if (g_use_sym) init_a4_rotations();
     init_storage();
 
     /* ---- Generate sites via chain-first approach ---- */
@@ -804,9 +1064,9 @@ int main(int argc, char **argv) {
     }
 
     /* ---- Time evolution ---- */
-    printf("# theta=%.4f sigma=%.1f n_steps=%d seed=%d thresh=%.1e\n",
-           theta, sigma, n_steps, seed_depth, threshold);
-    printf("# t norm r2 x2 y2 z2 r95 nsites absorbed\n");
+    printf("# theta=%.4f sigma=%.1f n_steps=%d seed=%d thresh=%.1e sym=%d prune=%d\n",
+           theta, sigma, n_steps, seed_depth, threshold, g_use_sym, g_prune_interval);
+    printf("# t norm r2 x2 y2 z2 r95 nsites absorbed pruned\n");
 
     for (int t = 0; t <= n_steps; t++) {
         /* Compute observables */
@@ -866,14 +1126,16 @@ int main(int argc, char **argv) {
             free(bp);
         }
 
-        printf("%d %.6f %.2f %.2f %.2f %.2f %.2f %d 0.0\n",
-               t, pnorm, mx2+my2+mz2, mx2, my2, mz2, r95, nsites);
+        printf("%d %.6f %.2f %.2f %.2f %.2f %.2f %d %.6e %.6e\n",
+               t, pnorm, mx2+my2+mz2, mx2, my2, mz2, r95, nsites,
+               g_total_absorbed, g_total_pruned);
         fflush(stdout);
 
         if (t < n_steps) {
             if (t % 5 == 0)
-                fprintf(stderr, "  step %d/%d: %d sites, norm=%.6f (mem: %ld MB)\n",
-                        t, n_steps, nsites, pnorm, get_avail_mb());
+                fprintf(stderr, "  step %d/%d: %d sites, norm=%.6f absorbed=%.2e pruned=%.2e (mem: %ld MB)\n",
+                        t, n_steps, nsites, pnorm,
+                        g_total_absorbed, g_total_pruned, get_avail_mb());
 
             int cr_l=0, cr_r=0;
             double abs_l=0, abs_r=0;
@@ -892,12 +1154,24 @@ int main(int argc, char **argv) {
             /* Step 6: V_R mixing */
             apply_vmix(1);
 
-            /* Update the output line's absorbed column for the NEXT step */
+            /* Accumulate absorbed probability */
+            g_total_absorbed += abs_l + abs_r;
+
+            /* Periodic pruning */
+            if (g_prune_interval > 0 && t > 0 && t % g_prune_interval == 0) {
+                double pp = 0;
+                int pruned = prune_chain_ends(thresh2, &pp);
+                g_total_pruned += pp;
+                if (pruned > 0)
+                    fprintf(stderr, "  step %d: pruned %d sites (free=%d, prob=%.2e)\n",
+                            t, pruned, free_count, pp);
+            }
         }
     }
 
     if (radf) fclose(radf);
-    fprintf(stderr, "\nDone. Final: %d sites\n", nsites);
-    free(htab); free(sites); free(psi); free(tmp);
+    fprintf(stderr, "\nDone. Final: %d sites, absorbed=%.6e, pruned=%.6e\n",
+            nsites, g_total_absorbed, g_total_pruned);
+    free(htab); free(sites); free(psi); free(tmp); free(free_list);
     return 0;
 }
