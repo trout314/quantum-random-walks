@@ -17,7 +17,7 @@ struct Observables {
 }
 
 /// Compute all observables from the current wavefunction.
-Observables computeObservables(const Lattice lat) {
+Observables computeObservables(bool hasCoin)(const Lattice!hasCoin lat) {
     Observables obs;
     obs.nsites = lat.nsites;
 
@@ -91,7 +91,7 @@ unittest {
     import lattice : Lattice, DensityGrid, generateSites;
     import std.math : exp, fabs;
 
-    auto lat = Lattice.create(100000);
+    auto lat = Lattice!false.create(100000);
     double sigma = 1.5;
     double stepLen = 2.0 / 3.0;
     int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;
