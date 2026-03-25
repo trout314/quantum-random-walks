@@ -6,6 +6,7 @@ sources = [
   'source/walk.d',
   'source/geometry.d',
   'source/dirac.d',
+  'source/spatial_hash.d',
 ]
 
 lib = shared_library(
