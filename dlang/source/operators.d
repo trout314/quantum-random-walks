@@ -76,88 +76,130 @@ private int tryExtendBwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
 
 ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                                      const int[4] pat, double thresh2) {
+    import core.thread : Thread;
+    import std.parallelism : parallel, taskPool;
+    alias ChainT = Lattice!hasCoin.ChainT;
+    alias Ops = Lattice!hasCoin.Ops;
+
     int ns = lat.nsites;
     ShiftResult result;
 
+    // Zero tmp
     lat.tmpRe[0 .. 4 * ns] = 0;
     lat.tmpIm[0 .. 4 * ns] = 0;
 
+    // Copy identity for sites not on a chain of this type
     foreach (s; 0 .. ns) {
-        int face = lat.chainFace(s, isR);
-
-        if (face < 0) {
+        if (lat.chainFace(s, isR) < 0) {
             lat.tmpRe[4*s .. 4*s+4] = lat.psiRe[4*s .. 4*s+4];
             lat.tmpIm[4*s .. 4*s+4] = lat.psiIm[4*s .. 4*s+4];
-            continue;
         }
+    }
 
-        auto op = lat.siteOps(s, isR);
+    // Process chains in two passes:
+    // 1. Interior sites (parallel) — gather from neighbors, no write conflicts
+    // 2. Chain-end extension (serial) — mutates lattice
 
-        // P+ -> forward
+    // Collect chain indices for this chirality (reuse static buffer)
+    static int[] chainIds;
+    if (chainIds.length < lat.chains.length)
+        chainIds = new int[lat.chains.length];
+    int nci = 0;
+    foreach (ci, ref ch; lat.chains)
+        if (ch.isR == isR && ch.ops.length > 0)
+            chainIds[nci++] = cast(int) ci;
+    auto activeChains = chainIds[0 .. nci];
+
+    // Pass 1: interior gather (parallel-safe: each site writes only to its own tmp)
+    import std.parallelism : parallel;
+    foreach (ci; parallel(activeChains)) {
+        auto ch = &lat.chains[ci];
+        int n = ch.ops.length;
+
+        foreach (i; 0 .. n) {
+            int s = ch.ops[i].siteId;
+            double[4] accRe = 0, accIm = 0;
+
+            if (i > 0) {
+                int prev = ch.ops[i-1].siteId;
+                matVecSplit(ch.ops[i-1].fwdBlock,
+                            &lat.psiRe[4*prev], &lat.psiIm[4*prev],
+                            accRe.ptr, accIm.ptr);
+            }
+
+            if (i < n - 1) {
+                int next = ch.ops[i+1].siteId;
+                double[4] bRe = 0, bIm = 0;
+                matVecSplit(ch.ops[i+1].bwdBlock,
+                            &lat.psiRe[4*next], &lat.psiIm[4*next],
+                            bRe.ptr, bIm.ptr);
+                foreach (a; 0 .. 4) {
+                    accRe[a] += bRe[a];
+                    accIm[a] += bIm[a];
+                }
+            }
+
+            foreach (a; 0 .. 4) {
+                lat.tmpRe[4*s + a] += accRe[a];
+                lat.tmpIm[4*s + a] += accIm[a];
+            }
+        }
+    }
+
+    // Pass 2: chain-end extension (serial — mutates lattice)
+    foreach (ci; activeChains) {
+        auto ch = &lat.chains[ci];
+        int n = ch.ops.length;
+
+        // Forward end
         {
-            int nb = lat.chainNext(s, isR);
-            if (nb >= 0 && op !is null) {
+            int endSite = ch.ops[n-1].siteId;
+            int face = lat.chainFace(endSite, isR);
+            Mat4 tau = makeTau(lat.sites[endSite].dirs[face]);
+            Mat4 Pp = projPlus(tau);
+            double[4] shRe = 0, shIm = 0;
+            matVecSplit(Pp, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
+                        shRe.ptr, shIm.ptr);
+            int nb = tryExtendFwd!hasCoin(lat, endSite, isR, pat, shRe, shIm, thresh2);
+            if (nb >= 0) {
+                auto newOp = lat.siteOps(endSite, isR);
                 double[4] resRe = 0, resIm = 0;
-                matVecSplit(op.fwdBlock, &lat.psiRe[4*s], &lat.psiIm[4*s],
+                matVecSplit(newOp.fwdBlock, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
                             resRe.ptr, resIm.ptr);
                 foreach (a; 0 .. 4) {
                     lat.tmpRe[4*nb + a] += resRe[a];
                     lat.tmpIm[4*nb + a] += resIm[a];
                 }
-            } else if (nb < 0) {
-                Mat4 tau = makeTau(lat.sites[s].dirs[face]);
-                Mat4 Pp = projPlus(tau);
-                double[4] shRe = 0, shIm = 0;
-                matVecSplit(Pp, &lat.psiRe[4*s], &lat.psiIm[4*s], shRe.ptr, shIm.ptr);
-                nb = tryExtendFwd!hasCoin(lat, s, isR, pat, shRe, shIm, thresh2);
-                if (nb >= 0) {
-                    auto newOp = lat.siteOps(s, isR);
-                    double[4] resRe = 0, resIm = 0;
-                    matVecSplit(newOp.fwdBlock, &lat.psiRe[4*s], &lat.psiIm[4*s],
-                                resRe.ptr, resIm.ptr);
-                    foreach (a; 0 .. 4) {
-                        lat.tmpRe[4*nb + a] += resRe[a];
-                        lat.tmpIm[4*nb + a] += resIm[a];
-                    }
-                    result.nCreated++;
-                } else {
-                    foreach (a; 0 .. 4)
-                        result.probAbsorbed += shRe[a]*shRe[a] + shIm[a]*shIm[a];
-                }
+                result.nCreated++;
+            } else if (nb == -1) {
+                foreach (a; 0 .. 4)
+                    result.probAbsorbed += shRe[a]*shRe[a] + shIm[a]*shIm[a];
             }
         }
 
-        // P- -> backward
+        // Backward end
         {
-            int nb = lat.chainPrev(s, isR);
-            if (nb >= 0 && op !is null) {
+            int endSite = ch.ops[0].siteId;
+            int face = lat.chainFace(endSite, isR);
+            Mat4 tau = makeTau(lat.sites[endSite].dirs[face]);
+            Mat4 Pm = projMinus(tau);
+            double[4] shRe = 0, shIm = 0;
+            matVecSplit(Pm, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
+                        shRe.ptr, shIm.ptr);
+            int nb = tryExtendBwd!hasCoin(lat, endSite, isR, pat, shRe, shIm, thresh2);
+            if (nb >= 0) {
+                auto newOp = lat.siteOps(endSite, isR);
                 double[4] resRe = 0, resIm = 0;
-                matVecSplit(op.bwdBlock, &lat.psiRe[4*s], &lat.psiIm[4*s],
+                matVecSplit(newOp.bwdBlock, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
                             resRe.ptr, resIm.ptr);
                 foreach (a; 0 .. 4) {
                     lat.tmpRe[4*nb + a] += resRe[a];
                     lat.tmpIm[4*nb + a] += resIm[a];
                 }
-            } else if (nb < 0) {
-                Mat4 tau = makeTau(lat.sites[s].dirs[face]);
-                Mat4 Pm = projMinus(tau);
-                double[4] shRe = 0, shIm = 0;
-                matVecSplit(Pm, &lat.psiRe[4*s], &lat.psiIm[4*s], shRe.ptr, shIm.ptr);
-                nb = tryExtendBwd!hasCoin(lat, s, isR, pat, shRe, shIm, thresh2);
-                if (nb >= 0) {
-                    auto newOp = lat.siteOps(s, isR);
-                    double[4] resRe = 0, resIm = 0;
-                    matVecSplit(newOp.bwdBlock, &lat.psiRe[4*s], &lat.psiIm[4*s],
-                                resRe.ptr, resIm.ptr);
-                    foreach (a; 0 .. 4) {
-                        lat.tmpRe[4*nb + a] += resRe[a];
-                        lat.tmpIm[4*nb + a] += resIm[a];
-                    }
-                    result.nCreated++;
-                } else {
-                    foreach (a; 0 .. 4)
-                        result.probAbsorbed += shRe[a]*shRe[a] + shIm[a]*shIm[a];
-                }
+                result.nCreated++;
+            } else if (nb == -1) {
+                foreach (a; 0 .. 4)
+                    result.probAbsorbed += shRe[a]*shRe[a] + shIm[a]*shIm[a];
             }
         }
     }
