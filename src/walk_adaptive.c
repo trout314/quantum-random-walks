@@ -137,6 +137,16 @@ static int in_wedge(vec3 p) {
         && lam[1] >= lam[2] && lam[1] >= lam[3];
 }
 
+/* Number of distinct A4 images for a site.
+ * Site 0 (origin): 1 image. Site 1 (on vertex axis): 4 images.
+ * All others: 12 (generic position, trivial stabilizer). */
+static inline int site_images(int id) {
+    if (!g_use_sym) return 1;
+    if (id == 0) return 1;
+    if (id == 1) return 4;
+    return 12;
+}
+
 static vec3 apply_a4_rot(int idx, vec3 p) {
     return (vec3){
         g_a4_rot[idx][0][0]*p.x + g_a4_rot[idx][0][1]*p.y + g_a4_rot[idx][0][2]*p.z,
@@ -308,17 +318,19 @@ typedef struct { int site_id; int spawn_type; /* 0=L, 1=R */ } chain_seed_t;
 /* Density grid globals (set up in main before calling generate_sites) */
 static double g_grid_half;
 static int g_grid_n;
+static double g_grid_cell;  /* cell side length */
 static int *g_grid_count;
 
 #define GRID_IDX(pos) ({ \
-    int gx = (int)((pos.x + g_grid_half) / 1.0); \
-    int gy = (int)((pos.y + g_grid_half) / 1.0); \
-    int gz = (int)((pos.z + g_grid_half) / 1.0); \
+    int gx = (int)((pos.x + g_grid_half) / g_grid_cell); \
+    int gy = (int)((pos.y + g_grid_half) / g_grid_cell); \
+    int gz = (int)((pos.z + g_grid_half) / g_grid_cell); \
     if (gx < 0) gx = 0; if (gx >= g_grid_n) gx = g_grid_n-1; \
     if (gy < 0) gy = 0; if (gy >= g_grid_n) gy = g_grid_n-1; \
     if (gz < 0) gz = 0; if (gz >= g_grid_n) gz = g_grid_n-1; \
     gx * g_grid_n * g_grid_n + gy * g_grid_n + gz; \
 })
+
 
 /* Extend a chain in one direction from start_site, creating new sites as needed.
  * For each new site created, enqueue a perpendicular chain seed.
@@ -401,15 +413,7 @@ static int extend_chain_dir(int start_site, const int pat[4], int is_r,
         /* Create site */
         vec3 dd[4]; memcpy(dd, d, sizeof(dd)); reorth(dd);
         nb = site_insert(p, dd);
-        if (g_use_sym) {
-            for (int ri = 0; ri < 12; ri++) {
-                vec3 img = apply_a4_rot(ri, p);
-                int img_ci = GRID_IDX(img);
-                g_grid_count[img_ci]++;
-            }
-        } else {
-            g_grid_count[ci]++;
-        }
+        g_grid_count[ci]++;
 
         int nb_face;
         if (forward) nb_face = next_face(pat, cur_face);
@@ -449,12 +453,7 @@ static int generate_sites_chain_first(double sigma, double seed_thresh, int max_
     /* Origin */
     vec3 d0[4]; init_tet(d0);
     site_insert((vec3){0,0,0}, d0);
-    if (g_use_sym) {
-        /* Origin maps to itself under all 12 rotations — count 12x */
-        g_grid_count[GRID_IDX(((vec3){0,0,0}))] += 12;
-    } else {
-        g_grid_count[GRID_IDX(((vec3){0,0,0}))]++;
-    }
+    g_grid_count[GRID_IDX(((vec3){0,0,0}))]++;
 
     /* Seed queue */
     chain_seed_t *seed_queue = malloc(MAX_SITES * sizeof(chain_seed_t));
@@ -994,7 +993,6 @@ int main(int argc, char **argv) {
     /* With sym, per-site amplitudes are √12 smaller (physical norm includes
      * 12 image copies). Adjust creation threshold so the same physical
      * amplitude triggers site creation as in the non-symmetric case. */
-    if (g_use_sym) thresh2 /= 12.0;
     double ct = cos(theta), st = sin(theta);
 
     /* Auto seed depth: ensure Gaussian has decayed to < exp(-8) ~ 3e-4
@@ -1020,17 +1018,39 @@ int main(int argc, char **argv) {
      * This guarantees every site is on at least one chain by construction. */
     double seed_thresh = 1e-4;
     double step_len = 2.0/3.0;
-    int max_per_cell = 8;
+    /* With sym, count actual sites per cell. Cell size and limit are chosen
+     * so that actual_density × 12 ≈ baseline_density (8/unit³).
+     * cell_size=2, max_per_cell=5 → actual 5/8=0.625/unit³ → phys 7.5/unit³. */
+    int max_per_cell = g_use_sym ? 5 : 8;
+    g_grid_cell = g_use_sym ? 2.0 : 1.0;
     int max_chain_len = (int)(4.0 * sigma / step_len) + 5;
     g_grid_half = max_chain_len * step_len + 5.0;
-    g_grid_n = (int)(2.0 * g_grid_half / 1.0) + 1;
+    g_grid_n = (int)(2.0 * g_grid_half / g_grid_cell) + 1;
     if (g_grid_n > 500) g_grid_n = 500;
     g_grid_count = calloc(g_grid_n * g_grid_n * g_grid_n, sizeof(int));
 
-    fprintf(stderr, "\n--- Chain-first site generation (max_per_cell=%d, grid %d³) ---\n",
-            max_per_cell, g_grid_n);
+    fprintf(stderr, "\n--- Chain-first site generation (max_per_cell=%d, cell=%.1f, grid %d³) ---\n",
+            max_per_cell, g_grid_cell, g_grid_n);
 
     int n_chains = generate_sites_chain_first(sigma, seed_thresh, max_per_cell);
+
+    /* Grid count diagnostics */
+    {
+        int gmax = 0; long gtotal = 0; int gcells_used = 0;
+        int gn3 = g_grid_n * g_grid_n * g_grid_n;
+        int hist[20] = {0};
+        for (int i = 0; i < gn3; i++) {
+            if (g_grid_count[i] > 0) { gcells_used++; gtotal += g_grid_count[i]; }
+            if (g_grid_count[i] > gmax) gmax = g_grid_count[i];
+            if (g_grid_count[i] < 20) hist[g_grid_count[i]]++;
+        }
+        fprintf(stderr, "Grid: %d cells used, total count=%ld, max=%d, avg=%.1f\n",
+                gcells_used, gtotal, gmax, gcells_used > 0 ? (double)gtotal/gcells_used : 0);
+        fprintf(stderr, "  histogram: ");
+        for (int i = 1; i <= 12; i++) fprintf(stderr, "%d:%d ", i, hist[i]);
+        fprintf(stderr, "\n");
+    }
+
     free(g_grid_count);
     int n_seed = nsites;
 
@@ -1048,9 +1068,6 @@ int main(int argc, char **argv) {
             no_r, no_l, no_both);
 
     /* ---- Initialize wavepacket ---- */
-    /* Physical norm = sym_factor × Σ|ψ_i|² where sym_factor accounts for
-     * the 12 image copies of each site under A4. */
-    int sym_factor = g_use_sym ? 12 : 1;
     double norm = 0;
     for (int n = 0; n < nsites; n++) {
         double x = sites[n].pos.x, y = sites[n].pos.y, z = sites[n].pos.z;
@@ -1059,9 +1076,9 @@ int main(int argc, char **argv) {
         psi[4*n] = w;
         norm += w*w;
     }
-    norm = sqrt(sym_factor * norm);
+    norm = sqrt(norm);
     for (int i = 0; i < 4*nsites; i++) psi[i] /= norm;
-    fprintf(stderr, "Wavepacket initialized (sigma=%.1f, sym_factor=%d)\n", sigma, sym_factor);
+    fprintf(stderr, "Wavepacket initialized (sigma=%.1f, sym=%d)\n", sigma, g_use_sym);
 
     /* ---- Radial site density output ---- */
     {
@@ -1069,7 +1086,7 @@ int main(int argc, char **argv) {
         if (sf) {
             FILE *sdf = fopen(sf, "w");
             if (sdf) {
-                fprintf(sdf, "# Radial site density: r n_sites shell_vol density (physical)\n");
+                fprintf(sdf, "# Radial site density: r n_sites phys_sites shell_vol density\n");
                 double dr = 0.5, rmax = 0;
                 for (int n = 0; n < nsites; n++) {
                     double r = v3norm(sites[n].pos);
@@ -1077,18 +1094,19 @@ int main(int argc, char **argv) {
                 }
                 int nbins = (int)(rmax / dr) + 1;
                 int *cnt = calloc(nbins+1, sizeof(int));
+                double *pcnt = calloc(nbins+1, sizeof(double));
                 for (int n = 0; n < nsites; n++) {
                     int b = (int)(v3norm(sites[n].pos) / dr);
                     if (b > nbins) b = nbins;
                     cnt[b]++;
+                    pcnt[b] += site_images(n);
                 }
                 for (int b = 0; b <= nbins; b++) {
                     double r = (b + 0.5) * dr;
                     double vol = (4.0/3.0)*M_PI*(pow((b+1)*dr,3) - pow(b*dr,3));
-                    double phys_count = cnt[b] * sym_factor;
-                    fprintf(sdf, "%.3f %d %.4f %.4f\n", r, cnt[b], vol, phys_count/vol);
+                    fprintf(sdf, "%.3f %d %.1f %.4f %.4f\n", r, cnt[b], pcnt[b], vol, pcnt[b]/vol);
                 }
-                free(cnt);
+                free(cnt); free(pcnt);
                 fclose(sdf);
                 fprintf(stderr, "Site density -> %s\n", sf);
             }
@@ -1108,9 +1126,7 @@ int main(int argc, char **argv) {
     printf("# t norm r2 x2 y2 z2 r95 nsites absorbed pruned\n");
 
     for (int t = 0; t <= n_steps; t++) {
-        /* Compute observables.
-         * With sym, physical probability = sym_factor × Σ|ψ_i|².
-         * For ⟨x²⟩ etc, average over all 12 images of each site. */
+        /* Compute observables */
         double total_prob = 0;
         double mx2=0, my2=0, mz2=0;
         for (int n = 0; n < nsites; n++) {
@@ -1119,25 +1135,24 @@ int main(int argc, char **argv) {
                 p += creal(psi[4*n+a]*conj(psi[4*n+a]));
             total_prob += p;
         }
-        total_prob *= sym_factor;
         double pnorm = sqrt(total_prob);
         for (int n = 0; n < nsites; n++) {
             double p = 0;
             for (int a = 0; a < 4; a++)
                 p += creal(psi[4*n+a]*conj(psi[4*n+a]));
-            p *= sym_factor;
-            p /= total_prob;
+            double pw = p / total_prob;
             if (g_use_sym) {
-                /* Average x²,y²,z² over all 12 A4 images */
+                /* Average x²,y²,z² over all 12 A4 images.
+                 * Each image site carries the same pw, but at a rotated position. */
                 for (int gi = 0; gi < 12; gi++) {
                     vec3 img = apply_a4_rot(gi, sites[n].pos);
-                    mx2 += (p/12.0)*img.x*img.x;
-                    my2 += (p/12.0)*img.y*img.y;
-                    mz2 += (p/12.0)*img.z*img.z;
+                    mx2 += (pw/12.0)*img.x*img.x;
+                    my2 += (pw/12.0)*img.y*img.y;
+                    mz2 += (pw/12.0)*img.z*img.z;
                 }
             } else {
                 double x=sites[n].pos.x, y=sites[n].pos.y, z=sites[n].pos.z;
-                mx2 += p*x*x; my2 += p*y*y; mz2 += p*z*z;
+                mx2 += pw*x*x; my2 += pw*y*y; mz2 += pw*z*z;
             }
         }
 
@@ -1160,7 +1175,7 @@ int main(int argc, char **argv) {
                     p += creal(psi[4*n+a]*conj(psi[4*n+a]));
                 int b = (int)(r / dr);
                 if (b > nbins) b = nbins;
-                bp[b] += p * sym_factor / total_prob;
+                bp[b] += p / total_prob;
             }
             double cum = 0;
             for (int b = 0; b <= nbins; b++) {
@@ -1207,14 +1222,14 @@ int main(int argc, char **argv) {
             /* Step 6: V_R mixing */
             apply_vmix(1);
 
-            /* Accumulate absorbed probability (physical = sym_factor × per-site) */
-            g_total_absorbed += sym_factor * (abs_l + abs_r);
+            /* Accumulate absorbed probability */
+            g_total_absorbed += abs_l + abs_r;
 
             /* Periodic pruning */
             if (g_prune_interval > 0 && t > 0 && t % g_prune_interval == 0) {
                 double pp = 0;
                 int pruned = prune_chain_ends(thresh2, &pp);
-                g_total_pruned += sym_factor * pp;
+                g_total_pruned += pp;
                 if (pruned > 0)
                     fprintf(stderr, "  step %d: pruned %d sites (free=%d, prob=%.2e)\n",
                             t, pruned, free_count, pp);
