@@ -20,7 +20,8 @@ struct WalkParams {
     double theta = 0.0;        // default: no coin (V-mixing only)
     double sigma = 3.0;
     int nSteps = 50;
-    double threshold = 1e-10;
+    double threshold = 1e-10;  // extension threshold (absorb if amp < this)
+    double pruneThresh = 1e-6; // pruning threshold (prune chain ends below this)
     double mixPhi = 0.0;
     int pruneInterval = 10;
     int maxSites = 25_000_000; // lattice capacity (~24 GB peak for sigma=5)
@@ -36,13 +37,14 @@ WalkParams parseArgs(string[] args) {
     if (args.length > 2) p.sigma = args[2].to!double;
     if (args.length > 3) p.nSteps = args[3].to!int;
     if (args.length > 4) p.threshold = args[4].to!double;
-    if (args.length > 5) p.mixPhi = args[5].to!double;
-    if (args.length > 6) p.pruneInterval = args[6].to!int;
-    if (args.length > 7) p.maxSites = args[7].to!int;
-    if (args.length > 8) p.seedThresh = args[8].to!double;
-    if (args.length > 9) p.k0x = args[9].to!double;
-    if (args.length > 10) p.k0y = args[10].to!double;
-    if (args.length > 11) p.k0z = args[11].to!double;
+    if (args.length > 5) p.pruneThresh = args[5].to!double;
+    if (args.length > 6) p.mixPhi = args[6].to!double;
+    if (args.length > 7) p.pruneInterval = args[7].to!int;
+    if (args.length > 8) p.maxSites = args[8].to!int;
+    if (args.length > 9) p.seedThresh = args[9].to!double;
+    if (args.length > 10) p.k0x = args[10].to!double;
+    if (args.length > 11) p.k0y = args[11].to!double;
+    if (args.length > 12) p.k0z = args[12].to!double;
     return p;
 }
 
@@ -69,10 +71,11 @@ void initWavepacket(ref Lattice!HAS_COIN lat, double sigma,
 }
 
 void run(WalkParams p) {
-    double thresh2 = p.threshold * p.threshold;
+    double extThresh2 = p.threshold * p.threshold;
+    double pruneThresh2 = p.pruneThresh * p.pruneThresh;
 
-    stderr.writefln("=== walk_d: theta=%.3f sigma=%.1f steps=%d thresh=%.1e mix_phi=%.4f prune=%d k0=(%.4f,%.4f,%.4f) ===",
-                    p.theta, p.sigma, p.nSteps, p.threshold, p.mixPhi, p.pruneInterval,
+    stderr.writefln("=== walk_d: theta=%.3f sigma=%.1f steps=%d ext_thresh=%.1e prune_thresh=%.1e mix_phi=%.4f prune=%d k0=(%.4f,%.4f,%.4f) ===",
+                    p.theta, p.sigma, p.nSteps, p.threshold, p.pruneThresh, p.mixPhi, p.pruneInterval,
                     p.k0x, p.k0y, p.k0z);
 
     auto lat = Lattice!HAS_COIN.create(p.maxSites);
@@ -101,8 +104,8 @@ void run(WalkParams p) {
     stderr.writefln("Wavepacket initialized (sigma=%.1f, k0=(%.4f,%.4f,%.4f))",
                     p.sigma, p.k0x, p.k0y, p.k0z);
 
-    writefln("# theta=%.4f sigma=%.1f n_steps=%d thresh=%.1e mix_phi=%.4f prune=%d k0=(%.4f,%.4f,%.4f)",
-             p.theta, p.sigma, p.nSteps, p.threshold, p.mixPhi, p.pruneInterval,
+    writefln("# theta=%.4f sigma=%.1f n_steps=%d ext_thresh=%.1e prune_thresh=%.1e mix_phi=%.4f prune=%d k0=(%.4f,%.4f,%.4f)",
+             p.theta, p.sigma, p.nSteps, p.threshold, p.pruneThresh, p.mixPhi, p.pruneInterval,
              p.k0x, p.k0y, p.k0z);
     writefln("# t norm xmean ymean zmean r2 x2 y2 z2 r95 nsites absorbed pruned");
 
@@ -134,13 +137,13 @@ void run(WalkParams p) {
             // With HAS_COIN=false, applyCoin is a no-op (compiled out)
             applyCoin(lat, IS_L);
             auto tCoinL = MonoTime.currTime;
-            auto resL = applyShift(lat, IS_L, PAT_L, thresh2);
+            auto resL = applyShift(lat, IS_L, PAT_L, extThresh2);
             auto tShiftL = MonoTime.currTime;
             applyVmix(lat, IS_L, p.mixPhi);
             auto tVmixL = MonoTime.currTime;
             applyCoin(lat, IS_R);
             auto tCoinR = MonoTime.currTime;
-            auto resR = applyShift(lat, IS_R, PAT_R, thresh2);
+            auto resR = applyShift(lat, IS_R, PAT_R, extThresh2);
             auto tShiftR = MonoTime.currTime;
             applyVmix(lat, IS_R, p.mixPhi);
             auto tVmixR = MonoTime.currTime;
@@ -155,13 +158,19 @@ void run(WalkParams p) {
 
             totalAbsorbed += resL.probAbsorbed + resR.probAbsorbed;
 
+            if (totalAbsorbed > 0.05) {
+                stderr.writefln("  step %d: absorbed norm %.4f > 5%%, stopping",
+                                t, totalAbsorbed);
+                break;
+            }
+
             int capFull = resL.nCapFull + resR.nCapFull;
             if (capFull > 0)
                 stderr.writefln("  WARNING step %d: lattice full (%d sites), %d extensions dropped",
                                 t, lat.nsites, capFull);
 
             if (p.pruneInterval > 0 && t > 0 && t % p.pruneInterval == 0) {
-                auto pr = pruneChainEnds(lat, thresh2);
+                auto pr = pruneChainEnds(lat, pruneThresh2);
                 totalPruned += pr.probPruned;
                 if (pr.count > 0)
                     stderr.writefln("  step %d: pruned %d sites (free=%d, prob=%.2e)",

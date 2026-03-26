@@ -381,7 +381,7 @@ private void unlinkChainEnd(bool hasCoin)(ref Lattice!hasCoin lat, int s,
         lat.removeSite(s);
 }
 
-struct PruneResult { int count; double probPruned; }
+struct PruneResult { int count; double probPruned = 0; }
 
 PruneResult pruneChainEnds(bool hasCoin)(ref Lattice!hasCoin lat, double thresh2) {
     PruneResult total;
