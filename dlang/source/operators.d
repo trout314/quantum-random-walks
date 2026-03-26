@@ -27,6 +27,7 @@ double spinorNorm2(bool hasCoin)(const Lattice!hasCoin lat, int s) {
 
 struct ShiftResult {
     int nCreated = 0;
+    int nCapFull = 0;    // extensions skipped due to lattice capacity
     double probAbsorbed = 0;
 }
 
@@ -46,6 +47,7 @@ private int tryExtendFwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
     reorth(d);
 
     int nb = lat.allocSite(p, d);
+    if (nb < 0) return -2;  // lattice full
     lat.setChainFace(nb, isR, nf);
     int chainId = isR ? lat.sites[s].rChain : lat.sites[s].lChain;
     lat.chainAppend(chainId, nb);
@@ -68,6 +70,7 @@ private int tryExtendBwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
     reorth(d);
 
     int nb = lat.allocSite(p, d);
+    if (nb < 0) return -2;  // lattice full
     lat.setChainFace(nb, isR, pf);
     int chainId = isR ? lat.sites[s].rChain : lat.sites[s].lChain;
     lat.chainPrepend(chainId, nb);
@@ -173,7 +176,8 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                     lat.tmpIm[4*nb + a] += resIm[a];
                 }
                 result.nCreated++;
-            } else if (nb == -1) {
+            } else {
+                if (nb == -2) result.nCapFull++;
                 foreach (a; 0 .. 4)
                     result.probAbsorbed += shRe[a]*shRe[a] + shIm[a]*shIm[a];
             }
@@ -199,7 +203,8 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                     lat.tmpIm[4*nb + a] += resIm[a];
                 }
                 result.nCreated++;
-            } else if (nb == -1) {
+            } else {
+                if (nb == -2) result.nCapFull++;
                 foreach (a; 0 .. 4)
                     result.probAbsorbed += shRe[a]*shRe[a] + shIm[a]*shIm[a];
             }

@@ -225,7 +225,8 @@ struct Lattice(bool hasCoin) {
     int allocSite(Vec3 pos, Vec3[4] dirs) {
         int id;
         if (freeCount > 0) id = freeList[--freeCount];
-        else { assert(nsites < maxSites, "Too many sites"); id = nsites++; }
+        else if (nsites < maxSites) id = nsites++;
+        else return -1;  // capacity full — caller must handle gracefully
         sites[id] = Site(pos, dirs);
         psiRe[4*id .. 4*id+4] = 0;
         psiIm[4*id .. 4*id+4] = 0;
@@ -457,6 +458,7 @@ private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool f
         Vec3[4] dd = d;
         reorth(dd);
         int nb = lat.allocSite(p, dd);
+        if (nb < 0) break;  // lattice full
         lat.setChainFace(nb, isR, nbFace);
         grid.increment(p);
 

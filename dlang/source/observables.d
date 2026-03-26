@@ -10,6 +10,7 @@ import lattice : Lattice;
 struct Observables {
     double totalProb = 0;
     double normPsi = 0;   // sqrt(totalProb)
+    double xMean = 0, yMean = 0, zMean = 0;  // <x>, <y>, <z>
     double r2 = 0;        // <r^2>
     double x2 = 0, y2 = 0, z2 = 0;
     double r95 = 0;       // radius enclosing 95% of probability
@@ -45,6 +46,9 @@ Observables computeObservables(bool hasCoin)(const Lattice!hasCoin lat) {
         double x = lat.sites[n].pos.x;
         double y = lat.sites[n].pos.y;
         double z = lat.sites[n].pos.z;
+        obs.xMean += pw * x;
+        obs.yMean += pw * y;
+        obs.zMean += pw * z;
         obs.x2 += pw * x * x;
         obs.y2 += pw * y * y;
         obs.z2 += pw * z * z;
