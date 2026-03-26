@@ -518,15 +518,20 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     int origin = lat.allocSite(Vec3(0, 0, 0), d0);
     grid.add(Vec3(0, 0, 0), origin);
 
-    ChainSeed[] queue;
-    queue.reserve(4096);
-    int qHead = 0;
-    queue ~= ChainSeed(origin, true);
-    queue ~= ChainSeed(origin, false);
+    // Pre-allocate queue and chains to avoid GC ~= during seeding.
+    // Each site spawns at most 2 cross-chain seeds; chains ≤ 2×maxSites.
+    int maxQ = 2 * lat.maxSites;
+    auto queue = new ChainSeed[maxQ];
+    int qHead = 0, qTail = 0;
+    queue[qTail++] = ChainSeed(origin, true);
+    queue[qTail++] = ChainSeed(origin, false);
+
+    int chainsCapacity = lat.maxSites;  // generous pre-alloc
+    lat.chains.reserve(chainsCapacity);
 
     int nChains = 0;
 
-    while (qHead < queue.length) {
+    while (qHead < qTail) {
         auto seed = queue[qHead++];
         int rootSite = seed.siteId;
         bool isR = seed.isR;
@@ -556,8 +561,8 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         if (isR) { lat.sites[rootSite].rChain = chainId; lat.sites[rootSite].rIdx = 0; }
         else     { lat.sites[rootSite].lChain = chainId; lat.sites[rootSite].lIdx = 0; }
 
-        int fwd = extendDir!hasCoin(lat, chainId, true, sigma, seedThresh, grid, queue);
-        int bwd = extendDir!hasCoin(lat, chainId, false, sigma, seedThresh, grid, queue);
+        int fwd = extendDir!hasCoin(lat, chainId, true, sigma, seedThresh, grid, queue, qTail);
+        int bwd = extendDir!hasCoin(lat, chainId, false, sigma, seedThresh, grid, queue, qTail);
 
         if (fwd + bwd > 0) nChains++;
     }
@@ -575,7 +580,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool forward,
                       double sigma, double seedThresh,
                       ref ProximityGrid grid,
-                      ref ChainSeed[] queue) {
+                      ChainSeed[] queue, ref int qTail) {
     auto ch = &lat.chains[chainId];
     bool isR = ch.isR;
     const int[4] pat = isR ? PAT_R : PAT_L;
@@ -594,6 +599,7 @@ private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool f
 
         if (exp(-dot(p, p) / (2 * sigma * sigma)) < seedThresh) break;
         if (grid.isTooClose(p)) break;
+        if ((created & 0xFF) == 0 && created > 0 && isRamLow()) break;
 
         int nbFace = forward ? nextFace(pat, curFace) : stepFace;
 
@@ -609,7 +615,8 @@ private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool f
         else
             lat.chainPrepend(chainId, nb);
 
-        queue ~= ChainSeed(nb, !isR);
+        if (qTail < queue.length)
+            queue[qTail++] = ChainSeed(nb, !isR);
 
         curFace = nbFace;
         created++;

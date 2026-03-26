@@ -9,7 +9,7 @@ module operators;
 import std.math : sqrt, fabs, cos, sin, exp;
 import geometry : Vec3, dot, norm, helixStep, reorth;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, matVecSplit, alpha;
-import lattice : Lattice, nextFace, prevFace, PAT_R, PAT_L, IS_R, IS_L;
+import lattice : Lattice, nextFace, prevFace, PAT_R, PAT_L, IS_R, IS_L, isRamLow;
 
 // ---- Spinor helpers ----
 
@@ -155,6 +155,7 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
     }
 
     // Pass 2: chain-end extension (serial — mutates lattice)
+    bool ramLow = false;
     foreach (ci; activeChains) {
         auto ch = &lat.chains[ci];
         int n = ch.ops.length;
@@ -168,7 +169,7 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
             double[4] shRe = 0, shIm = 0;
             matVecSplit(Pp, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
                         shRe.ptr, shIm.ptr);
-            int nb = tryExtendFwd!hasCoin(lat, endSite, isR, pat, shRe, shIm, thresh2);
+            int nb = ramLow ? -2 : tryExtendFwd!hasCoin(lat, endSite, isR, pat, shRe, shIm, thresh2);
             if (nb >= 0) {
                 auto newOp = lat.siteOps(endSite, isR);
                 double[4] resRe = 0, resIm = 0;
@@ -179,6 +180,8 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                     lat.tmpIm[4*nb + a] += resIm[a];
                 }
                 result.nCreated++;
+                // Check RAM periodically during extensions (every 1024 creates)
+                if ((result.nCreated & 0x3FF) == 0 && isRamLow()) ramLow = true;
             } else {
                 if (nb == -2) result.nCapFull++;
                 foreach (a; 0 .. 4)
@@ -195,7 +198,7 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
             double[4] shRe = 0, shIm = 0;
             matVecSplit(Pm, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
                         shRe.ptr, shIm.ptr);
-            int nb = tryExtendBwd!hasCoin(lat, endSite, isR, pat, shRe, shIm, thresh2);
+            int nb = ramLow ? -2 : tryExtendBwd!hasCoin(lat, endSite, isR, pat, shRe, shIm, thresh2);
             if (nb >= 0) {
                 auto newOp = lat.siteOps(endSite, isR);
                 double[4] resRe = 0, resIm = 0;
@@ -206,6 +209,7 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                     lat.tmpIm[4*nb + a] += resIm[a];
                 }
                 result.nCreated++;
+                if ((result.nCreated & 0x3FF) == 0 && isRamLow()) ramLow = true;
             } else {
                 if (nb == -2) result.nCapFull++;
                 foreach (a; 0 .. 4)
