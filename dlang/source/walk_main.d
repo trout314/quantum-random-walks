@@ -10,7 +10,7 @@ import std.math : sqrt, cos, sin, exp;
 import std.conv : to;
 import std.stdio : writef, writefln, stderr, stdout;
 import geometry : Vec3, dot, STEP_LEN;
-import lattice : Lattice, ProximityGrid, generateSites, PAT_R, PAT_L, IS_R, IS_L;
+import lattice : Lattice, ProximityGrid, generateSites, PAT_R, PAT_L, IS_R, IS_L, isRamLow, freeRamBytes;
 import dirac : Mat4, makeTau, frameTransport, matVecSplit, projPlus, projMinus;
 import operators : applyShift, applyCoin, applyVmix, ShiftResult;
 import observables : computeObservables, Observables;
@@ -238,6 +238,13 @@ void run(WalkParams p) {
         stdout.flush();
 
         if (t < p.nSteps) {
+            // Check free RAM before each step's allocations
+            if (isRamLow()) {
+                stderr.writefln("  ABORT step %d: free RAM below 1 GB (%d MB free), stopping to prevent OOM",
+                                t, freeRamBytes() / (1024 * 1024));
+                break;
+            }
+
             enum STATUS_INTERVAL = 5;
             if (t % STATUS_INTERVAL == 0)
                 stderr.writefln("  step %d/%d: %d sites, norm=%.6f absorbed=%.2e pruned=%.2e",
@@ -280,9 +287,11 @@ void run(WalkParams p) {
             }
 
             int capFull = resL.nCapFull + resR.nCapFull;
-            if (capFull > 0)
-                stderr.writefln("  WARNING step %d: lattice full (%d sites), %d extensions dropped",
+            if (capFull > 0) {
+                stderr.writefln("  ABORT step %d: lattice full (%d sites), %d extensions dropped — stopping",
                                 t, lat.nsites, capFull);
+                break;
+            }
         }
     }
 

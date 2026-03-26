@@ -15,14 +15,21 @@ import geometry : Vec3, dot, norm, helixStep, reorth, initTet, REORTH_INTERVAL;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, alpha;
 import core.sys.linux.sys.sysinfo : sysinfo, sysinfo_;
 
-/// Minimum free RAM (bytes) for lattice allocation warning.  Default 1 GB.
+/// Minimum free RAM (bytes) below which the simulation aborts.  Default 1 GB.
 enum ulong MIN_FREE_RAM = 1UL * 1024 * 1024 * 1024;
 
 /// Returns available free RAM in bytes, or ulong.max on failure.
-private ulong freeRamBytes() {
+ulong freeRamBytes() {
     sysinfo_ info;
     if (sysinfo(&info) != 0) return ulong.max;
     return info.freeram * info.mem_unit;
+}
+
+/// Returns true if free RAM is critically low (below MIN_FREE_RAM).
+/// Returns false if RAM is adequate or cannot be determined.
+bool isRamLow() {
+    ulong avail = freeRamBytes();
+    return avail != ulong.max && avail < MIN_FREE_RAM;
 }
 
 /// Chirality flags for R/L helix chains.
@@ -257,11 +264,14 @@ struct Lattice(bool hasCoin) {
 
     static Lattice create(int maxSites) {
         import std.stdio : stderr;
+        import core.stdc.stdlib : exit;
         ulong estBytes = maxSites * (Site.sizeof + 4UL * 4 * double.sizeof + int.sizeof);
         ulong avail = freeRamBytes();
-        if (avail != ulong.max && estBytes + MIN_FREE_RAM > avail)
-            stderr.writefln("  WARNING: lattice allocation (~%d MB) may exceed available RAM (%d MB free)",
+        if (avail != ulong.max && estBytes + MIN_FREE_RAM > avail) {
+            stderr.writefln("  ABORT: lattice allocation (~%d MB) would exceed available RAM (%d MB free)",
                             estBytes / (1024 * 1024), avail / (1024 * 1024));
+            exit(1);
+        }
 
         Lattice lat;
         lat.maxSites = maxSites;
