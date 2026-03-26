@@ -26,13 +26,12 @@ struct WalkParams {
     double threshold = 1e-10;  // extension threshold (absorb if amp < this)
     double pruneThresh = 1e-6; // pruning threshold (prune chain ends below this)
     double mixPhi = 0.0;
-    int maxSites = 25_000_000; // lattice capacity
     double seedThresh = 1e-4;  // amplitude cutoff for site generation
     double dMin = 0.35;        // min distance between sites (0 = no limit)
     K0Vec[] kicks;             // momentum kick vectors
 }
 
-/// Parse k0 arg: "0,0,0;0.1,0,0;0,0.1,0;0,0,0.1" → array of K0Vec
+/// Parse args: theta sigma nsteps threshold pruneThresh mixPhi seedThresh dMin [kicks]
 WalkParams parseArgs(string[] args) {
     import std.array : split;
     WalkParams p;
@@ -42,11 +41,10 @@ WalkParams parseArgs(string[] args) {
     if (args.length > 4) p.threshold = args[4].to!double;
     if (args.length > 5) p.pruneThresh = args[5].to!double;
     if (args.length > 6) p.mixPhi = args[6].to!double;
-    if (args.length > 7) p.maxSites = args[7].to!int;
-    if (args.length > 8) p.seedThresh = args[8].to!double;
-    if (args.length > 9) p.dMin = args[9].to!double;
-    if (args.length > 10) {
-        foreach (triple; args[10].split(";")) {
+    if (args.length > 7) p.seedThresh = args[7].to!double;
+    if (args.length > 8) p.dMin = args[8].to!double;
+    if (args.length > 9) {
+        foreach (triple; args[9].split(";")) {
             auto c = triple.split(",");
             K0Vec k;
             if (c.length > 0) k.x = c[0].to!double;
@@ -184,7 +182,7 @@ void run(WalkParams p) {
                     p.theta, p.sigma, p.nSteps, p.threshold, p.pruneThresh, p.mixPhi,
                     cast(int) p.kicks.length);
 
-    auto lat = Lattice!HAS_COIN.create(p.maxSites);
+    auto lat = Lattice!HAS_COIN.create();
 
     enum double SIGMA_RANGE = 4.0;   // extend chains to this many sigma
     enum int CHAIN_PAD = 5;          // extra sites beyond sigma range
@@ -192,7 +190,7 @@ void run(WalkParams p) {
 
     int maxChainLen = cast(int)(SIGMA_RANGE * p.sigma / STEP_LEN) + CHAIN_PAD;
     double gridHalf = maxChainLen * STEP_LEN + GRID_PAD;
-    auto grid = ProximityGrid.create(gridHalf, p.dMin, p.maxSites);
+    auto grid = ProximityGrid.create(gridHalf, p.dMin);
 
     stderr.writefln("\n--- Chain-first site generation (dMin=%.3f, grid %d^3) ---",
                     p.dMin, grid.gridN);

@@ -15,8 +15,8 @@ import geometry : Vec3, dot, norm, helixStep, reorth, initTet, REORTH_INTERVAL;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, alpha;
 import core.sys.linux.sys.sysinfo : sysinfo, sysinfo_;
 
-/// Minimum free RAM (bytes) below which the simulation aborts.  Default 1 GB.
-enum ulong MIN_FREE_RAM = 1UL * 1024 * 1024 * 1024;
+/// Minimum free RAM (bytes) below which the simulation aborts.  Default 4 GB.
+enum ulong MIN_FREE_RAM = 4UL * 1024 * 1024 * 1024;
 
 /// Returns available free RAM in bytes, or ulong.max on failure.
 ulong freeRamBytes() {
@@ -191,15 +191,17 @@ struct ProximityGrid {
     double cellSize;
     int gridN;
     double dMin2;      // squared minimum distance
-    Site[] sites;      // reference to lattice sites array (for position lookup)
+    Site[]* sitesPtr;   // pointer to lattice's sites slice (stays valid after grow)
 
-    static ProximityGrid create(double halfExtent, double dMin, int maxSites) {
+    enum int POOL_INIT_CAP = 1024;
+
+    static ProximityGrid create(double halfExtent, double dMin) {
         ProximityGrid g;
         g.gridHalf = halfExtent;
         g.cellSize = dMin;  // cell size = dMin so we only check 27 neighbors
         g.gridN = cast(int)(2.0 * halfExtent / g.cellSize) + 1;
         g.dMin2 = dMin * dMin;
-        g.pool = new Node[maxSites];
+        g.pool = new Node[POOL_INIT_CAP];
         g.poolCount = 0;
         return g;
     }
@@ -235,9 +237,10 @@ struct ProximityGrid {
                     int idx = *p;
                     while (idx >= 0) {
                         int id = pool[idx].siteId;
-                        Vec3 d = Vec3(pos.x - sites[id].pos.x,
-                                      pos.y - sites[id].pos.y,
-                                      pos.z - sites[id].pos.z);
+                        auto s = (*sitesPtr)[id];
+                        Vec3 d = Vec3(pos.x - s.pos.x,
+                                      pos.y - s.pos.y,
+                                      pos.z - s.pos.z);
                         if (d.x*d.x + d.y*d.y + d.z*d.z < dMin2)
                             return true;
                         idx = pool[idx].next;
@@ -248,6 +251,8 @@ struct ProximityGrid {
 
     /// Register a site in the grid.
     void add(Vec3 pos, int siteId) {
+        if (poolCount >= pool.length)
+            pool.length = pool.length * 2;
         int cx, cy, cz;
         cellCoords(pos, cx, cy, cz);
         long key = cellKey(cx, cy, cz);
@@ -269,35 +274,49 @@ struct Lattice(bool hasCoin) {
     double[] tmpRe, tmpIm;
     ChainT[] chains;
     int nsites;
-    int maxSites;
+    int capacity;    // current allocation size (grows on demand)
     int[] freeList;
     int freeCount;
 
     // Coin parameters (only meaningful when hasCoin)
     double coinCt = 1, coinSt = 0;
 
-    static Lattice create(int maxSites) {
-        import std.stdio : stderr;
-        import core.stdc.stdlib : exit;
-        ulong estBytes = maxSites * (Site.sizeof + 4UL * 4 * double.sizeof + int.sizeof);
-        ulong avail = freeRamBytes();
-        if (avail != ulong.max && estBytes + MIN_FREE_RAM > avail) {
-            stderr.writefln("  ABORT: lattice allocation (~%d MB) would exceed available RAM (%d MB free)",
-                            estBytes / (1024 * 1024), avail / (1024 * 1024));
-            exit(1);
-        }
+    enum int INIT_CAPACITY = 1024;
 
+    static Lattice create(int initCap = INIT_CAPACITY) {
         Lattice lat;
-        lat.maxSites = maxSites;
-        lat.sites = new Site[maxSites];
-        lat.psiRe = new double[4 * maxSites]; lat.psiRe[] = 0;
-        lat.psiIm = new double[4 * maxSites]; lat.psiIm[] = 0;
-        lat.tmpRe = new double[4 * maxSites]; lat.tmpRe[] = 0;
-        lat.tmpIm = new double[4 * maxSites]; lat.tmpIm[] = 0;
+        lat.capacity = initCap;
+        lat.sites = new Site[initCap];
+        lat.psiRe = new double[4 * initCap]; lat.psiRe[] = 0;
+        lat.psiIm = new double[4 * initCap]; lat.psiIm[] = 0;
+        lat.tmpRe = new double[4 * initCap]; lat.tmpRe[] = 0;
+        lat.tmpIm = new double[4 * initCap]; lat.tmpIm[] = 0;
         lat.nsites = 0;
-        lat.freeList = new int[maxSites];
+        lat.freeList = new int[initCap];
         lat.freeCount = 0;
         return lat;
+    }
+
+    /// Double the lattice capacity if RAM allows. Returns false if out of memory.
+    bool grow() {
+        import std.stdio : stderr;
+        int newCap = capacity * 2;
+        ulong growBytes = (newCap - capacity) * (Site.sizeof + 4UL * 4 * double.sizeof + int.sizeof);
+        ulong avail = freeRamBytes();
+        if (avail != ulong.max && growBytes + MIN_FREE_RAM > avail) {
+            stderr.writefln("  RAM limit: cannot grow lattice from %d to %d sites (%d MB needed, %d MB free)",
+                            capacity, newCap, growBytes / (1024 * 1024), avail / (1024 * 1024));
+            return false;
+        }
+
+        sites.length = newCap;
+        psiRe.length = 4 * newCap; psiRe[4 * capacity .. $] = 0;
+        psiIm.length = 4 * newCap; psiIm[4 * capacity .. $] = 0;
+        tmpRe.length = 4 * newCap; tmpRe[4 * capacity .. $] = 0;
+        tmpIm.length = 4 * newCap; tmpIm[4 * capacity .. $] = 0;
+        freeList.length = newCap;
+        capacity = newCap;
+        return true;
     }
 
     /// Lightweight snapshot: sites + chain site-ID lists (no operator matrices).
@@ -379,8 +398,9 @@ struct Lattice(bool hasCoin) {
     int allocSite(Vec3 pos, Vec3[4] dirs) {
         int id;
         if (freeCount > 0) id = freeList[--freeCount];
-        else if (nsites < maxSites) id = nsites++;
-        else return -1;  // capacity full — caller must handle gracefully
+        else if (nsites < capacity) id = nsites++;
+        else if (grow()) id = nsites++;
+        else return -1;  // out of RAM — caller must handle gracefully
         sites[id] = Site(pos, dirs);
         psiRe[4*id .. 4*id+4] = 0;
         psiIm[4*id .. 4*id+4] = 0;
@@ -527,21 +547,16 @@ private struct ChainSeed { int siteId; bool isR; }
 
 int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double seedThresh,
                   ref ProximityGrid grid) {
-    grid.sites = lat.sites;  // give grid access to site positions
+    grid.sitesPtr = &lat.sites;  // pointer stays valid after lattice grow()
     auto d0 = initTet();
     int origin = lat.allocSite(Vec3(0, 0, 0), d0);
     grid.add(Vec3(0, 0, 0), origin);
 
-    // Pre-allocate queue and chains to avoid GC ~= during seeding.
-    // Each site spawns at most 2 cross-chain seeds; chains ≤ 2×maxSites.
-    int maxQ = 2 * lat.maxSites;
-    auto queue = new ChainSeed[maxQ];
+    // Queue grows on demand — seeding is init-only, not a hot loop.
+    auto queue = new ChainSeed[1024];
     int qHead = 0, qTail = 0;
     queue[qTail++] = ChainSeed(origin, true);
     queue[qTail++] = ChainSeed(origin, false);
-
-    int chainsCapacity = lat.maxSites;  // generous pre-alloc
-    lat.chains.reserve(chainsCapacity);
 
     int nChains = 0;
 
@@ -594,7 +609,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool forward,
                       double sigma, double seedThresh,
                       ref ProximityGrid grid,
-                      ChainSeed[] queue, ref int qTail) {
+                      ref ChainSeed[] queue, ref int qTail) {
     auto ch = &lat.chains[chainId];
     bool isR = ch.isR;
     const int[4] pat = isR ? PAT_R : PAT_L;
@@ -606,7 +621,7 @@ private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool f
 
     int created = 0;
 
-    for (int step = 0; step < lat.maxSites; step++) {
+    for (int step = 0; step < int.max; step++) {
         int stepFace = forward ? curFace : prevFace(pat, curFace);
         helixStep(p, d, stepFace);
         if ((step + 1) % REORTH_INTERVAL == 0) reorth(d);
@@ -620,7 +635,7 @@ private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool f
         Vec3[4] dd = d;
         reorth(dd);
         int nb = lat.allocSite(p, dd);
-        if (nb < 0) break;  // lattice full
+        if (nb < 0) break;  // out of RAM
         lat.setChainFace(nb, isR, nbFace);
         grid.add(p, nb);
 
@@ -629,8 +644,9 @@ private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool f
         else
             lat.chainPrepend(chainId, nb);
 
-        if (qTail < queue.length)
-            queue[qTail++] = ChainSeed(nb, !isR);
+        if (qTail >= queue.length)
+            queue.length = queue.length * 2;
+        queue[qTail++] = ChainSeed(nb, !isR);
 
         curFace = nbFace;
         created++;
@@ -655,7 +671,7 @@ unittest {
     double sigma = 1.5;
     double stepLen = 2.0 / 3.0;
     int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;
-    auto grid = ProximityGrid.create(maxChainLen * stepLen + 5.0, 0.35, 100000);
+    auto grid = ProximityGrid.create(maxChainLen * stepLen + 5.0, 0.35);
     int nChains = generateSites(lat, sigma, 1e-4, grid);
 
     assert(lat.nsites > 1);
