@@ -24,6 +24,7 @@ struct Walk1dParams {
     double k0 = 0.0;       // initial momentum kick
     double mixPhi = 0.0;   // post-shift mixing angle
     int spiralType = 0;    // 0=R, 1=L
+    int icType = 0;        // 0=(1,0,0,0), 1=(1,0,1,0)/√2, 2=P+/P- symmetric
 }
 
 Walk1dParams parseArgs1d(string[] args) {
@@ -36,6 +37,7 @@ Walk1dParams parseArgs1d(string[] args) {
     if (args.length > 6) p.k0 = args[6].to!double;
     if (args.length > 7) p.mixPhi = args[7].to!double;
     if (args.length > 8) p.spiralType = args[8].to!int;
+    if (args.length > 9) p.icType = args[9].to!int;
     return p;
 }
 
@@ -295,9 +297,9 @@ void run1d(Walk1dParams p) {
         ? [0, 1, 2, 3]   // L helix
         : [1, 3, 0, 2];  // R helix
 
-    stderr.writefln("=== walk_1d_d: theta=%.3f sigma=%.1f steps=%d coin=%d k0=%.4f spiral=%s ===",
+    stderr.writefln("=== walk_1d_d: theta=%.3f sigma=%.1f steps=%d coin=%d k0=%.4f spiral=%s ic=%d ===",
                     p.theta, p.sigma, p.nSteps, p.coinType, p.k0,
-                    p.spiralType == 1 ? "L" : "R");
+                    p.spiralType == 1 ? "L" : "R", p.icType);
 
     auto ch = newChain1d();
     ch.pat = pat;
@@ -319,25 +321,70 @@ void run1d(Walk1dParams p) {
     psiRe[] = 0;
     psiIm[] = 0;
 
-    // Frame-transported Gaussian IC with momentum kick
+    // Build initial spinor at center site based on IC type
+    double[4] chi0Re, chi0Im;
+    chi0Re[] = 0; chi0Im[] = 0;
+
+    if (p.icType == 0) {
+        // (1,0,0,0)
+        chi0Re = [1, 0, 0, 0];
+    } else if (p.icType == 1) {
+        // (1,0,1,0)/√2
+        double inv = 1.0 / sqrt(2.0);
+        chi0Re = [inv, 0, inv, 0];
+    } else {
+        // P+/P- symmetric: project (1,0,0,0) onto P+ and P-,
+        // normalize each, sum to get equal weight in both subspaces.
+        Mat4 tau0 = siteTau(ch, center);
+        Mat4 Pp = projPlus(tau0);
+        Mat4 Pm = projMinus(tau0);
+        double[4] seed = [1, 0, 0, 0];
+        double[4] seedIm = [0, 0, 0, 0];
+        double[4] vpRe = 0, vpIm = 0, vmRe = 0, vmIm = 0;
+        matVecSplit(Pp, seed.ptr, seedIm.ptr, vpRe.ptr, vpIm.ptr);
+        matVecSplit(Pm, seed.ptr, seedIm.ptr, vmRe.ptr, vmIm.ptr);
+        // Normalize each projection
+        double npSq = 0, nmSq = 0;
+        foreach (a; 0 .. 4) {
+            npSq += vpRe[a]*vpRe[a] + vpIm[a]*vpIm[a];
+            nmSq += vmRe[a]*vmRe[a] + vmIm[a]*vmIm[a];
+        }
+        double invP = 1.0 / sqrt(npSq), invM = 1.0 / sqrt(nmSq);
+        foreach (a; 0 .. 4) {
+            chi0Re[a] = invP * vpRe[a] + invM * vmRe[a];
+            chi0Im[a] = invP * vpIm[a] + invM * vmIm[a];
+        }
+        // Normalize the sum
+        double nChi = 0;
+        foreach (a; 0 .. 4) nChi += chi0Re[a]*chi0Re[a] + chi0Im[a]*chi0Im[a];
+        double invChi = 1.0 / sqrt(nChi);
+        foreach (a; 0 .. 4) { chi0Re[a] *= invChi; chi0Im[a] *= invChi; }
+    }
+
+    stderr.writefln("IC type %d: chi0 = (%.4f%+.4fi, %.4f%+.4fi, %.4f%+.4fi, %.4f%+.4fi)",
+                    p.icType,
+                    chi0Re[0], chi0Im[0], chi0Re[1], chi0Im[1],
+                    chi0Re[2], chi0Im[2], chi0Re[3], chi0Im[3]);
+
+    // Gaussian IC with momentum kick.
+    // Frame transport keeps spinor aligned with local tau eigenbasis.
+    bool useTransport = true;
     double norm2 = 0;
 
     // Forward from center
     {
-        double[4] chiCurRe = [1, 0, 0, 0];
-        double[4] chiCurIm = [0, 0, 0, 0];
+        double[4] chiCurRe = chi0Re;
+        double[4] chiCurIm = chi0Im;
         foreach (i; center .. hi + 1) {
             double x = cast(double)(i - center);
             double w = exp(-x*x / (2 * p.sigma * p.sigma));
             double phRe = cos(p.k0 * x), phIm = sin(p.k0 * x);
             foreach (a; 0 .. 4) {
-                // psi = w * phase * chi
-                // (w)(phRe + i phIm)(chiRe + i chiIm)
                 psiRe[4*i + a] = w * (phRe * chiCurRe[a] - phIm * chiCurIm[a]);
                 psiIm[4*i + a] = w * (phRe * chiCurIm[a] + phIm * chiCurRe[a]);
             }
             norm2 += w * w;
-            if (i < hi) {
+            if (useTransport && i < hi) {
                 ensureSite(ch, i + 1);
                 Mat4 U = frameTransport(siteTau(ch, i), siteTau(ch, i+1));
                 double[4] chiNextRe = 0, chiNextIm = 0;
@@ -350,15 +397,17 @@ void run1d(Walk1dParams p) {
 
     // Backward from center
     {
-        double[4] chiCurRe = [1, 0, 0, 0];
-        double[4] chiCurIm = [0, 0, 0, 0];
+        double[4] chiCurRe = chi0Re;
+        double[4] chiCurIm = chi0Im;
         foreach_reverse (i; lo .. center) {
-            ensureSite(ch, i);
-            Mat4 U = frameTransport(siteTau(ch, i+1), siteTau(ch, i));
-            double[4] chiNextRe = 0, chiNextIm = 0;
-            matVecSplit(U, chiCurRe.ptr, chiCurIm.ptr, chiNextRe.ptr, chiNextIm.ptr);
-            chiCurRe = chiNextRe;
-            chiCurIm = chiNextIm;
+            if (useTransport) {
+                ensureSite(ch, i);
+                Mat4 U = frameTransport(siteTau(ch, i+1), siteTau(ch, i));
+                double[4] chiNextRe = 0, chiNextIm = 0;
+                matVecSplit(U, chiCurRe.ptr, chiCurIm.ptr, chiNextRe.ptr, chiNextIm.ptr);
+                chiCurRe = chiNextRe;
+                chiCurIm = chiNextIm;
+            }
             double x = cast(double)(i - center);
             double w = exp(-x*x / (2 * p.sigma * p.sigma));
             double phRe = cos(p.k0 * x), phIm = sin(p.k0 * x);
