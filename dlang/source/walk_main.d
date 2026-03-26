@@ -11,6 +11,7 @@ import std.conv : to;
 import std.stdio : writef, writefln, stderr, stdout;
 import geometry : Vec3, dot, STEP_LEN;
 import lattice : Lattice, DensityGrid, generateSites, PAT_R, PAT_L, IS_R, IS_L;
+import dirac : Mat4, makeTau, frameTransport, matVecSplit;
 import operators : applyShift, applyCoin, applyVmix, ShiftResult;
 import observables : computeObservables, Observables;
 
@@ -48,10 +49,67 @@ WalkParams parseArgs(string[] args) {
     return p;
 }
 
+/// Compute frame-transport tau for site s on chain type isR.
+private Mat4 siteTau(ref Lattice!HAS_COIN lat, int s, bool isR) {
+    int face = lat.chainFace(s, isR);
+    return makeTau(lat.sites[s].dirs[face]);
+}
+
 void initWavepacket(ref Lattice!HAS_COIN lat, double sigma,
                     double k0x, double k0y, double k0z) {
+    int ns = lat.nsites;
+
+    // BFS to compute frame-transported reference spinor at each site.
+    // refRe/refIm[4*n..4*n+4] holds U(origin→n) · (1,0,0,0).
+    auto refRe = new double[4 * ns];  refRe[] = 0;
+    auto refIm = new double[4 * ns];  refIm[] = 0;
+    auto visited = new bool[ns];      visited[] = false;
+
+    // Origin gets the identity-transported spinor (1,0,0,0)
+    refRe[0] = 1.0;
+    visited[0] = true;
+
+    // BFS queue
+    int[] queue;
+    queue.reserve(ns);
+    queue ~= 0;
+    int qHead = 0;
+
+    while (qHead < queue.length) {
+        int s = queue[qHead++];
+
+        // Try all 4 chain neighbors: R-next, R-prev, L-next, L-prev
+        static immutable bool[2] chiralities = [true, false];
+        foreach (isR; chiralities) {
+            if (lat.chainFace(s, isR) < 0) continue;
+            Mat4 tauS = siteTau(lat, s, isR);
+
+            foreach (dir; 0 .. 2) {  // 0=next, 1=prev
+                int nb = (dir == 0) ? lat.chainNext(s, isR) : lat.chainPrev(s, isR);
+                if (nb < 0 || visited[nb]) continue;
+
+                // Compute U(s→nb) and apply to ref spinor at s
+                Mat4 tauNb = siteTau(lat, nb, isR);
+                Mat4 U = frameTransport(tauS, tauNb);
+
+                double[4] outRe = 0, outIm = 0;
+                matVecSplit(U, &refRe[4*s], &refIm[4*s], outRe.ptr, outIm.ptr);
+                refRe[4*nb .. 4*nb+4] = outRe[];
+                refIm[4*nb .. 4*nb+4] = outIm[];
+
+                visited[nb] = true;
+                queue ~= nb;
+            }
+        }
+    }
+
+    int nVisited = 0;
+    foreach (v; visited[0 .. ns]) if (v) nVisited++;
+    stderr.writefln("  IC transport: %d/%d sites reached from origin", nVisited, ns);
+
+    // Apply Gaussian envelope and momentum kick to transported spinors
     double norm2 = 0;
-    foreach (n; 0 .. lat.nsites) {
+    foreach (n; 0 .. ns) {
         double r2 = dot(lat.sites[n].pos, lat.sites[n].pos);
         double w = exp(-r2 / (2 * sigma * sigma));
         double phase = k0x * lat.sites[n].pos.x
@@ -59,12 +117,17 @@ void initWavepacket(ref Lattice!HAS_COIN lat, double sigma,
                      + k0z * lat.sites[n].pos.z;
         double phRe = cos(phase);
         double phIm = sin(phase);
-        lat.psiRe[4*n] = w * phRe;
-        lat.psiIm[4*n] = w * phIm;
-        norm2 += w * w;  // |w * e^{i phase}|^2 = w^2
+
+        // psi = w * e^{ik·r} * ref_spinor  (complex multiply)
+        foreach (a; 0 .. 4) {
+            double rr = refRe[4*n + a], ri = refIm[4*n + a];
+            lat.psiRe[4*n + a] = w * (phRe * rr - phIm * ri);
+            lat.psiIm[4*n + a] = w * (phRe * ri + phIm * rr);
+        }
+        norm2 += w * w;  // |w * e^{ik} * ref|^2 = w^2 * |ref|^2 = w^2 (ref is unit)
     }
     double nf = 1.0 / sqrt(norm2);
-    foreach (i; 0 .. 4 * lat.nsites) {
+    foreach (i; 0 .. 4 * ns) {
         lat.psiRe[i] *= nf;
         lat.psiIm[i] *= nf;
     }
