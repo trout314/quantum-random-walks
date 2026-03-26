@@ -11,7 +11,7 @@ import std.conv : to;
 import std.stdio : writef, writefln, stderr, stdout;
 import geometry : Vec3, dot, STEP_LEN;
 import lattice : Lattice, DensityGrid, generateSites, PAT_R, PAT_L, IS_R, IS_L;
-import dirac : Mat4, makeTau, frameTransport, matVecSplit;
+import dirac : Mat4, makeTau, frameTransport, matVecSplit, projPlus, projMinus;
 import operators : applyShift, applyCoin, applyVmix, ShiftResult;
 import observables : computeObservables, Observables;
 
@@ -65,8 +65,41 @@ void initWavepacket(ref Lattice!HAS_COIN lat, double sigma,
     auto refIm = new double[4 * ns];  refIm[] = 0;
     auto visited = new bool[ns];      visited[] = false;
 
-    // Origin gets the identity-transported spinor (1,0,0,0)
-    refRe[0] = 1.0;
+    // Build P+/P- symmetric reference spinor at the origin.
+    // Project (1,0,0,0) onto P+ and P-, normalize each, sum with equal weight.
+    {
+        bool originIsR = lat.chainFace(0, true) >= 0;
+        Mat4 tau0 = siteTau(lat, 0, originIsR);
+        Mat4 Pp = projPlus(tau0);
+        Mat4 Pm = projMinus(tau0);
+
+        double[4] baseRe = [1, 0, 0, 0];
+        double[4] baseIm = [0, 0, 0, 0];
+
+        // P+ component
+        double[4] ppRe = 0, ppIm = 0;
+        matVecSplit(Pp, baseRe.ptr, baseIm.ptr, ppRe.ptr, ppIm.ptr);
+        double ppNorm2 = 0;
+        foreach (a; 0 .. 4) ppNorm2 += ppRe[a]*ppRe[a] + ppIm[a]*ppIm[a];
+
+        // P- component
+        double[4] pmRe = 0, pmIm = 0;
+        matVecSplit(Pm, baseRe.ptr, baseIm.ptr, pmRe.ptr, pmIm.ptr);
+        double pmNorm2 = 0;
+        foreach (a; 0 .. 4) pmNorm2 += pmRe[a]*pmRe[a] + pmIm[a]*pmIm[a];
+
+        // Normalize each and sum: ref = (|p+⟩/||p+|| + |p-⟩/||p-||) / √2
+        double ppInv = 1.0 / sqrt(ppNorm2);
+        double pmInv = 1.0 / sqrt(pmNorm2);
+        double scale = 1.0 / sqrt(2.0);
+        foreach (a; 0 .. 4) {
+            refRe[a] = scale * (ppInv * ppRe[a] + pmInv * pmRe[a]);
+            refIm[a] = scale * (ppInv * ppIm[a] + pmInv * pmIm[a]);
+        }
+
+        stderr.writefln("  IC: P+/P- symmetric (P+ weight=%.1f%%, P- weight=%.1f%%)",
+                        50.0, 50.0);
+    }
     visited[0] = true;
 
     // BFS queue
