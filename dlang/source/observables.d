@@ -106,7 +106,7 @@ unittest {
     double sigma = 1.5;
     double stepLen = 2.0 / 3.0;
     int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;
-    auto grid = ProximityGrid.create(maxChainLen * stepLen + 5.0, 0.35);
+    auto grid = ProximityGrid.create(maxChainLen * stepLen + 5.0, 0.35, 100000);
     generateSites(lat, sigma, 1e-4, grid);
 
     // Initialize Gaussian

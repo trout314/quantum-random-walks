@@ -177,25 +177,30 @@ struct Site {
 
 /// Spatial hash for minimum-distance site proximity checks.
 /// Rejects new sites that are within dMin of any existing site.
+/// Uses a hash map of cell keys → linked-list heads in a flat pool,
+/// so memory is proportional to the number of sites, not grid volume.
 struct ProximityGrid {
-    /// Maximum grid dimension along each axis.
-    enum int MAX_GRID_DIM = 500;
+    /// Linked-list node stored in a flat pool.
+    struct Node { int siteId; int next; }  // next = -1 for end of list
 
-    int[][] cells;    // each cell stores a list of site indices
+    int[long] heads;   // cell key → index into pool (head of list), or absent
+    Node[] pool;       // flat pool of nodes
+    int poolCount;
+
     double gridHalf;
     double cellSize;
     int gridN;
-    double dMin2;     // squared minimum distance
-    Site[] sites;     // reference to lattice sites array (for position lookup)
+    double dMin2;      // squared minimum distance
+    Site[] sites;      // reference to lattice sites array (for position lookup)
 
-    static ProximityGrid create(double halfExtent, double dMin) {
+    static ProximityGrid create(double halfExtent, double dMin, int maxSites) {
         ProximityGrid g;
         g.gridHalf = halfExtent;
         g.cellSize = dMin;  // cell size = dMin so we only check 27 neighbors
         g.gridN = cast(int)(2.0 * halfExtent / g.cellSize) + 1;
-        if (g.gridN > MAX_GRID_DIM) g.gridN = MAX_GRID_DIM;
-        g.cells = new int[][g.gridN * g.gridN * g.gridN];
         g.dMin2 = dMin * dMin;
+        g.pool = new Node[maxSites];
+        g.poolCount = 0;
         return g;
     }
 
@@ -208,8 +213,8 @@ struct ProximityGrid {
         if (gz < 0) gz = 0; if (gz >= gridN) gz = gridN - 1;
     }
 
-    private int cellIdx(int gx, int gy, int gz) const {
-        return gx * gridN * gridN + gy * gridN + gz;
+    private long cellKey(int gx, int gy, int gz) const {
+        return cast(long) gx * gridN * gridN + cast(long) gy * gridN + gz;
     }
 
     /// Returns true if pos is within dMin of any existing site.
@@ -224,13 +229,18 @@ struct ProximityGrid {
                     int nx = cx + dx, ny = cy + dy, nz = cz + dz;
                     if (nx < 0 || nx >= gridN || ny < 0 || ny >= gridN ||
                         nz < 0 || nz >= gridN) continue;
-                    auto cell = cells[cellIdx(nx, ny, nz)];
-                    foreach (id; cell) {
+                    long key = cellKey(nx, ny, nz);
+                    auto p = key in heads;
+                    if (p is null) continue;
+                    int idx = *p;
+                    while (idx >= 0) {
+                        int id = pool[idx].siteId;
                         Vec3 d = Vec3(pos.x - sites[id].pos.x,
                                       pos.y - sites[id].pos.y,
                                       pos.z - sites[id].pos.z);
                         if (d.x*d.x + d.y*d.y + d.z*d.z < dMin2)
                             return true;
+                        idx = pool[idx].next;
                     }
                 }
         return false;
@@ -240,7 +250,11 @@ struct ProximityGrid {
     void add(Vec3 pos, int siteId) {
         int cx, cy, cz;
         cellCoords(pos, cx, cy, cz);
-        cells[cellIdx(cx, cy, cz)] ~= siteId;
+        long key = cellKey(cx, cy, cz);
+        int nodeIdx = poolCount++;
+        auto p = key in heads;
+        pool[nodeIdx] = Node(siteId, p is null ? -1 : *p);
+        heads[key] = nodeIdx;
     }
 }
 
@@ -641,7 +655,7 @@ unittest {
     double sigma = 1.5;
     double stepLen = 2.0 / 3.0;
     int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;
-    auto grid = ProximityGrid.create(maxChainLen * stepLen + 5.0, 0.35);
+    auto grid = ProximityGrid.create(maxChainLen * stepLen + 5.0, 0.35, 100000);
     int nChains = generateSites(lat, sigma, 1e-4, grid);
 
     assert(lat.nsites > 1);

@@ -192,7 +192,7 @@ void run(WalkParams p) {
 
     int maxChainLen = cast(int)(SIGMA_RANGE * p.sigma / STEP_LEN) + CHAIN_PAD;
     double gridHalf = maxChainLen * STEP_LEN + GRID_PAD;
-    auto grid = ProximityGrid.create(gridHalf, p.dMin);
+    auto grid = ProximityGrid.create(gridHalf, p.dMin, p.maxSites);
 
     stderr.writefln("\n--- Chain-first site generation (dMin=%.3f, grid %d^3) ---",
                     p.dMin, grid.gridN);
