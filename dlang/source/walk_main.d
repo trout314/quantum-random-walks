@@ -80,7 +80,7 @@ void run(WalkParams p) {
     enum double SIGMA_RANGE = 4.0;   // extend chains to this many sigma
     enum int CHAIN_PAD = 5;          // extra sites beyond sigma range
     enum double GRID_PAD = 5.0;      // extra extent for density grid
-    enum int MAX_DENSITY_PER_CELL = 8;
+    enum int MAX_DENSITY_PER_CELL = 2;
 
     int maxChainLen = cast(int)(SIGMA_RANGE * p.sigma / STEP_LEN) + CHAIN_PAD;
     double gridHalf = maxChainLen * STEP_LEN + GRID_PAD;

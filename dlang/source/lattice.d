@@ -13,6 +13,20 @@ module lattice;
 import std.math : sqrt, exp, fabs, cos, sin;
 import geometry : Vec3, dot, norm, helixStep, reorth, initTet, REORTH_INTERVAL;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, alpha;
+import core.sys.linux.sys.sysinfo : sysinfo, sysinfo_t;
+
+/// Minimum free RAM (bytes) before seed generation stops.  Default 1 GB.
+enum ulong MIN_FREE_RAM = 1UL * 1024 * 1024 * 1024;
+
+/// How often (in sites created) to poll system memory during seeding.
+enum int MEM_CHECK_INTERVAL = 10_000;
+
+/// Returns available free RAM in bytes, or ulong.max on failure.
+private ulong freeRamBytes() {
+    sysinfo_t info;
+    if (sysinfo(&info) != 0) return ulong.max;
+    return info.freeram * info.mem_unit;
+}
 
 /// Chirality flags for R/L helix chains.
 enum bool IS_R = true;
@@ -209,6 +223,21 @@ struct Lattice(bool hasCoin) {
     double coinCt = 1, coinSt = 0;
 
     static Lattice create(int maxSites) {
+        // Estimate memory needed: Site[] + 4 × double[4*N] + int[N]
+        ulong estBytes = maxSites * (Site.sizeof + 4UL * 4 * double.sizeof + int.sizeof);
+        ulong avail = freeRamBytes();
+        if (avail != ulong.max && estBytes + MIN_FREE_RAM > avail) {
+            // Reduce maxSites to fit in available RAM minus reserve
+            ulong usable = (avail > MIN_FREE_RAM) ? avail - MIN_FREE_RAM : 0;
+            ulong perSite = Site.sizeof + 4UL * 4 * double.sizeof + int.sizeof;
+            int reduced = cast(int)(usable / perSite);
+            if (reduced < 1000) reduced = 1000;
+            import std.stdio : stderr;
+            stderr.writefln("  WARNING: maxSites reduced %d -> %d to fit in available RAM (%d MB free)",
+                            maxSites, reduced, avail / (1024 * 1024));
+            maxSites = reduced;
+        }
+
         Lattice lat;
         lat.maxSites = maxSites;
         lat.sites = new Site[maxSites];
@@ -377,18 +406,22 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     int origin = lat.allocSite(Vec3(0, 0, 0), d0);
     grid.increment(Vec3(0, 0, 0));
 
-    auto queue = new ChainSeed[2 * lat.maxSites + 2];
-    int qHead = 0, qTail = 0;
-    queue[qTail++] = ChainSeed(origin, true);
-    queue[qTail++] = ChainSeed(origin, false);
+    ChainSeed[] queue;
+    queue.reserve(4096);
+    int qHead = 0;
+    queue ~= ChainSeed(origin, true);
+    queue ~= ChainSeed(origin, false);
 
     int nChains = 0;
+    bool memoryLow = false;
+    int sitesSinceCheck = 0;
 
-    while (qHead < qTail) {
+    while (qHead < queue.length) {
         auto seed = queue[qHead++];
         int rootSite = seed.siteId;
         bool isR = seed.isR;
 
+        if (memoryLow) break;
         if (lat.chainFace(rootSite, isR) >= 0) continue;
 
         const int[4] pat = isR ? PAT_R : PAT_L;
@@ -414,10 +447,18 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         if (isR) { lat.sites[rootSite].rChain = chainId; lat.sites[rootSite].rIdx = 0; }
         else     { lat.sites[rootSite].lChain = chainId; lat.sites[rootSite].lIdx = 0; }
 
-        int fwd = extendDir!hasCoin(lat, chainId, true, sigma, seedThresh, grid, queue, qTail);
-        int bwd = extendDir!hasCoin(lat, chainId, false, sigma, seedThresh, grid, queue, qTail);
+        int fwd = extendDir!hasCoin(lat, chainId, true, sigma, seedThresh, grid,
+                                    queue, memoryLow, sitesSinceCheck);
+        int bwd = extendDir!hasCoin(lat, chainId, false, sigma, seedThresh, grid,
+                                    queue, memoryLow, sitesSinceCheck);
 
         if (fwd + bwd > 0) nChains++;
+    }
+
+    if (memoryLow) {
+        import std.stdio : stderr;
+        stderr.writefln("  WARNING: seed generation stopped early — free RAM below %d MB (created %d sites)",
+                        MIN_FREE_RAM / (1024 * 1024), lat.nsites);
     }
 
     // Reserve extra capacity for runtime chain extension
@@ -433,7 +474,8 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool forward,
                       double sigma, double seedThresh,
                       ref DensityGrid grid,
-                      ChainSeed[] queue, ref int qTail) {
+                      ref ChainSeed[] queue, ref bool memoryLow,
+                      ref int sitesSinceCheck) {
     auto ch = &lat.chains[chainId];
     bool isR = ch.isR;
     const int[4] pat = isR ? PAT_R : PAT_L;
@@ -446,6 +488,8 @@ private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool f
     int created = 0;
 
     for (int step = 0; step < lat.maxSites; step++) {
+        if (memoryLow) break;
+
         int stepFace = forward ? curFace : prevFace(pat, curFace);
         helixStep(p, d, stepFace);
         if ((step + 1) % REORTH_INTERVAL == 0) reorth(d);
@@ -467,10 +511,20 @@ private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool f
         else
             lat.chainPrepend(chainId, nb);
 
-        queue[qTail++] = ChainSeed(nb, !isR);
+        queue ~= ChainSeed(nb, !isR);
 
         curFace = nbFace;
         created++;
+
+        // Periodic memory check
+        sitesSinceCheck++;
+        if (sitesSinceCheck >= MEM_CHECK_INTERVAL) {
+            sitesSinceCheck = 0;
+            if (freeRamBytes() < MIN_FREE_RAM) {
+                memoryLow = true;
+                break;
+            }
+        }
 
         ch = &lat.chains[chainId];
     }
