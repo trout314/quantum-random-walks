@@ -470,14 +470,14 @@ PruneResult pruneChainEnds(bool hasCoin)(ref Lattice!hasCoin lat, double thresh2
 // ---- D unit tests ----
 
 unittest {
-    import lattice : Lattice, DensityGrid, generateSites;
+    import lattice : Lattice, ProximityGrid, generateSites;
     import geometry : initTet;
 
     auto lat = Lattice!false.create(100000);
     double sigma = 1.5;
     double stepLen = 2.0 / 3.0;
     int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;
-    auto grid = DensityGrid.create(maxChainLen * stepLen + 5.0, 8);
+    auto grid = ProximityGrid.create(maxChainLen * stepLen + 5.0, 0.35);
     generateSites(lat, sigma, 1e-4, grid);
 
     double norm2 = 0;
@@ -503,7 +503,7 @@ unittest {
 }
 
 unittest {
-    import lattice : Lattice, DensityGrid, generateSites;
+    import lattice : Lattice, ProximityGrid, generateSites;
 
     auto lat = Lattice!true.create(100000);
     lat.coinCt = cos(0.5);
@@ -511,7 +511,7 @@ unittest {
     double sigma = 1.5;
     double stepLen = 2.0 / 3.0;
     int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;
-    auto grid = DensityGrid.create(maxChainLen * stepLen + 5.0, 8);
+    auto grid = ProximityGrid.create(maxChainLen * stepLen + 5.0, 0.35);
     generateSites(lat, sigma, 1e-4, grid);
 
     double val = 1.0 / sqrt(cast(double) lat.nsites);

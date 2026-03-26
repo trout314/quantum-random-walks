@@ -168,42 +168,75 @@ struct Site {
     int rFace = -1, lFace = -1;
 }
 
-/// Density grid for limiting site count per unit volume.
-struct DensityGrid {
-    /// Side length of each cubic grid cell.
-    enum double GRID_CELL_SIZE = 1.0;
+/// Spatial hash for minimum-distance site proximity checks.
+/// Rejects new sites that are within dMin of any existing site.
+struct ProximityGrid {
     /// Maximum grid dimension along each axis.
     enum int MAX_GRID_DIM = 500;
 
-    int[] counts;
+    int[][] cells;    // each cell stores a list of site indices
     double gridHalf;
+    double cellSize;
     int gridN;
-    int maxPerCell;
+    double dMin2;     // squared minimum distance
+    Site[] sites;     // reference to lattice sites array (for position lookup)
 
-    static DensityGrid create(double halfExtent, int maxPer) {
-        DensityGrid g;
+    static ProximityGrid create(double halfExtent, double dMin) {
+        ProximityGrid g;
         g.gridHalf = halfExtent;
-        g.gridN = cast(int)(2.0 * halfExtent / GRID_CELL_SIZE) + 1;
+        g.cellSize = dMin;  // cell size = dMin so we only check 27 neighbors
+        g.gridN = cast(int)(2.0 * halfExtent / g.cellSize) + 1;
         if (g.gridN > MAX_GRID_DIM) g.gridN = MAX_GRID_DIM;
-        g.counts = new int[g.gridN * g.gridN * g.gridN];
-        g.counts[] = 0;
-        g.maxPerCell = maxPer;
+        g.cells = new int[][g.gridN * g.gridN * g.gridN];
+        g.dMin2 = dMin * dMin;
         return g;
     }
 
-    int idx(Vec3 pos) const {
-        int gx = cast(int)((pos.x + gridHalf) / GRID_CELL_SIZE);
-        int gy = cast(int)((pos.y + gridHalf) / GRID_CELL_SIZE);
-        int gz = cast(int)((pos.z + gridHalf) / GRID_CELL_SIZE);
+    private void cellCoords(Vec3 pos, out int gx, out int gy, out int gz) const {
+        gx = cast(int)((pos.x + gridHalf) / cellSize);
+        gy = cast(int)((pos.y + gridHalf) / cellSize);
+        gz = cast(int)((pos.z + gridHalf) / cellSize);
         if (gx < 0) gx = 0; if (gx >= gridN) gx = gridN - 1;
         if (gy < 0) gy = 0; if (gy >= gridN) gy = gridN - 1;
         if (gz < 0) gz = 0; if (gz >= gridN) gz = gridN - 1;
+    }
+
+    private int cellIdx(int gx, int gy, int gz) const {
         return gx * gridN * gridN + gy * gridN + gz;
     }
 
-    bool isFull(Vec3 pos) const { return counts[idx(pos)] >= maxPerCell; }
-    void increment(Vec3 pos) { counts[idx(pos)]++; }
+    /// Returns true if pos is within dMin of any existing site.
+    bool isTooClose(Vec3 pos) const {
+        int cx, cy, cz;
+        cellCoords(pos, cx, cy, cz);
+
+        // Check 3x3x3 neighborhood
+        foreach (dx; -1 .. 2)
+            foreach (dy; -1 .. 2)
+                foreach (dz; -1 .. 2) {
+                    int nx = cx + dx, ny = cy + dy, nz = cz + dz;
+                    if (nx < 0 || nx >= gridN || ny < 0 || ny >= gridN ||
+                        nz < 0 || nz >= gridN) continue;
+                    auto cell = cells[cellIdx(nx, ny, nz)];
+                    foreach (id; cell) {
+                        Vec3 d = Vec3(pos.x - sites[id].pos.x,
+                                      pos.y - sites[id].pos.y,
+                                      pos.z - sites[id].pos.z);
+                        if (d.x*d.x + d.y*d.y + d.z*d.z < dMin2)
+                            return true;
+                    }
+                }
+        return false;
+    }
+
+    /// Register a site in the grid.
+    void add(Vec3 pos, int siteId) {
+        int cx, cy, cz;
+        cellCoords(pos, cx, cy, cz);
+        cells[cellIdx(cx, cy, cz)] ~= siteId;
+    }
 }
+
 
 /// The lattice, templated on whether coins are precomputed.
 struct Lattice(bool hasCoin) {
@@ -469,10 +502,11 @@ struct Lattice(bool hasCoin) {
 private struct ChainSeed { int siteId; bool isR; }
 
 int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double seedThresh,
-                  ref DensityGrid grid) {
+                  ref ProximityGrid grid) {
+    grid.sites = lat.sites;  // give grid access to site positions
     auto d0 = initTet();
     int origin = lat.allocSite(Vec3(0, 0, 0), d0);
-    grid.increment(Vec3(0, 0, 0));
+    grid.add(Vec3(0, 0, 0), origin);
 
     ChainSeed[] queue;
     queue.reserve(4096);
@@ -530,7 +564,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 
 private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool forward,
                       double sigma, double seedThresh,
-                      ref DensityGrid grid,
+                      ref ProximityGrid grid,
                       ref ChainSeed[] queue) {
     auto ch = &lat.chains[chainId];
     bool isR = ch.isR;
@@ -549,7 +583,7 @@ private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool f
         if ((step + 1) % REORTH_INTERVAL == 0) reorth(d);
 
         if (exp(-dot(p, p) / (2 * sigma * sigma)) < seedThresh) break;
-        if (grid.isFull(p)) break;
+        if (grid.isTooClose(p)) break;
 
         int nbFace = forward ? nextFace(pat, curFace) : stepFace;
 
@@ -558,7 +592,7 @@ private int extendDir(bool hasCoin)(ref Lattice!hasCoin lat, int chainId, bool f
         int nb = lat.allocSite(p, dd);
         if (nb < 0) break;  // lattice full
         lat.setChainFace(nb, isR, nbFace);
-        grid.increment(p);
+        grid.add(p, nb);
 
         if (forward)
             lat.chainAppend(chainId, nb);
@@ -590,7 +624,7 @@ unittest {
     double sigma = 1.5;
     double stepLen = 2.0 / 3.0;
     int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;
-    auto grid = DensityGrid.create(maxChainLen * stepLen + 5.0, 8);
+    auto grid = ProximityGrid.create(maxChainLen * stepLen + 5.0, 0.35);
     int nChains = generateSites(lat, sigma, 1e-4, grid);
 
     assert(lat.nsites > 1);

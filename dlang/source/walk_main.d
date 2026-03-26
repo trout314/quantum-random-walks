@@ -10,7 +10,7 @@ import std.math : sqrt, cos, sin, exp;
 import std.conv : to;
 import std.stdio : writef, writefln, stderr, stdout;
 import geometry : Vec3, dot, STEP_LEN;
-import lattice : Lattice, DensityGrid, generateSites, PAT_R, PAT_L, IS_R, IS_L;
+import lattice : Lattice, ProximityGrid, generateSites, PAT_R, PAT_L, IS_R, IS_L;
 import dirac : Mat4, makeTau, frameTransport, matVecSplit, projPlus, projMinus;
 import operators : applyShift, applyCoin, applyVmix, ShiftResult;
 import observables : computeObservables, Observables;
@@ -28,7 +28,7 @@ struct WalkParams {
     double mixPhi = 0.0;
     int maxSites = 25_000_000; // lattice capacity
     double seedThresh = 1e-4;  // amplitude cutoff for site generation
-    int maxDensity = 2;        // max sites per 1x1x1 grid cell
+    double dMin = 0.35;        // min distance between sites (0 = no limit)
     K0Vec[] kicks;             // momentum kick vectors
 }
 
@@ -44,7 +44,7 @@ WalkParams parseArgs(string[] args) {
     if (args.length > 6) p.mixPhi = args[6].to!double;
     if (args.length > 7) p.maxSites = args[7].to!int;
     if (args.length > 8) p.seedThresh = args[8].to!double;
-    if (args.length > 9) p.maxDensity = args[9].to!int;
+    if (args.length > 9) p.dMin = args[9].to!double;
     if (args.length > 10) {
         foreach (triple; args[10].split(";")) {
             auto c = triple.split(",");
@@ -192,9 +192,10 @@ void run(WalkParams p) {
 
     int maxChainLen = cast(int)(SIGMA_RANGE * p.sigma / STEP_LEN) + CHAIN_PAD;
     double gridHalf = maxChainLen * STEP_LEN + GRID_PAD;
-    auto grid = DensityGrid.create(gridHalf, p.maxDensity);
+    auto grid = ProximityGrid.create(gridHalf, p.dMin);
 
-    stderr.writefln("\n--- Chain-first site generation (grid %d^3) ---", grid.gridN);
+    stderr.writefln("\n--- Chain-first site generation (dMin=%.3f, grid %d^3) ---",
+                    p.dMin, grid.gridN);
     int nChains = generateSites(lat, p.sigma, p.seedThresh, grid);
 
     int noR = 0, noL = 0;

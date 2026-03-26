@@ -99,14 +99,14 @@ Observables computeObservables(bool hasCoin)(const Lattice!hasCoin lat) {
 // ---- D unit tests ----
 
 unittest {
-    import lattice : Lattice, DensityGrid, generateSites;
+    import lattice : Lattice, ProximityGrid, generateSites;
     import std.math : exp, fabs;
 
     auto lat = Lattice!false.create(100000);
     double sigma = 1.5;
     double stepLen = 2.0 / 3.0;
     int maxChainLen = cast(int)(4.0 * sigma / stepLen) + 5;
-    auto grid = DensityGrid.create(maxChainLen * stepLen + 5.0, 8);
+    auto grid = ProximityGrid.create(maxChainLen * stepLen + 5.0, 0.35);
     generateSites(lat, sigma, 1e-4, grid);
 
     // Initialize Gaussian
