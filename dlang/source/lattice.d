@@ -421,7 +421,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     }
 
     // Reserve extra capacity for runtime chain extension
-    enum CHAIN_RESERVE_PAD = 200;
+    enum CHAIN_RESERVE_PAD = 7;
     foreach (ref ch; lat.chains) {
         int extra = ch.ops.length + CHAIN_RESERVE_PAD;
         ch.ops.reserve(extra);

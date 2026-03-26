@@ -23,7 +23,7 @@ struct WalkParams {
     double threshold = 1e-10;
     double mixPhi = 0.0;
     int pruneInterval = 10;
-    int maxSites = 10_000_000; // lattice capacity (~2.8 GB)
+    int maxSites = 25_000_000; // lattice capacity (~24 GB peak for sigma=5)
     double seedThresh = 1e-4;  // amplitude cutoff for site generation
     double k0x = 0.0;         // momentum kick along x
     double k0y = 0.0;         // momentum kick along y
