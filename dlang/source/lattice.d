@@ -13,7 +13,7 @@ module lattice;
 import std.math : sqrt, exp, fabs, cos, sin;
 import geometry : Vec3, dot, norm, helixStep, reorth, initTet, REORTH_INTERVAL;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, alpha;
-import core.sys.linux.sys.sysinfo : sysinfo, sysinfo_t;
+import core.sys.linux.sys.sysinfo : sysinfo, sysinfo_;
 
 /// Minimum free RAM (bytes) before seed generation stops.  Default 1 GB.
 enum ulong MIN_FREE_RAM = 1UL * 1024 * 1024 * 1024;
@@ -23,7 +23,7 @@ enum int MEM_CHECK_INTERVAL = 10_000;
 
 /// Returns available free RAM in bytes, or ulong.max on failure.
 private ulong freeRamBytes() {
-    sysinfo_t info;
+    sysinfo_ info;
     if (sysinfo(&info) != 0) return ulong.max;
     return info.freeram * info.mem_unit;
 }
