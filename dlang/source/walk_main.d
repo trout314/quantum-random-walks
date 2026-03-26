@@ -26,6 +26,7 @@ struct WalkParams {
     int pruneInterval = 10;
     int maxSites = 25_000_000; // lattice capacity (~24 GB peak for sigma=5)
     double seedThresh = 1e-4;  // amplitude cutoff for site generation
+    int maxDensity = 2;        // max sites per 1x1x1 grid cell
     double k0x = 0.0;         // momentum kick along x
     double k0y = 0.0;         // momentum kick along y
     double k0z = 0.0;         // momentum kick along z
@@ -42,9 +43,10 @@ WalkParams parseArgs(string[] args) {
     if (args.length > 7) p.pruneInterval = args[7].to!int;
     if (args.length > 8) p.maxSites = args[8].to!int;
     if (args.length > 9) p.seedThresh = args[9].to!double;
-    if (args.length > 10) p.k0x = args[10].to!double;
-    if (args.length > 11) p.k0y = args[11].to!double;
-    if (args.length > 12) p.k0z = args[12].to!double;
+    if (args.length > 10) p.maxDensity = args[10].to!int;
+    if (args.length > 11) p.k0x = args[11].to!double;
+    if (args.length > 12) p.k0y = args[12].to!double;
+    if (args.length > 13) p.k0z = args[13].to!double;
     return p;
 }
 
@@ -83,11 +85,10 @@ void run(WalkParams p) {
     enum double SIGMA_RANGE = 4.0;   // extend chains to this many sigma
     enum int CHAIN_PAD = 5;          // extra sites beyond sigma range
     enum double GRID_PAD = 5.0;      // extra extent for density grid
-    enum int MAX_DENSITY_PER_CELL = 2;
 
     int maxChainLen = cast(int)(SIGMA_RANGE * p.sigma / STEP_LEN) + CHAIN_PAD;
     double gridHalf = maxChainLen * STEP_LEN + GRID_PAD;
-    auto grid = DensityGrid.create(gridHalf, MAX_DENSITY_PER_CELL);
+    auto grid = DensityGrid.create(gridHalf, p.maxDensity);
 
     stderr.writefln("\n--- Chain-first site generation (grid %d^3) ---", grid.gridN);
     int nChains = generateSites(lat, p.sigma, p.seedThresh, grid);
