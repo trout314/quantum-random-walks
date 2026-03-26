@@ -29,6 +29,8 @@ struct ShiftResult {
     int nCreated = 0;
     int nCapFull = 0;    // extensions skipped due to lattice capacity
     double probAbsorbed = 0;
+    int nPruned = 0;
+    double probPruned = 0;
 }
 
 private int tryExtendFwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
@@ -78,7 +80,8 @@ private int tryExtendBwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
 }
 
 ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
-                                     const int[4] pat, double thresh2) {
+                                     const int[4] pat, double thresh2,
+                                     double pruneThresh2 = 0) {
     import core.thread : Thread;
     import std.parallelism : parallel, taskPool;
     alias ChainT = Lattice!hasCoin.ChainT;
@@ -212,6 +215,43 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
     }
 
     lat.swapBuffers();
+
+    // Pass 3: incremental pruning — check chain ends in the new wavefunction
+    if (pruneThresh2 > 0) {
+        foreach (ci; activeChains) {
+            auto ch = &lat.chains[ci];
+            if (ch.ops.length <= 1) continue;  // don't prune single-site chains
+
+            // Forward end
+            {
+                int s = ch.ops[ch.ops.length - 1].siteId;
+                double amp2 = spinorNorm2!hasCoin(lat, s);
+                if (amp2 < pruneThresh2) {
+                    result.probPruned += amp2;
+                    lat.psiRe[4*s .. 4*s+4] = 0;
+                    lat.psiIm[4*s .. 4*s+4] = 0;
+                    unlinkChainEnd!hasCoin(lat, s, isR, true);
+                    result.nPruned++;
+                }
+            }
+
+            if (ch.ops.length <= 1) continue;
+
+            // Backward end
+            {
+                int s = ch.ops[0].siteId;
+                double amp2 = spinorNorm2!hasCoin(lat, s);
+                if (amp2 < pruneThresh2) {
+                    result.probPruned += amp2;
+                    lat.psiRe[4*s .. 4*s+4] = 0;
+                    lat.psiIm[4*s .. 4*s+4] = 0;
+                    unlinkChainEnd!hasCoin(lat, s, isR, false);
+                    result.nPruned++;
+                }
+            }
+        }
+    }
+
     return result;
 }
 
