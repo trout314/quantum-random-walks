@@ -59,6 +59,9 @@ struct Deque(T) {
     @property int length() const { return hi - lo; }
     ref inout(T) opIndex(int i) inout { return buf[lo + i]; }
 
+    /// Reset to empty, reusing existing buffer.
+    void clear() { lo = cast(int)(buf.length / 2); hi = lo; }
+
     void pushBack(T val) {
         if (hi >= buf.length) expand();
         buf[hi++] = val;
@@ -249,6 +252,82 @@ struct Lattice(bool hasCoin) {
         lat.freeList = new int[maxSites];
         lat.freeCount = 0;
         return lat;
+    }
+
+    /// Lightweight snapshot: sites + chain site-ID lists (no operator matrices).
+    struct Snapshot {
+        Site[] sites;
+        int nsites;
+        int[] freeList;
+        int freeCount;
+        // Per chain: isR, rootSite, rootIdx, siteId list
+        bool[] chainIsR;
+        int[] chainRootSite;
+        int[] chainRootIdx;
+        int[][] chainSiteIds;
+    }
+
+    Snapshot takeSnapshot() const {
+        Snapshot snap;
+        snap.sites = sites[0 .. nsites].dup;
+        snap.nsites = nsites;
+        snap.freeList = freeList[0 .. freeCount].dup;
+        snap.freeCount = freeCount;
+        int nc = cast(int) chains.length;
+        snap.chainIsR = new bool[nc];
+        snap.chainRootSite = new int[nc];
+        snap.chainRootIdx = new int[nc];
+        snap.chainSiteIds = new int[][nc];
+        foreach (i, ref ch; chains) {
+            snap.chainIsR[i] = ch.isR;
+            snap.chainRootSite[i] = ch.rootSite;
+            snap.chainRootIdx[i] = ch.rootIdx;
+            auto ids = new int[ch.ops.length];
+            foreach (j; 0 .. ch.ops.length)
+                ids[j] = ch.ops[j].siteId;
+            snap.chainSiteIds[i] = ids;
+        }
+        return snap;
+    }
+
+    /// Restore from snapshot: rebuild sites, chains, and recompute operator blocks.
+    void restoreSnapshot(ref const Snapshot snap) {
+        nsites = snap.nsites;
+        sites[0 .. nsites] = snap.sites[];
+        freeCount = snap.freeCount;
+        if (freeCount > 0)
+            freeList[0 .. freeCount] = snap.freeList[];
+
+        int nc = cast(int) snap.chainSiteIds.length;
+        chains.length = nc;
+        foreach (ci; 0 .. nc) {
+            auto ids = snap.chainSiteIds[ci];
+            bool isR = snap.chainIsR[ci];
+            chains[ci].isR = isR;
+            chains[ci].rootSite = snap.chainRootSite[ci];
+            chains[ci].rootIdx = snap.chainRootIdx[ci];
+
+            // Clear and refill ops, reusing existing deque buffer
+            int n = cast(int) ids.length;
+            chains[ci].ops.clear();
+            foreach (j; 0 .. n) {
+                int prev = (j > 0) ? ids[j - 1] : -1;
+                int next = (j < n - 1) ? ids[j + 1] : -1;
+                auto op = buildOps(ids[j], prev, next, isR);
+                chains[ci].ops.pushBack(op);
+            }
+
+            // Update site chain/index references
+            foreach (j; 0 .. n) {
+                if (isR) { sites[ids[j]].rChain = ci; sites[ids[j]].rIdx = j; }
+                else     { sites[ids[j]].lChain = ci; sites[ids[j]].lIdx = j; }
+            }
+        }
+
+        psiRe[0 .. 4 * nsites] = 0;
+        psiIm[0 .. 4 * nsites] = 0;
+        tmpRe[0 .. 4 * nsites] = 0;
+        tmpIm[0 .. 4 * nsites] = 0;
     }
 
     int allocSite(Vec3 pos, Vec3[4] dirs) {
