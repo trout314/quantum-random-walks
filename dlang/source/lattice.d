@@ -683,9 +683,13 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
                 nb = lat.allocSite(p, dd);
                 grid.add(p, nb);
             }
-            lat.setChainFace(nb, isR, nbFace);
-            if (forward) lat.chainAppend(chainId, nb);
-            else         lat.chainPrepend(chainId, nb);
+            // Only add to this chain if the site isn't already on a chain
+            // for this chirality (shared walker edges are on one chain only).
+            if (lat.chainFace(nb, isR) < 0) {
+                lat.setChainFace(nb, isR, nbFace);
+                if (forward) lat.chainAppend(chainId, nb);
+                else         lat.chainPrepend(chainId, nb);
+            }
             curFace = nbFace;
             result ~= nb;
             ch = &lat.chains[chainId];  // refresh after potential realloc
@@ -744,6 +748,21 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         if (lat.chainFace(s, IS_L) < 0) { makeChain!hasCoin(lat, s, IS_L); nChains++; }
     }
 
+    // Debug: print chain info for all bootstrap sites
+    {
+        import std.stdio : stderr;
+        stderr.writefln("\n--- Bootstrap chain info ---");
+        foreach (s; 0 .. lat.nsites) {
+            int rCh2 = lat.sites[s].rChain;
+            int lCh2 = lat.sites[s].lChain;
+            int rLen = rCh2 >= 0 ? lat.chains[rCh2].ops.length : 0;
+            int lLen = lCh2 >= 0 ? lat.chains[lCh2].ops.length : 0;
+            stderr.writefln("  site %2d: rChain=%d rLen=%d rFace=%d  lChain=%d lLen=%d lFace=%d",
+                s, rCh2, rLen, lat.chainFace(s, IS_R),
+                lCh2, lLen, lat.chainFace(s, IS_L));
+        }
+    }
+
     // ==== Register orbits ====
 
     // Orbit 0: origin (size 1)
@@ -798,8 +817,19 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     // Those are covered by the depth-2 orbit entries above.
 
     // ---- Orbit-driven growth (all new orbits have size 12) ----
+    // Process frontier in two tiers: first all same-chirality continuations,
+    // then cross-chirality from new orbits.  This prevents child orbits'
+    // cross-chirality from advancing parent orbit members' chains.
+    OrbExt[] crossQueue;  // deferred cross-chirality entries
+
     int fIdx = 0;
-    while (fIdx < frontier.length) {
+    while (fIdx < frontier.length || crossQueue.length > 0) {
+        // When the primary frontier is exhausted, swap in the cross queue
+        if (fIdx >= frontier.length && crossQueue.length > 0) {
+            frontier ~= crossQueue;
+            crossQueue.length = 0;
+        }
+        if (fIdx >= frontier.length) break;
         auto fe = frontier[fIdx++];
         auto orb = &orbits[fe.orbitIdx];
         if (orb.size == 0) continue;
@@ -836,60 +866,96 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 
         int[12] newIds;  int[12] newRots;  int newN = 0;
         bool oom = false;
+        int dbgClose = 0, dbgNotEnd = 0;
 
         foreach (mi; 0 .. orb.size) {
             int xi = orb.members[mi].siteId;
             int ri = orb.members[mi].rotIdx;
             Vec3 yiP = a4rots[ri].apply(canP);
 
-            if (grid.isTooClose(yiP)) continue;
+            if (grid.isTooClose(yiP)) { dbgClose++; continue; }
 
-            if (lat.chainFace(xi, isR) < 0) { makeChain!hasCoin(lat, xi, isR); nChains++; }
+            // Ensure X_i has both chirality chains
+            if (lat.chainFace(xi, IS_R) < 0) { makeChain!hasCoin(lat, xi, IS_R); nChains++; }
+            if (lat.chainFace(xi, IS_L) < 0) { makeChain!hasCoin(lat, xi, IS_L); nChains++; }
 
-            bool extFwd;
+            // Try all 4 chain edges from X_i, pick closest to Y_i
+            bool bestIsR = isR, bestFwd = forward;
+            double bestDist = double.max;
+            int bestChain = -1;
+
             if (mi == 0) {
-                extFwd = forward;
+                bestIsR = isR;
+                bestFwd = forward;
+                bestChain = isR ? lat.sites[xi].rChain : lat.sites[xi].lChain;
+                bestDist = 0;
             } else {
-                int xiFace = lat.chainFace(xi, isR);
                 Vec3 xiPos = lat.sites[xi].pos;
-                Vec3[4] xiD = lat.sites[xi].dirs;
-                Vec3 fP = xiPos, bP = xiPos;
-                Vec3[4] fD = xiD, bD = xiD;
-                helixStep(fP, fD, xiFace);
-                helixStep(bP, bD, prevFace(pat, xiFace));
-                Vec3 df = fP - yiP, db = bP - yiP;
-                extFwd = dot(df, df) < dot(db, db);
+                foreach (tryR; [true, false]) {
+                    int xiFace = lat.chainFace(xi, tryR);
+                    const int[4] tryPat = tryR ? PAT_R : PAT_L;
+                    Vec3[4] xiD = lat.sites[xi].dirs;
+
+                    // Forward
+                    Vec3 fP = xiPos; Vec3[4] fD = xiD;
+                    helixStep(fP, fD, xiFace);
+                    Vec3 df = fP - yiP;
+                    double dF = dot(df, df);
+                    if (dF < bestDist) {
+                        bestDist = dF; bestIsR = tryR; bestFwd = true;
+                        bestChain = tryR ? lat.sites[xi].rChain : lat.sites[xi].lChain;
+                    }
+
+                    // Backward
+                    Vec3 bP = xiPos; Vec3[4] bD = xiD;
+                    helixStep(bP, bD, prevFace(tryPat, xiFace));
+                    Vec3 db = bP - yiP;
+                    double dB = dot(db, db);
+                    if (dB < bestDist) {
+                        bestDist = dB; bestIsR = tryR; bestFwd = false;
+                        bestChain = tryR ? lat.sites[xi].rChain : lat.sites[xi].lChain;
+                    }
+                }
             }
 
-            int xiCh = isR ? lat.sites[xi].rChain : lat.sites[xi].lChain;
-            auto xch = &lat.chains[xiCh];
-            int xiEnd = extFwd ? xch.ops[xch.ops.length - 1].siteId
-                               : xch.ops[0].siteId;
-            if (xiEnd != xi) continue;
+            // Check X_i is at chain end for the chosen edge
+            auto xch = &lat.chains[bestChain];
+            int xiEnd = bestFwd ? xch.ops[xch.ops.length - 1].siteId
+                                : xch.ops[0].siteId;
+            if (xiEnd != xi) { dbgNotEnd++; continue; }
 
             Vec3[4] yiD;
             foreach (fi; 0 .. 4) yiD[fi] = a4rots[ri].apply(canD[fi]);
             int yi = lat.allocSite(yiP, yiD);
             if (yi < 0) { oom = true; break; }
 
-            int xiFace2 = lat.chainFace(xi, isR);
-            int yiFace = extFwd ? nextFace(pat, xiFace2) : prevFace(pat, xiFace2);
-            lat.setChainFace(yi, isR, yiFace);
+            const int[4] bestPat = bestIsR ? PAT_R : PAT_L;
+            int xiFace2 = lat.chainFace(xi, bestIsR);
+            int yiFace = bestFwd ? nextFace(bestPat, xiFace2) : prevFace(bestPat, xiFace2);
+            lat.setChainFace(yi, bestIsR, yiFace);
             grid.add(yiP, yi);
-            if (extFwd) lat.chainAppend(xiCh, yi);
-            else        lat.chainPrepend(xiCh, yi);
+            if (bestFwd) lat.chainAppend(bestChain, yi);
+            else         lat.chainPrepend(bestChain, yi);
 
-            if (lat.chainFace(yi, !isR) < 0) { makeChain!hasCoin(lat, yi, !isR); nChains++; }
+            // Ensure Y_i has both chirality chains
+            if (lat.chainFace(yi, !bestIsR) < 0) { makeChain!hasCoin(lat, yi, !bestIsR); nChains++; }
 
             newIds[newN] = yi;
             newRots[newN] = ri;
             newN++;
         }
 
+        import std.stdio : stderr;
+        if (newN > 0 && newN < orb.size && fIdx < 50)
+            stderr.writefln("  orbit %d size %d → new %d (close=%d notEnd=%d) %s %s",
+                fe.orbitIdx, orb.size, newN, dbgClose, dbgNotEnd,
+                isR ? "R" : "L", forward ? "fwd" : "bwd");
+
         if (newN > 0) {
             int newOrb = addOrbit(newIds[0 .. newN], newRots[0 .. newN], newN);
-            frontier ~= OrbExt(newOrb, !isR, true);
-            frontier ~= OrbExt(newOrb, !isR, false);
+            // Cross-chirality goes to deferred queue (processed after same-chirality)
+            crossQueue ~= OrbExt(newOrb, !isR, true);
+            crossQueue ~= OrbExt(newOrb, !isR, false);
         }
         if (!oom && newN > 0)
             frontier ~= OrbExt(fe.orbitIdx, isR, forward);
