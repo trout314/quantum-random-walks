@@ -61,6 +61,80 @@ immutable Vec3[4] tetDirs = [
     Vec3(-sqrt(2.0) / 3.0, -sqrt(6.0) / 3.0, -1.0 / 3.0),
 ];
 
+// ---- A4 (chiral tetrahedral) rotation matrices ----
+
+/// 3×3 rotation matrix, row-major.
+struct Mat3 {
+    double[9] m = [1,0,0, 0,1,0, 0,0,1];
+
+    Vec3 apply(Vec3 v) const {
+        return Vec3(
+            m[0]*v.x + m[1]*v.y + m[2]*v.z,
+            m[3]*v.x + m[4]*v.y + m[5]*v.z,
+            m[6]*v.x + m[7]*v.y + m[8]*v.z,
+        );
+    }
+
+    /// Apply the transpose (= inverse for rotation matrices).
+    Vec3 applyTranspose(Vec3 v) const {
+        return Vec3(
+            m[0]*v.x + m[3]*v.y + m[6]*v.z,
+            m[1]*v.x + m[4]*v.y + m[7]*v.z,
+            m[2]*v.x + m[5]*v.y + m[8]*v.z,
+        );
+    }
+}
+
+/// The 12 even permutations of {0,1,2,3} — the A4 group acting on tet vertices.
+immutable int[4][12] A4_PERMS = [
+    [0,1,2,3],  // identity
+    [1,2,0,3],  // (012)
+    [2,0,1,3],  // (021)
+    [1,3,2,0],  // (013)
+    [3,0,2,1],  // (031)
+    [2,1,3,0],  // (023)
+    [3,1,0,2],  // (032)
+    [0,2,3,1],  // (123)
+    [0,3,1,2],  // (132)
+    [1,0,3,2],  // (01)(23)
+    [2,3,0,1],  // (02)(13)
+    [3,2,1,0],  // (03)(12)
+];
+
+/// Build the 3×3 rotation matrix for an A4 element given as a permutation
+/// of the four tet directions.  R = (3/4) · E_σ · Eᵀ.
+Mat3 buildA4Rotation(const int[4] perm) {
+    Mat3 R;
+    foreach (i; 0 .. 3)
+        foreach (j; 0 .. 3) {
+            double s = 0;
+            foreach (k; 0 .. 4) {
+                double epi = void, ekj = void;
+                final switch (i) {
+                    case 0: epi = tetDirs[perm[k]].x; break;
+                    case 1: epi = tetDirs[perm[k]].y; break;
+                    case 2: epi = tetDirs[perm[k]].z; break;
+                }
+                final switch (j) {
+                    case 0: ekj = tetDirs[k].x; break;
+                    case 1: ekj = tetDirs[k].y; break;
+                    case 2: ekj = tetDirs[k].z; break;
+                }
+                s += epi * ekj;
+            }
+            R.m[3*i + j] = s * 0.75;
+        }
+    return R;
+}
+
+/// Precompute all 12 A4 rotation matrices.
+Mat3[12] buildAllA4Rotations() {
+    Mat3[12] rots;
+    foreach (i; 0 .. 12)
+        rots[i] = buildA4Rotation(A4_PERMS[i]);
+    return rots;
+}
+
 /// Initialize a mutable copy of the tetrahedral directions.
 Vec3[4] initTet() {
     Vec3[4] d;
@@ -220,4 +294,41 @@ unittest {
     foreach (d; dirs)
         s = s + d;
     assert(norm(s) < 0.02);
+}
+
+// ---- A4 rotation unit tests ----
+
+unittest {
+    // Identity rotation is the identity matrix
+    auto rots = buildAllA4Rotations();
+    foreach (i; 0 .. 3)
+        foreach (j; 0 .. 3) {
+            double expected = (i == j) ? 1.0 : 0.0;
+            assert(fabs(rots[0].m[3*i+j] - expected) < 1e-12);
+        }
+}
+
+unittest {
+    // Every A4 rotation maps each tet direction to the permuted tet direction
+    auto rots = buildAllA4Rotations();
+    foreach (ri; 0 .. 12)
+        foreach (k; 0 .. 4) {
+            Vec3 re = rots[ri].apply(tetDirs[k]);
+            Vec3 expected = tetDirs[A4_PERMS[ri][k]];
+            assert(norm(re - expected) < 1e-12);
+        }
+}
+
+unittest {
+    // All A4 rotations are orthogonal (R^T R = I)
+    auto rots = buildAllA4Rotations();
+    foreach (ri; 0 .. 12)
+        foreach (i; 0 .. 3)
+            foreach (j; 0 .. 3) {
+                double s = 0;
+                foreach (k; 0 .. 3)
+                    s += rots[ri].m[3*k+i] * rots[ri].m[3*k+j];
+                double expected = (i == j) ? 1.0 : 0.0;
+                assert(fabs(s - expected) < 1e-12);
+            }
 }

@@ -13,6 +13,7 @@ sources = [
   'source/observables.d',
   'source/walk_main.d',
   'source/walk_1d.d',
+  'source/symmetry.d',
 ]
 
 lib = shared_library(

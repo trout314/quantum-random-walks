@@ -14,6 +14,7 @@ import lattice : Lattice, ProximityGrid, generateSites, PAT_R, PAT_L, IS_R, IS_L
 import dirac : Mat4, makeTau, frameTransport, matVecSplit, projPlus, projMinus;
 import operators : applyShift, applyCoin, applyVmix, ShiftResult;
 import observables : computeObservables, Observables;
+import symmetry : checkA4Symmetry;
 
 enum bool HAS_COIN = false;
 
@@ -203,6 +204,9 @@ void run(WalkParams p) {
     }
     stderr.writefln("Seed: %d sites, %d chains", lat.nsites, nChains);
     stderr.writefln("Coverage: %d without R-chain, %d without L-chain", noR, noL);
+
+    // A4 symmetry diagnostic
+    checkA4Symmetry(lat, grid, 30);
 
     // Snapshot seed lattice so we can reuse it for multiple k0 values
     auto snap = lat.takeSnapshot();
