@@ -806,14 +806,13 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     }
 
     // ==== Orbit-driven frontier ====
-    // Each entry is just an orbit index.  Processing one entry tries all 4
-    // primary directions (R-fwd, R-bwd, L-fwd, L-bwd) and for each viable
-    // direction extends ALL orbit members atomically.  Each member finds its
-    // own matching chain edge via 4-way search.
+    // Each entry is an orbit index.  Processing creates all 12 child sites
+    // (from up to 4 primary directions), registers them in the grid, then
+    // finds each child's predecessor and connects it to the right chain.
     int[] frontier;
     frontier ~= 2;  // depth-2 orbit
 
-    // ---- Orbit-driven growth (all new orbits have size 12) ----
+    // ---- Orbit-driven growth ----
     int fIdx = 0;
     while (fIdx < frontier.length) {
         int orbIdx = frontier[fIdx++];
@@ -829,7 +828,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 
         bool anyExtended = false;
 
-        // Try all 4 directions from the primary
+        // Try all 4 directions from the primary to find viable child positions
         foreach (tryR; [true, false]) {
             foreach (tryFwd; [true, false]) {
                 const int[4] pat = tryR ? PAT_R : PAT_L;
@@ -837,7 +836,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
                 auto ch0 = &lat.chains[x0Ch];
                 int x0End = tryFwd ? ch0.ops[ch0.ops.length - 1].siteId
                                    : ch0.ops[0].siteId;
-                if (x0End != x0) continue;  // not at this chain end
+                if (x0End != x0) continue;
 
                 int curFace = lat.chainFace(x0, tryR);
                 Vec3 p = lat.sites[x0].pos;
@@ -857,80 +856,151 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
                 Vec3[4] canD;
                 foreach (fi; 0 .. 4) canD[fi] = a4rots[rj].applyTranspose(dd[fi]);
 
-                // Extend all orbit members
+                // Phase 1: Create all 12 child sites and register in grid
                 int[12] newIds;  int[12] newRots;  int newN = 0;
+                Vec3[12] newPos;
                 bool oom = false;
 
-                foreach (mi; 0 .. orb.size) {
-                    int xi = orb.members[mi].siteId;
-                    int ri = orb.members[mi].rotIdx;
+                foreach (ri; 0 .. 12) {
                     Vec3 yiP = a4rots[ri].apply(canP);
-
                     if (grid.isTooClose(yiP)) continue;
 
-                    // Ensure X_i has both chains
-                    if (lat.chainFace(xi, IS_R) < 0) { makeChain!hasCoin(lat, xi, IS_R); nChains++; }
-                    if (lat.chainFace(xi, IS_L) < 0) { makeChain!hasCoin(lat, xi, IS_L); nChains++; }
-
-                    // Find best of 4 chain edges
-                    bool bestIsR, bestFwd;
-                    double bestDist = double.max;
-                    int bestChain = -1;
-
-                    Vec3 xiPos = lat.sites[xi].pos;
-                    foreach (eR; [true, false]) {
-                        int xiFace = lat.chainFace(xi, eR);
-                        const int[4] ePat = eR ? PAT_R : PAT_L;
-                        Vec3[4] xiD = lat.sites[xi].dirs;
-
-                        Vec3 fP = xiPos; Vec3[4] fD = xiD;
-                        helixStep(fP, fD, xiFace);
-                        Vec3 df = fP - yiP;
-                        double dF = dot(df, df);
-                        if (dF < bestDist) {
-                            bestDist = dF; bestIsR = eR; bestFwd = true;
-                            bestChain = eR ? lat.sites[xi].rChain : lat.sites[xi].lChain;
-                        }
-
-                        Vec3 bP = xiPos; Vec3[4] bD = xiD;
-                        helixStep(bP, bD, prevFace(ePat, xiFace));
-                        Vec3 db = bP - yiP;
-                        double dB = dot(db, db);
-                        if (dB < bestDist) {
-                            bestDist = dB; bestIsR = eR; bestFwd = false;
-                            bestChain = eR ? lat.sites[xi].rChain : lat.sites[xi].lChain;
-                        }
-                    }
-
-                    // Check at chain end
-                    auto xch = &lat.chains[bestChain];
-                    int xiEnd = bestFwd ? xch.ops[xch.ops.length - 1].siteId
-                                       : xch.ops[0].siteId;
-                    if (xiEnd != xi) continue;
-
-                    // Create Y_i
                     Vec3[4] yiD;
                     foreach (fi; 0 .. 4) yiD[fi] = a4rots[ri].apply(canD[fi]);
+
                     int yi = lat.allocSite(yiP, yiD);
                     if (yi < 0) { oom = true; break; }
-
-                    const int[4] bestPat = bestIsR ? PAT_R : PAT_L;
-                    int xiFace2 = lat.chainFace(xi, bestIsR);
-                    int yiFace = bestFwd ? nextFace(bestPat, xiFace2)
-                                        : prevFace(bestPat, xiFace2);
-                    lat.setChainFace(yi, bestIsR, yiFace);
                     grid.add(yiP, yi);
-                    if (bestFwd) lat.chainAppend(bestChain, yi);
-                    else         lat.chainPrepend(bestChain, yi);
-
-                    if (lat.chainFace(yi, !bestIsR) < 0) {
-                        makeChain!hasCoin(lat, yi, !bestIsR);
-                        nChains++;
-                    }
 
                     newIds[newN] = yi;
                     newRots[newN] = ri;
+                    newPos[newN] = yiP;
                     newN++;
+                }
+                if (oom) break;
+
+                // Phase 2: Connect each child to its predecessor's chain.
+                // For each Y_i, compute 4 reverse helix steps to find the
+                // predecessor site, then append/prepend Y_i to that chain.
+                foreach (ni; 0 .. newN) {
+                    int yi = newIds[ni];
+                    Vec3 yiP = newPos[ni];
+                    Vec3[4] yiD = lat.sites[yi].dirs;
+
+                    // Try all 4 reverse steps: predecessor = Y_i.pos + (2/3)*Y_i.dirs[face]
+                    // (helix step subtracts, so reverse adds)
+                    bool connected = false;
+                    foreach (eR; [true, false]) {
+                        if (connected) break;
+                        const int[4] ePat = eR ? PAT_R : PAT_L;
+                        foreach (eFwd; [true, false]) {
+                            if (connected) break;
+                            // If Y_i is at face f on this chain, predecessor
+                            // stepped through some face to reach Y_i.
+                            // Forward: pred stepped through pred's curFace, giving
+                            //   Y_i with nbFace = nextFace(pat, pred's curFace).
+                            //   So pred's curFace = prevFace(pat, Y_i's face).
+                            //   Pred is at Y_i.pos + (2/3)*Y_i.dirs[prevFace(pat, Y_i's face)]
+                            //   ... but Y_i doesn't have a face for this chirality yet.
+                            //
+                            // Simpler: just compute where each face step leads FROM Y_i
+                            // and check if an existing site is there. If the existing site
+                            // is at a chain end, Y_i is its successor.
+
+                            // Compute the helix step from Y_i through a face
+                            // and check if a predecessor exists at the step position.
+                            // Actually, the predecessor is at the REVERSE position.
+                            // helixStep: pos' = pos - (2/3)*dirs[face]
+                            // So predecessor pos = Y_i.pos + (2/3)*yiD[face] ... but
+                            // yiD is the REFLECTED dirs (after the step). The predecessor's
+                            // dirs before the step are reflect(yiD, yiD[face]).
+                            //
+                            // Let's just try matching: compute a step from Y_i in each
+                            // direction and see if it lands on an existing site at a chain end.
+                            // If site Z is one step from Y_i AND Z is at a chain end, then
+                            // Z is Y_i's predecessor and Y_i should be appended/prepended.
+
+                            // For the 4-way search we need Y_i's face for each chirality.
+                            // We don't know it yet. But we can try each face.
+                            foreach (face; 0 .. 4) {
+                                Vec3 predP = yiP;
+                                Vec3[4] predD = yiD;
+                                helixStep(predP, predD, face);
+                                // predP is one step FROM Y_i — it's the position of
+                                // a potential neighbor of Y_i (not the predecessor).
+                                // The PREDECESSOR is the site that stepped TO Y_i.
+                                // predecessor.pos + step = Y_i.pos
+                                // step = -(2/3)*predecessor.dirs[stepFace]
+                                // predecessor.pos = Y_i.pos + (2/3)*predecessor.dirs[stepFace]
+                                //
+                                // After the step, dirs get reflected:
+                                // Y_i.dirs = reflect(predecessor.dirs, predecessor.dirs[stepFace])
+                                // So predecessor.dirs[stepFace] = -Y_i.dirs[stepFace] (reflection of itself)
+                                // Wait: reflect(v, v) = v - 2(v·v)v = v - 2v = -v. Yes!
+                                // predecessor.dirs[stepFace] = -yiD[face] (if face == stepFace)
+                                //
+                                // So predecessor.pos = Y_i.pos + (2/3)*(-yiD[face])
+                                //                    = Y_i.pos - (2/3)*yiD[face]
+                                // But that's the same as helixStep from Y_i through face!
+                                // (helixStep: pos = pos - (2/3)*dirs[face])
+                                // So predP = Y_i.pos - (2/3)*yiD[face] = the step FROM Y_i.
+                                //
+                                // This means: stepping FROM Y_i through face gives the
+                                // predecessor position. The predecessor stepped through
+                                // the same face index to reach Y_i (because reflection
+                                // maps dirs[face] → -dirs[face], reversing the step).
+
+                                int pred = grid.findSiteNear(predP, mateTol);
+                                if (pred < 0) continue;
+                                if (pred == yi) continue;
+
+                                // Check pred is at a chain end and the chain edge
+                                // through this face is available
+                                foreach (pR; [true, false]) {
+                                    if (connected) break;
+                                    int pFace = lat.chainFace(pred, pR);
+                                    if (pFace < 0) continue;
+                                    const int[4] pPat = pR ? PAT_R : PAT_L;
+
+                                    // Check forward: pred's curFace step leads to Y_i?
+                                    if (pFace == face) {
+                                        // Forward step from pred through pFace
+                                        int pCh = pR ? lat.sites[pred].rChain : lat.sites[pred].lChain;
+                                        auto pch = &lat.chains[pCh];
+                                        if (pch.ops[pch.ops.length - 1].siteId == pred) {
+                                            int yiFace = nextFace(pPat, pFace);
+                                            lat.setChainFace(yi, pR, yiFace);
+                                            lat.chainAppend(pCh, yi);
+                                            if (lat.chainFace(yi, !pR) < 0) {
+                                                makeChain!hasCoin(lat, yi, !pR);
+                                                nChains++;
+                                            }
+                                            connected = true;
+                                        }
+                                    }
+
+                                    // Check backward: prevFace(pPat, pFace) == face?
+                                    if (!connected && prevFace(pPat, pFace) == face) {
+                                        int pCh = pR ? lat.sites[pred].rChain : lat.sites[pred].lChain;
+                                        auto pch = &lat.chains[pCh];
+                                        if (pch.ops[0].siteId == pred) {
+                                            int yiFace = face;  // backward: nbFace = stepFace
+                                            lat.setChainFace(yi, pR, yiFace);
+                                            lat.chainPrepend(pCh, yi);
+                                            if (lat.chainFace(yi, !pR) < 0) {
+                                                makeChain!hasCoin(lat, yi, !pR);
+                                                nChains++;
+                                            }
+                                            connected = true;
+                                        }
+                                    }
+                                }
+                                if (connected) break;
+                            }
+                        }
+                    }
+                    // If not connected, the site exists but isn't linked yet.
+                    // It will be connected when its predecessor's chain catches up.
                 }
 
                 if (newN > 0) {
@@ -941,7 +1011,6 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
             }
         }
 
-        // Re-queue this orbit if any direction succeeded (may have more to extend)
         if (anyExtended)
             frontier ~= orbIdx;
     }
