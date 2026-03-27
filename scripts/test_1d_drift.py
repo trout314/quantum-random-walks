@@ -95,10 +95,14 @@ def compute_score():
     d_rho_n = d_rho_interp / np.sum(d_rho_interp) if np.sum(d_rho_interp) > 0 else d_rho_interp
     rms_density = np.sqrt(np.mean((w_rho_n - d_rho_n)**2))
 
+    # L1 (total variation) — fraction of probability in the wrong place
+    l1_density = np.sum(np.abs(w_rho_n - d_rho_n))
+
     return {
         'rms_xmean': rms_xmean,
         'max_drift': max_drift,
         'rms_density': rms_density,
+        'l1_density': l1_density,
     }
 
 
@@ -107,3 +111,4 @@ if __name__ == '__main__':
     print(f"RMS ⟨x⟩ drift:    {score['rms_xmean']:.4f}")
     print(f"Max |drift|:       {score['max_drift']:.4f}")
     print(f"RMS density diff:  {score['rms_density']:.6f}")
+    print(f"L1 density diff:   {score['l1_density']:.4f}  (fraction of prob misplaced)")
