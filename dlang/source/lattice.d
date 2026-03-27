@@ -817,19 +817,8 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     // Those are covered by the depth-2 orbit entries above.
 
     // ---- Orbit-driven growth (all new orbits have size 12) ----
-    // Process frontier in two tiers: first all same-chirality continuations,
-    // then cross-chirality from new orbits.  This prevents child orbits'
-    // cross-chirality from advancing parent orbit members' chains.
-    OrbExt[] crossQueue;  // deferred cross-chirality entries
-
     int fIdx = 0;
-    while (fIdx < frontier.length || crossQueue.length > 0) {
-        // When the primary frontier is exhausted, swap in the cross queue
-        if (fIdx >= frontier.length && crossQueue.length > 0) {
-            frontier ~= crossQueue;
-            crossQueue.length = 0;
-        }
-        if (fIdx >= frontier.length) break;
+    while (fIdx < frontier.length) {
         auto fe = frontier[fIdx++];
         auto orb = &orbits[fe.orbitIdx];
         if (orb.size == 0) continue;
@@ -953,9 +942,8 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 
         if (newN > 0) {
             int newOrb = addOrbit(newIds[0 .. newN], newRots[0 .. newN], newN);
-            // Cross-chirality goes to deferred queue (processed after same-chirality)
-            crossQueue ~= OrbExt(newOrb, !isR, true);
-            crossQueue ~= OrbExt(newOrb, !isR, false);
+            frontier ~= OrbExt(newOrb, !isR, true);
+            frontier ~= OrbExt(newOrb, !isR, false);
         }
         if (!oom && newN > 0)
             frontier ~= OrbExt(fe.orbitIdx, isR, forward);
