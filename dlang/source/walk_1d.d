@@ -25,7 +25,8 @@ struct Walk1dParams {
     double mixPhi = 0.0;   // post-shift mixing angle
     int spiralType = 0;    // 0=R, 1=L
     int icType = 0;        // 0=(1,0,0,0), 1=(1,0,1,0)/√2, 2=P+/P- symmetric
-    double gauge2Phase = 0.0; // U(2) phase on row 2 of fwdBlock
+    double gauge2Phase = 0.0;  // phase on 2nd P+ basis vector in fwdBlock
+    double gauge2PhaseM = 0.0; // phase on 2nd P- basis vector in bwdBlock
 }
 
 Walk1dParams parseArgs1d(string[] args) {
@@ -40,6 +41,7 @@ Walk1dParams parseArgs1d(string[] args) {
     if (args.length > 8) p.spiralType = args[8].to!int;
     if (args.length > 9) p.icType = args[9].to!int;
     if (args.length > 10) p.gauge2Phase = args[10].to!double;
+    if (args.length > 11) p.gauge2PhaseM = args[11].to!double;
     return p;
 }
 
@@ -66,6 +68,7 @@ struct Chain1d {
     bool useCoin2, useCoin3;
     double mixPhi;
     double gauge2Phase;
+    double gauge2PhaseM;
 }
 
 /// Allocate all Chain1d arrays from a single GC buffer.
@@ -195,6 +198,63 @@ void ensureSite(Chain1d* ch, int i) {
                     }
                 }
             }
+
+            // Same for P- eigenbasis on bwdBlock: diag(1, e^{iψ_m}) within P-(τ)
+            if (ch.gauge2PhaseM != 0.0) {
+                double[4][2] bmRe = 0, bmIm = 0;
+                int nmFound = 0;
+                foreach (col; 0 .. 4) {
+                    if (nmFound >= 2) break;
+                    double[4] vRe = 0, vIm = 0;
+                    foreach (a; 0 .. 4) {
+                        vRe[a] = Pm.re[4*a+col];
+                        vIm[a] = Pm.im[4*a+col];
+                    }
+                    foreach (j; 0 .. nmFound) {
+                        double dRe = 0, dIm = 0;
+                        foreach (a; 0 .. 4) {
+                            dRe += bmRe[j][a] * vRe[a] + bmIm[j][a] * vIm[a];
+                            dIm += bmRe[j][a] * vIm[a] - bmIm[j][a] * vRe[a];
+                        }
+                        foreach (a; 0 .. 4) {
+                            vRe[a] -= dRe * bmRe[j][a] - dIm * bmIm[j][a];
+                            vIm[a] -= dRe * bmIm[j][a] + dIm * bmRe[j][a];
+                        }
+                    }
+                    double nm2 = 0;
+                    foreach (a; 0 .. 4) nm2 += vRe[a]*vRe[a] + vIm[a]*vIm[a];
+                    if (nm2 > 1e-10) {
+                        double inv = 1.0 / sqrt(nm2);
+                        foreach (a; 0 .. 4) {
+                            bmRe[nmFound][a] = inv * vRe[a];
+                            bmIm[nmFound][a] = inv * vIm[a];
+                        }
+                        nmFound++;
+                    }
+                }
+
+                if (nmFound >= 2) {
+                    double gc = cos(ch.gauge2PhaseM) - 1.0;
+                    double gs = sin(ch.gauge2PhaseM);
+                    foreach (a; 0 .. 4) {
+                        double dotRe = 0, dotIm = 0;
+                        foreach (b; 0 .. 4) {
+                            int ab = 4*a+b;
+                            dotRe += ch.ops[n].bwdBlock.re[ab] * bmRe[1][b]
+                                   + ch.ops[n].bwdBlock.im[ab] * bmIm[1][b];
+                            dotIm += ch.ops[n].bwdBlock.im[ab] * bmRe[1][b]
+                                   - ch.ops[n].bwdBlock.re[ab] * bmIm[1][b];
+                        }
+                        double cRe = gc * dotRe - gs * dotIm;
+                        double cIm = gc * dotIm + gs * dotRe;
+                        foreach (b; 0 .. 4) {
+                            int ab = 4*a+b;
+                            ch.ops[n].bwdBlock.re[ab] += cRe * bmRe[1][b] - cIm * bmIm[1][b];
+                            ch.ops[n].bwdBlock.im[ab] += cRe * bmIm[1][b] + cIm * bmRe[1][b];
+                        }
+                    }
+                }
+            }
         }
 
         // Coins
@@ -282,7 +342,7 @@ Mat4 buildVmix(Mat4 Pp, Mat4 Pm, double mixPhi) {
     foreach (col; 0 .. 4) {
         if (npFound >= 2 && nmFound >= 2) break;
         if (npFound < 2) {
-            double[4] vRe = void, vIm = void;
+            double[4] vRe = 0, vIm = 0;
             foreach (a; 0 .. 4) { vRe[a] = Pp.re[4*a+col]; vIm[a] = Pp.im[4*a+col]; }
             foreach (j; 0 .. npFound) {
                 double dRe = 0, dIm = 0;
@@ -304,7 +364,7 @@ Mat4 buildVmix(Mat4 Pp, Mat4 Pm, double mixPhi) {
             }
         }
         if (nmFound < 2) {
-            double[4] vRe = void, vIm = void;
+            double[4] vRe = 0, vIm = 0;
             foreach (a; 0 .. 4) { vRe[a] = Pm.re[4*a+col]; vIm[a] = Pm.im[4*a+col]; }
             foreach (j; 0 .. nmFound) {
                 double dRe = 0, dIm = 0;
@@ -375,6 +435,7 @@ void run1d(Walk1dParams p) {
     ch.coinType = p.coinType;
     ch.mixPhi = p.mixPhi;
     ch.gauge2Phase = p.gauge2Phase;
+    ch.gauge2PhaseM = p.gauge2PhaseM;
 
     // Initialize wavepacket centered at MAX_N/2
     int center = MAX_N / 2;

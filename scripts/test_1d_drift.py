@@ -108,7 +108,4 @@ def compute_score():
 
 if __name__ == '__main__':
     score = compute_score()
-    print(f"RMS ⟨x⟩ drift:    {score['rms_xmean']:.4f}")
-    print(f"Max |drift|:       {score['max_drift']:.4f}")
-    print(f"RMS density diff:  {score['rms_density']:.6f}")
-    print(f"L1 density diff:   {score['l1_density']:.4f}  (fraction of prob misplaced)")
+    print(f"L1 density diff:   {score['l1_density']:.4f}  (fraction of prob misplaced, baseline=0.148)")

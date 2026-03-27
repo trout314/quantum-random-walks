@@ -304,7 +304,7 @@ void applyVmix(bool hasCoin)(ref Lattice!hasCoin lat, bool isR, double mixPhi) {
         foreach (col; 0 .. 4) {
             if (npFound >= 2 && nmFound >= 2) break;
             if (npFound < 2) {
-                double[4] vRe = void, vIm = void;
+                double[4] vRe = 0, vIm = 0;
                 foreach (a; 0 .. 4) { vRe[a] = Pp.re[4*a+col]; vIm[a] = Pp.im[4*a+col]; }
                 foreach (j; 0 .. npFound) {
                     double dRe = 0, dIm = 0;
@@ -326,7 +326,7 @@ void applyVmix(bool hasCoin)(ref Lattice!hasCoin lat, bool isR, double mixPhi) {
                 }
             }
             if (nmFound < 2) {
-                double[4] vRe = void, vIm = void;
+                double[4] vRe = 0, vIm = 0;
                 foreach (a; 0 .. 4) { vRe[a] = Pm.re[4*a+col]; vIm[a] = Pm.im[4*a+col]; }
                 foreach (j; 0 .. nmFound) {
                     double dRe = 0, dIm = 0;

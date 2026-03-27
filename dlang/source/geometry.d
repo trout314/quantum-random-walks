@@ -109,7 +109,7 @@ Mat3 buildA4Rotation(const int[4] perm) {
         foreach (j; 0 .. 3) {
             double s = 0;
             foreach (k; 0 .. 4) {
-                double epi = void, ekj = void;
+                double epi = 0, ekj = 0;
                 final switch (i) {
                     case 0: epi = tetDirs[perm[k]].x; break;
                     case 1: epi = tetDirs[perm[k]].y; break;
