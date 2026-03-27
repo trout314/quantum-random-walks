@@ -27,6 +27,7 @@ struct Walk1dParams {
     int icType = 0;        // 0=(1,0,0,0), 1=(1,0,1,0)/√2, 2=P+/P- symmetric
     double gauge2Phase = 0.0;  // phase on 2nd P+ basis vector in fwdBlock
     double gauge2PhaseM = 0.0; // phase on 2nd P- basis vector in bwdBlock
+    double gaugeMixTheta = 0.0; // mixing angle between P+ basis vectors
 }
 
 Walk1dParams parseArgs1d(string[] args) {
@@ -42,6 +43,7 @@ Walk1dParams parseArgs1d(string[] args) {
     if (args.length > 9) p.icType = args[9].to!int;
     if (args.length > 10) p.gauge2Phase = args[10].to!double;
     if (args.length > 11) p.gauge2PhaseM = args[11].to!double;
+    if (args.length > 12) p.gaugeMixTheta = args[12].to!double;
     return p;
 }
 
@@ -69,6 +71,7 @@ struct Chain1d {
     double mixPhi;
     double gauge2Phase;
     double gauge2PhaseM;
+    double gaugeMixTheta;
 }
 
 /// Allocate all Chain1d arrays from a single GC buffer.
@@ -140,7 +143,7 @@ void ensureSite(Chain1d* ch, int i) {
             // gauge between P+ and FT: fwdBlock_new = FT · G · P+
             // where G = |b1><b1| + e^{iψ}|b2><b2| within P+(τ_prev).
             // Equivalently: fwdBlock_new = fwdBlock · (I + (e^{iψ}-1)|b2><b2|)
-            if (ch.gauge2Phase != 0.0) {
+            if (ch.gauge2Phase != 0.0 || ch.gaugeMixTheta != 0.0) {
                 // Gram-Schmidt basis for P+(tau_prev)
                 // bRe[j][a], bIm[j][a]: j=basis index, a=spinor component
                 double[4][2] bRe = 0, bIm = 0;
@@ -175,8 +178,23 @@ void ensureSite(Chain1d* ch, int i) {
                     }
                 }
 
+                // Optional mixing rotation: rotate (b1, b2) by angle theta
+                if (nFound >= 2 && ch.gaugeMixTheta != 0.0) {
+                    double ct = cos(ch.gaugeMixTheta);
+                    double st = sin(ch.gaugeMixTheta);
+                    foreach (a; 0 .. 4) {
+                        // b1' = ct*b1 + st*b2,  b2' = -st*b1 + ct*b2
+                        double r1 = bRe[0][a], i1 = bIm[0][a];
+                        double r2 = bRe[1][a], i2 = bIm[1][a];
+                        bRe[0][a] = ct * r1 + st * r2;
+                        bIm[0][a] = ct * i1 + st * i2;
+                        bRe[1][a] = -st * r1 + ct * r2;
+                        bIm[1][a] = -st * i1 + ct * i2;
+                    }
+                }
+
                 // Multiply fwdBlock from right by (I + (e^{i psi}-1)|b2><b2|)
-                if (nFound >= 2) {
+                if (nFound >= 2 && ch.gauge2Phase != 0.0) {
                     double gc = cos(ch.gauge2Phase) - 1.0;
                     double gs = sin(ch.gauge2Phase);
                     foreach (a; 0 .. 4) {
@@ -436,6 +454,7 @@ void run1d(Walk1dParams p) {
     ch.mixPhi = p.mixPhi;
     ch.gauge2Phase = p.gauge2Phase;
     ch.gauge2PhaseM = p.gauge2PhaseM;
+    ch.gaugeMixTheta = p.gaugeMixTheta;
 
     // Initialize wavepacket centered at MAX_N/2
     int center = MAX_N / 2;
