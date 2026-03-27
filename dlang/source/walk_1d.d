@@ -25,6 +25,7 @@ struct Walk1dParams {
     double mixPhi = 0.0;   // post-shift mixing angle
     int spiralType = 0;    // 0=R, 1=L
     int icType = 0;        // 0=(1,0,0,0), 1=(1,0,1,0)/√2, 2=P+/P- symmetric
+    double gauge2Phase = 0.0; // U(2) phase on row 2 of fwdBlock
 }
 
 Walk1dParams parseArgs1d(string[] args) {
@@ -38,6 +39,7 @@ Walk1dParams parseArgs1d(string[] args) {
     if (args.length > 7) p.mixPhi = args[7].to!double;
     if (args.length > 8) p.spiralType = args[8].to!int;
     if (args.length > 9) p.icType = args[9].to!int;
+    if (args.length > 10) p.gauge2Phase = args[10].to!double;
     return p;
 }
 
@@ -63,6 +65,7 @@ struct Chain1d {
     int coinType;
     bool useCoin2, useCoin3;
     double mixPhi;
+    double gauge2Phase;
 }
 
 /// Allocate all Chain1d arrays from a single GC buffer.
@@ -128,6 +131,70 @@ void ensureSite(Chain1d* ch, int i) {
             ch.ops[n].bwdBlock = mul(frameTransport(tau, tauPrev), Pm);
             Mat4 PpPrev = projPlus(tauPrev);
             ch.ops[n-1].fwdBlock = mul(frameTransport(tauPrev, tau), PpPrev);
+
+            // U(2) gauge: apply diag(1, e^{iψ}) within P+ eigenbasis on fwdBlock.
+            // fwdBlock = FT · P+ acts from the right on ψ, so we insert the
+            // gauge between P+ and FT: fwdBlock_new = FT · G · P+
+            // where G = |b1><b1| + e^{iψ}|b2><b2| within P+(τ_prev).
+            // Equivalently: fwdBlock_new = fwdBlock · (I + (e^{iψ}-1)|b2><b2|)
+            if (ch.gauge2Phase != 0.0) {
+                // Gram-Schmidt basis for P+(tau_prev)
+                // bRe[j][a], bIm[j][a]: j=basis index, a=spinor component
+                double[4][2] bRe = 0, bIm = 0;
+                int nFound = 0;
+                foreach (col; 0 .. 4) {
+                    if (nFound >= 2) break;
+                    double[4] vRe = 0, vIm = 0;
+                    foreach (a; 0 .. 4) {
+                        vRe[a] = PpPrev.re[4*a+col];
+                        vIm[a] = PpPrev.im[4*a+col];
+                    }
+                    foreach (j; 0 .. nFound) {
+                        double dRe = 0, dIm = 0;
+                        foreach (a; 0 .. 4) {
+                            dRe += bRe[j][a] * vRe[a] + bIm[j][a] * vIm[a];
+                            dIm += bRe[j][a] * vIm[a] - bIm[j][a] * vRe[a];
+                        }
+                        foreach (a; 0 .. 4) {
+                            vRe[a] -= dRe * bRe[j][a] - dIm * bIm[j][a];
+                            vIm[a] -= dRe * bIm[j][a] + dIm * bRe[j][a];
+                        }
+                    }
+                    double nm2 = 0;
+                    foreach (a; 0 .. 4) nm2 += vRe[a]*vRe[a] + vIm[a]*vIm[a];
+                    if (nm2 > 1e-10) {
+                        double inv = 1.0 / sqrt(nm2);
+                        foreach (a; 0 .. 4) {
+                            bRe[nFound][a] = inv * vRe[a];
+                            bIm[nFound][a] = inv * vIm[a];
+                        }
+                        nFound++;
+                    }
+                }
+
+                // Multiply fwdBlock from right by (I + (e^{i psi}-1)|b2><b2|)
+                if (nFound >= 2) {
+                    double gc = cos(ch.gauge2Phase) - 1.0;
+                    double gs = sin(ch.gauge2Phase);
+                    foreach (a; 0 .. 4) {
+                        double dotRe = 0, dotIm = 0;
+                        foreach (b; 0 .. 4) {
+                            int ab = 4*a+b;
+                            dotRe += ch.ops[n-1].fwdBlock.re[ab] * bRe[1][b]
+                                   + ch.ops[n-1].fwdBlock.im[ab] * bIm[1][b];
+                            dotIm += ch.ops[n-1].fwdBlock.im[ab] * bRe[1][b]
+                                   - ch.ops[n-1].fwdBlock.re[ab] * bIm[1][b];
+                        }
+                        double cRe = gc * dotRe - gs * dotIm;
+                        double cIm = gc * dotIm + gs * dotRe;
+                        foreach (b; 0 .. 4) {
+                            int ab = 4*a+b;
+                            ch.ops[n-1].fwdBlock.re[ab] += cRe * bRe[1][b] - cIm * bIm[1][b];
+                            ch.ops[n-1].fwdBlock.im[ab] += cRe * bIm[1][b] + cIm * bRe[1][b];
+                        }
+                    }
+                }
+            }
         }
 
         // Coins
@@ -294,7 +361,7 @@ void run1d(Walk1dParams p) {
     double ct = cos(p.theta), st = sin(p.theta);
 
     int[4] pat = p.spiralType == 1
-        ? [0, 1, 2, 3]   // L helix
+        ? [0, 2, 1, 3]   // L helix (perpendicular to R)
         : [1, 3, 0, 2];  // R helix
 
     stderr.writefln("=== walk_1d_d: theta=%.3f sigma=%.1f steps=%d coin=%d k0=%.4f spiral=%s ic=%d ===",
@@ -307,6 +374,7 @@ void run1d(Walk1dParams p) {
     ch.st = st;
     ch.coinType = p.coinType;
     ch.mixPhi = p.mixPhi;
+    ch.gauge2Phase = p.gauge2Phase;
 
     // Initialize wavepacket centered at MAX_N/2
     int center = MAX_N / 2;
