@@ -38,7 +38,17 @@ enum bool IS_L = false;
 
 /// BC helix face patterns.
 immutable int[4] PAT_R = [1, 3, 0, 2];
-immutable int[4] PAT_L = [0, 1, 2, 3];
+immutable int[4] PAT_L = [0, 2, 1, 3];
+
+/// Perpendicularity mapping: given an R-chain face, return the L-chain face
+/// that ensures disjoint face pairs (each walker step on exactly one chain).
+/// R pair {rFace, prevFace(PAT_R, rFace)} and L pair {lFace, prevFace(PAT_L, lFace)}
+/// must partition all 4 faces.
+int perpFace(bool fromR, int face) {
+    // Mapping: 0↔1, 2↔3
+    immutable int[4] map = [1, 0, 3, 2];
+    return map[face];
+}
 
 /// Tolerance for detecting degenerate cross products (near-parallel vectors).
 enum double DEGEN_TOL = 1e-10;
@@ -584,7 +594,16 @@ private struct ChainSeed { int siteId; bool isR; }
 /// If face >= 0, use that face; otherwise default to pat[0].
 private int makeChain(bool hasCoin)(ref Lattice!hasCoin lat, int rootSite, bool isR, int face = -1) {
     const int[4] pat = isR ? PAT_R : PAT_L;
-    lat.setChainFace(rootSite, isR, face >= 0 ? face : pat[0]);
+    if (face < 0) {
+        // If the site already has the other chirality's chain, use the
+        // perpendicularity mapping to determine this chain's starting face.
+        int otherFace = lat.chainFace(rootSite, !isR);
+        if (otherFace >= 0)
+            face = perpFace(!isR, otherFace);
+        else
+            face = pat[0];
+    }
+    lat.setChainFace(rootSite, isR, face);
 
     int chainId = cast(int) lat.chains.length;
     Chain!hasCoin newChain;
@@ -657,9 +676,14 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
             helixStep(p, d, stepFace);
             int nbFace = forward ? nextFace(pat, curFace) : stepFace;
             Vec3[4] dd = d; reorth(dd);
-            int nb = lat.allocSite(p, dd);
+
+            // Check if a site already exists here (shared walker edge)
+            int nb = grid.findSiteNear(p, mateTol);
+            if (nb < 0) {
+                nb = lat.allocSite(p, dd);
+                grid.add(p, nb);
+            }
             lat.setChainFace(nb, isR, nbFace);
-            grid.add(p, nb);
             if (forward) lat.chainAppend(chainId, nb);
             else         lat.chainPrepend(chainId, nb);
             curFace = nbFace;

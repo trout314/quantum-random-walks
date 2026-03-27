@@ -44,6 +44,12 @@ void checkA4Symmetry(bool hasCoin)(ref Lattice!hasCoin lat, ref ProximityGrid gr
         }
     }
 
+    // Dump first 17 sites for bootstrap verification
+    stderr.writefln("\n--- Bootstrap sites ---");
+    foreach (s; 0 .. (ns < 20 ? ns : 20))
+        stderr.writefln("  site %2d depth=%d pos=(%.6f, %.6f, %.6f)", s, depth[s],
+            lat.sites[s].pos.x, lat.sites[s].pos.y, lat.sites[s].pos.z);
+
     // Check symmetry at each depth
     stderr.writefln("\n--- A4 symmetry diagnostic (tol=%.4f) ---", tol);
     stderr.writefln("# depth  sites  symmetric  broken  frac_sym");
@@ -68,6 +74,20 @@ void checkA4Symmetry(bool hasCoin)(ref Lattice!hasCoin lat, ref ProximityGrid gr
                 int found = grid.findSiteNear(rp, tol);
                 if (found < 0) {
                     allFound = false;
+                    if (d <= 3) {
+                        // Try with a larger tolerance to see if there's a nearby site
+                        int found2 = grid.findSiteNear(rp, tol * 4);
+                        if (found2 >= 0) {
+                            import geometry : norm;
+                            Vec3 fp = lat.sites[found2].pos;
+                            Vec3 dv = Vec3(rp.x-fp.x, rp.y-fp.y, rp.z-fp.z);
+                            stderr.writefln("    MISS depth=%d site=%d ri=%d dist=%.6f (found=%d at wider tol)",
+                                d, s, ri, norm(dv), found2);
+                        } else {
+                            stderr.writefln("    MISS depth=%d site=%d ri=%d target=(%.4f,%.4f,%.4f) NO SITE NEARBY",
+                                d, s, ri, rp.x, rp.y, rp.z);
+                        }
+                    }
                     break;
                 }
             }
