@@ -806,147 +806,144 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     }
 
     // ==== Orbit-driven frontier ====
-    struct OrbExt { int orbitIdx; bool isR; bool forward; }
-    OrbExt[] frontier;
-    // Start extending from the depth-2 orbit (orbit index 2)
-    frontier ~= OrbExt(2, IS_R, true);
-    frontier ~= OrbExt(2, IS_R, false);
-    frontier ~= OrbExt(2, IS_L, true);
-    frontier ~= OrbExt(2, IS_L, false);
-    // Also continue origin's chains and depth-1 cross-chains (all at depth-2 ends)
-    // Those are covered by the depth-2 orbit entries above.
+    // Each entry is just an orbit index.  Processing one entry tries all 4
+    // primary directions (R-fwd, R-bwd, L-fwd, L-bwd) and for each viable
+    // direction extends ALL orbit members atomically.  Each member finds its
+    // own matching chain edge via 4-way search.
+    int[] frontier;
+    frontier ~= 2;  // depth-2 orbit
 
     // ---- Orbit-driven growth (all new orbits have size 12) ----
     int fIdx = 0;
     while (fIdx < frontier.length) {
-        auto fe = frontier[fIdx++];
-        auto orb = &orbits[fe.orbitIdx];
+        int orbIdx = frontier[fIdx++];
+        auto orb = &orbits[orbIdx];
         if (orb.size == 0) continue;
-        bool isR = fe.isR;
-        bool forward = fe.forward;
-        const int[4] pat = isR ? PAT_R : PAT_L;
 
         int x0 = orb.members[0].siteId;
-        if (lat.chainFace(x0, isR) < 0) { makeChain!hasCoin(lat, x0, isR); nChains++; }
-        int x0Ch = isR ? lat.sites[x0].rChain : lat.sites[x0].lChain;
-        auto ch0 = &lat.chains[x0Ch];
-        int x0End = forward ? ch0.ops[ch0.ops.length - 1].siteId
-                            : ch0.ops[0].siteId;
-        if (x0End != x0) continue;
-
-        int curFace = lat.chainFace(x0, isR);
-        Vec3 p = lat.sites[x0].pos;
-        Vec3[4] d = lat.sites[x0].dirs;
-        int stepFace = forward ? curFace : prevFace(pat, curFace);
-        helixStep(p, d, stepFace);
-
-        if (exp(-dot(p, p) / (2 * sigma * sigma)) < seedThresh) continue;
-        if (grid.isTooClose(p)) continue;
-        if (isRamLow()) continue;
-
-        int nbFace = forward ? nextFace(pat, curFace) : stepFace;
-        Vec3[4] dd = d;
-        reorth(dd);
-
         int rj = orb.members[0].rotIdx;
-        Vec3 canP = a4rots[rj].applyTranspose(p);
-        Vec3[4] canD;
-        foreach (fi; 0 .. 4) canD[fi] = a4rots[rj].applyTranspose(dd[fi]);
 
-        int[12] newIds;  int[12] newRots;  int newN = 0;
-        bool oom = false;
-        int dbgClose = 0, dbgNotEnd = 0;
+        // Ensure primary has both chains
+        if (lat.chainFace(x0, IS_R) < 0) { makeChain!hasCoin(lat, x0, IS_R); nChains++; }
+        if (lat.chainFace(x0, IS_L) < 0) { makeChain!hasCoin(lat, x0, IS_L); nChains++; }
 
-        foreach (mi; 0 .. orb.size) {
-            int xi = orb.members[mi].siteId;
-            int ri = orb.members[mi].rotIdx;
-            Vec3 yiP = a4rots[ri].apply(canP);
+        bool anyExtended = false;
 
-            if (grid.isTooClose(yiP)) { dbgClose++; continue; }
+        // Try all 4 directions from the primary
+        foreach (tryR; [true, false]) {
+            foreach (tryFwd; [true, false]) {
+                const int[4] pat = tryR ? PAT_R : PAT_L;
+                int x0Ch = tryR ? lat.sites[x0].rChain : lat.sites[x0].lChain;
+                auto ch0 = &lat.chains[x0Ch];
+                int x0End = tryFwd ? ch0.ops[ch0.ops.length - 1].siteId
+                                   : ch0.ops[0].siteId;
+                if (x0End != x0) continue;  // not at this chain end
 
-            // Ensure X_i has both chirality chains
-            if (lat.chainFace(xi, IS_R) < 0) { makeChain!hasCoin(lat, xi, IS_R); nChains++; }
-            if (lat.chainFace(xi, IS_L) < 0) { makeChain!hasCoin(lat, xi, IS_L); nChains++; }
+                int curFace = lat.chainFace(x0, tryR);
+                Vec3 p = lat.sites[x0].pos;
+                Vec3[4] d = lat.sites[x0].dirs;
+                int stepFace = tryFwd ? curFace : prevFace(pat, curFace);
+                helixStep(p, d, stepFace);
 
-            // Try all 4 chain edges from X_i, pick closest to Y_i
-            bool bestIsR = isR, bestFwd = forward;
-            double bestDist = double.max;
-            int bestChain = -1;
+                if (exp(-dot(p, p) / (2 * sigma * sigma)) < seedThresh) continue;
+                if (grid.isTooClose(p)) continue;
+                if (isRamLow()) continue;
 
-            if (mi == 0) {
-                bestIsR = isR;
-                bestFwd = forward;
-                bestChain = isR ? lat.sites[xi].rChain : lat.sites[xi].lChain;
-                bestDist = 0;
-            } else {
-                Vec3 xiPos = lat.sites[xi].pos;
-                foreach (tryR; [true, false]) {
-                    int xiFace = lat.chainFace(xi, tryR);
-                    const int[4] tryPat = tryR ? PAT_R : PAT_L;
-                    Vec3[4] xiD = lat.sites[xi].dirs;
+                Vec3[4] dd = d;
+                reorth(dd);
 
-                    // Forward
-                    Vec3 fP = xiPos; Vec3[4] fD = xiD;
-                    helixStep(fP, fD, xiFace);
-                    Vec3 df = fP - yiP;
-                    double dF = dot(df, df);
-                    if (dF < bestDist) {
-                        bestDist = dF; bestIsR = tryR; bestFwd = true;
-                        bestChain = tryR ? lat.sites[xi].rChain : lat.sites[xi].lChain;
+                // Canonical child position
+                Vec3 canP = a4rots[rj].applyTranspose(p);
+                Vec3[4] canD;
+                foreach (fi; 0 .. 4) canD[fi] = a4rots[rj].applyTranspose(dd[fi]);
+
+                // Extend all orbit members
+                int[12] newIds;  int[12] newRots;  int newN = 0;
+                bool oom = false;
+
+                foreach (mi; 0 .. orb.size) {
+                    int xi = orb.members[mi].siteId;
+                    int ri = orb.members[mi].rotIdx;
+                    Vec3 yiP = a4rots[ri].apply(canP);
+
+                    if (grid.isTooClose(yiP)) continue;
+
+                    // Ensure X_i has both chains
+                    if (lat.chainFace(xi, IS_R) < 0) { makeChain!hasCoin(lat, xi, IS_R); nChains++; }
+                    if (lat.chainFace(xi, IS_L) < 0) { makeChain!hasCoin(lat, xi, IS_L); nChains++; }
+
+                    // Find best of 4 chain edges
+                    bool bestIsR, bestFwd;
+                    double bestDist = double.max;
+                    int bestChain = -1;
+
+                    Vec3 xiPos = lat.sites[xi].pos;
+                    foreach (eR; [true, false]) {
+                        int xiFace = lat.chainFace(xi, eR);
+                        const int[4] ePat = eR ? PAT_R : PAT_L;
+                        Vec3[4] xiD = lat.sites[xi].dirs;
+
+                        Vec3 fP = xiPos; Vec3[4] fD = xiD;
+                        helixStep(fP, fD, xiFace);
+                        Vec3 df = fP - yiP;
+                        double dF = dot(df, df);
+                        if (dF < bestDist) {
+                            bestDist = dF; bestIsR = eR; bestFwd = true;
+                            bestChain = eR ? lat.sites[xi].rChain : lat.sites[xi].lChain;
+                        }
+
+                        Vec3 bP = xiPos; Vec3[4] bD = xiD;
+                        helixStep(bP, bD, prevFace(ePat, xiFace));
+                        Vec3 db = bP - yiP;
+                        double dB = dot(db, db);
+                        if (dB < bestDist) {
+                            bestDist = dB; bestIsR = eR; bestFwd = false;
+                            bestChain = eR ? lat.sites[xi].rChain : lat.sites[xi].lChain;
+                        }
                     }
 
-                    // Backward
-                    Vec3 bP = xiPos; Vec3[4] bD = xiD;
-                    helixStep(bP, bD, prevFace(tryPat, xiFace));
-                    Vec3 db = bP - yiP;
-                    double dB = dot(db, db);
-                    if (dB < bestDist) {
-                        bestDist = dB; bestIsR = tryR; bestFwd = false;
-                        bestChain = tryR ? lat.sites[xi].rChain : lat.sites[xi].lChain;
+                    // Check at chain end
+                    auto xch = &lat.chains[bestChain];
+                    int xiEnd = bestFwd ? xch.ops[xch.ops.length - 1].siteId
+                                       : xch.ops[0].siteId;
+                    if (xiEnd != xi) continue;
+
+                    // Create Y_i
+                    Vec3[4] yiD;
+                    foreach (fi; 0 .. 4) yiD[fi] = a4rots[ri].apply(canD[fi]);
+                    int yi = lat.allocSite(yiP, yiD);
+                    if (yi < 0) { oom = true; break; }
+
+                    const int[4] bestPat = bestIsR ? PAT_R : PAT_L;
+                    int xiFace2 = lat.chainFace(xi, bestIsR);
+                    int yiFace = bestFwd ? nextFace(bestPat, xiFace2)
+                                        : prevFace(bestPat, xiFace2);
+                    lat.setChainFace(yi, bestIsR, yiFace);
+                    grid.add(yiP, yi);
+                    if (bestFwd) lat.chainAppend(bestChain, yi);
+                    else         lat.chainPrepend(bestChain, yi);
+
+                    if (lat.chainFace(yi, !bestIsR) < 0) {
+                        makeChain!hasCoin(lat, yi, !bestIsR);
+                        nChains++;
                     }
+
+                    newIds[newN] = yi;
+                    newRots[newN] = ri;
+                    newN++;
+                }
+
+                if (newN > 0) {
+                    int newOrb = addOrbit(newIds[0 .. newN], newRots[0 .. newN], newN);
+                    frontier ~= newOrb;
+                    anyExtended = true;
                 }
             }
-
-            // Check X_i is at chain end for the chosen edge
-            auto xch = &lat.chains[bestChain];
-            int xiEnd = bestFwd ? xch.ops[xch.ops.length - 1].siteId
-                                : xch.ops[0].siteId;
-            if (xiEnd != xi) { dbgNotEnd++; continue; }
-
-            Vec3[4] yiD;
-            foreach (fi; 0 .. 4) yiD[fi] = a4rots[ri].apply(canD[fi]);
-            int yi = lat.allocSite(yiP, yiD);
-            if (yi < 0) { oom = true; break; }
-
-            const int[4] bestPat = bestIsR ? PAT_R : PAT_L;
-            int xiFace2 = lat.chainFace(xi, bestIsR);
-            int yiFace = bestFwd ? nextFace(bestPat, xiFace2) : prevFace(bestPat, xiFace2);
-            lat.setChainFace(yi, bestIsR, yiFace);
-            grid.add(yiP, yi);
-            if (bestFwd) lat.chainAppend(bestChain, yi);
-            else         lat.chainPrepend(bestChain, yi);
-
-            // Ensure Y_i has both chirality chains
-            if (lat.chainFace(yi, !bestIsR) < 0) { makeChain!hasCoin(lat, yi, !bestIsR); nChains++; }
-
-            newIds[newN] = yi;
-            newRots[newN] = ri;
-            newN++;
         }
 
-        import std.stdio : stderr;
-        if (newN > 0 && newN < orb.size && fIdx < 50)
-            stderr.writefln("  orbit %d size %d → new %d (close=%d notEnd=%d) %s %s",
-                fe.orbitIdx, orb.size, newN, dbgClose, dbgNotEnd,
-                isR ? "R" : "L", forward ? "fwd" : "bwd");
-
-        if (newN > 0) {
-            int newOrb = addOrbit(newIds[0 .. newN], newRots[0 .. newN], newN);
-            frontier ~= OrbExt(newOrb, !isR, true);
-            frontier ~= OrbExt(newOrb, !isR, false);
-        }
-        if (!oom && newN > 0)
-            frontier ~= OrbExt(fe.orbitIdx, isR, forward);
+        // Re-queue this orbit if any direction succeeded (may have more to extend)
+        if (anyExtended)
+            frontier ~= orbIdx;
     }
 
     // Reserve extra capacity for runtime chain extension
