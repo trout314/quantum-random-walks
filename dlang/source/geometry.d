@@ -259,9 +259,12 @@ Vec3[4] helixVertexDirs(int n) {
 /// Stores the rotation from the standard frame to the chain's local frame,
 /// plus the starting position and chirality sign.
 struct ChainOrigin {
-    Mat3 rot;       /// rotation from standard frame to chain frame
-    Vec3 pos0;      /// position of chain's first centroid
-    double tSign;   /// +1 for R-helix, -1 for L-helix
+    Mat3 rot;         /// rotation from standard frame to chain frame
+    Vec3 pos0;        /// position of chain's first centroid
+    double tSign;     /// +1 for R-helix, -1 for L-helix
+    int[4] slotPerm;  /// walk_slot[i] = formula_vertex_offset slotPerm[i] at root
+    int[4] facePat;   /// face pattern [1,3,0,2] for R or [0,2,1,3] for L
+    int faceOffset;   /// root site's position in the face pattern cycle
 }
 
 /// Compute the chain origin from a site's position, directions, and chirality.
@@ -273,17 +276,34 @@ ChainOrigin computeChainOrigin(Vec3 pos, Vec3[4] dirs, int face, bool isR) {
     origin.pos0 = pos;
     origin.tSign = isR ? 1.0 : -1.0;
 
-    // The standard helix exit direction at site 0
-    Vec3 stdExit = helixExitDir(0);
-
-    // The chain's exit direction (the face direction at the root site)
-    Vec3 chainExit = dirs[face];
-    double cn = norm(chainExit);
-    if (cn > NORM_TOL) chainExit = chainExit * (1.0 / cn);
-
-    // Build rotation using Kabsch on all 4 vertex directions.
-    // Standard dirs at site 0:
-    Vec3[4] stdDirs = helixVertexDirs(0);
+    // Compute standard reference directions for this chirality.
+    // For R-helix, use helixVertexDirs(0). For L-helix, compute with -θ.
+    Vec3[4] stdDirs;
+    {
+        // Build a temporary origin for the standard frame at the correct chirality
+        ChainOrigin tmpOrigin;
+        tmpOrigin.rot = Mat3.init;  // identity
+        tmpOrigin.pos0 = Vec3(0, 0, 0);
+        tmpOrigin.tSign = isR ? 1.0 : -1.0;
+        // Use aligned standard centroid as reference
+        Vec3 c0 = Vec3(0, 0, 0);
+        foreach (k; 0 .. 4)
+            c0 = c0 + alignToWalkFrame(Vec3(
+                R_VERTEX * cos(cast(double)(k) * THETA_BC * tmpOrigin.tSign),
+                R_VERTEX * sin(cast(double)(k) * THETA_BC * tmpOrigin.tSign),
+                cast(double)(k) * H_VERTEX));
+        c0 = c0 * 0.25;
+        foreach (k; 0 .. 4) {
+            Vec3 vf = Vec3(
+                R_VERTEX * cos(cast(double)(k) * THETA_BC * tmpOrigin.tSign),
+                R_VERTEX * sin(cast(double)(k) * THETA_BC * tmpOrigin.tSign),
+                cast(double)(k) * H_VERTEX);
+            Vec3 vStd = alignToWalkFrame(vf);
+            Vec3 d = vStd - c0;
+            double nrm = norm(d);
+            if (nrm > NORM_TOL) stdDirs[k] = d * (1.0 / nrm);
+        }
+    }
 
     // Chain dirs (already unit vectors in dirs[])
     // We need to find the permutation + rotation that maps stdDirs → dirs.
@@ -387,6 +407,30 @@ ChainOrigin computeChainOrigin(Vec3 pos, Vec3[4] dirs, int face, bool isR) {
     }
 
     origin.rot = bestR;
+
+    // Determine the slot permutation: slotPerm[walk_slot] = formula_vertex_offset.
+    // At the root, walk slot i has the direction that best matches R · stdDirs[k]
+    // for some k. We find k for each i.
+    foreach (i; 0 .. 4) {
+        Vec3 target = dirs[i];  // walk slot i direction
+        double bestDot2 = -2;
+        int bestK = 0;
+        foreach (k; 0 .. 4) {
+            Vec3 mapped = bestR.apply(stdDirs[k]);
+            double d2 = dot(mapped, target);
+            if (d2 > bestDot2) { bestDot2 = d2; bestK = k; }
+        }
+        origin.slotPerm[i] = bestK;  // walk slot i = formula vertex bestK
+    }
+
+    // Store face pattern and root face offset
+    immutable int[4] patR = [1, 3, 0, 2];
+    immutable int[4] patL = [0, 2, 1, 3];
+    origin.facePat = isR ? patR : patL;
+    // Find where the root face sits in the pattern cycle
+    origin.faceOffset = 0;
+    foreach (i; 0 .. 4)
+        if (origin.facePat[i] == face) { origin.faceOffset = i; break; }
     return origin;
 }
 
@@ -441,15 +485,41 @@ Vec3 chainExitDir(const ChainOrigin* origin, int n) {
 }
 
 /// All 4 vertex directions at chain index n for a chain with given origin.
+/// The exit direction (dropped vertex = formula vertex n) is placed in the
+/// walk slot determined by the face pattern. The other 3 directions fill
+/// the remaining slots. This ensures dirs[face] gives the correct exit
+/// direction for τ computation.
 Vec3[4] chainVertexDirs(const ChainOrigin* origin, int n) {
     Vec3 c = chainCentroid(origin, n);
-    Vec3[4] dirs;
+
+    // Compute all 4 formula-ordered directions (k=0 is the exit vertex)
+    Vec3[4] formulaDirs;
     foreach (k; 0 .. 4) {
         Vec3 d = chainHelixVertex(origin, n + k) - c;
         double nrm = norm(d);
         if (nrm > NORM_TOL)
-            dirs[k] = d * (1.0 / nrm);
+            formulaDirs[k] = d * (1.0 / nrm);
     }
+
+    // The exit direction is formulaDirs[0] (dropped vertex = formula vertex n).
+    // It must go into walk slot = facePat[n % 4] (the face used at chain index n).
+    // The face at chain index n cycles through facePat starting at faceOffset
+    int patIdx = ((n + origin.faceOffset) % 4 + 4) % 4;  // safe modulo for negative n
+    int exitSlot = origin.facePat[patIdx];
+
+    Vec3[4] dirs;
+    dirs[exitSlot] = formulaDirs[0];
+
+    // Fill remaining 3 slots with the other 3 directions.
+    // The exact assignment doesn't matter for τ (only the exit dir is used).
+    // For coin computation, we need valid tetrahedral directions — any order works
+    // since the coin uses perpendicular vectors to the exit direction.
+    int fi = 1;
+    foreach (slot; 0 .. 4) {
+        if (slot == exitSlot) continue;
+        dirs[slot] = formulaDirs[fi++];
+    }
+
     return dirs;
 }
 

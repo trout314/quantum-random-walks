@@ -11,7 +11,7 @@
 module lattice;
 
 import std.math : sqrt, exp, fabs, cos, sin;
-import geometry : Vec3, Mat3, dot, norm, helixStep, reorth, initTet, REORTH_INTERVAL, buildAllA4Rotations,
+import geometry : Vec3, Mat3, dot, norm, initTet, helixStep, reorth, STEP_LEN, buildAllA4Rotations,
     ChainOrigin, computeChainOrigin, chainCentroid, chainExitDir, chainVertexDirs;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, alpha;
 import core.sys.linux.sys.sysinfo : sysinfo, sysinfo_;
@@ -672,6 +672,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     }
 
     // Helper: extend a chain by n steps, return array of new site IDs.
+    // TEMPORARY: uses helixStep for bootstrap, will convert to analytic later.
     int[] extendN(int chainId, bool forward, int n) {
         int[] result;
         auto ch = &lat.chains[chainId];
@@ -688,14 +689,11 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
             int nbFace = forward ? nextFace(pat, curFace) : stepFace;
             Vec3[4] dd = d; reorth(dd);
 
-            // Check if a site already exists here (shared walker edge)
             int nb = grid.findSiteNear(p, mateTol);
             if (nb < 0) {
                 nb = lat.allocSite(p, dd);
                 grid.add(p, nb);
             }
-            // Only add to this chain if the site isn't already on a chain
-            // for this chirality (shared walker edges are on one chain only).
             if (lat.chainFace(nb, isR) < 0) {
                 lat.setChainFace(nb, isR, nbFace);
                 if (forward) lat.chainAppend(chainId, nb);
@@ -703,7 +701,6 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
             }
             curFace = nbFace;
             result ~= nb;
-            ch = &lat.chains[chainId];  // refresh after potential realloc
         }
         return result;
     }
@@ -815,8 +812,6 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
             Vec3 predP = yiP;
             Vec3[4] predD = yiD;
             helixStep(predP, predD, face);
-            // Stepping FROM yi through face gives predecessor position
-            // (helixStep is its own inverse through the same face).
 
             int pred = grid.findSiteNear(predP, mateTol);
             if (pred < 0 || pred == yi) continue;

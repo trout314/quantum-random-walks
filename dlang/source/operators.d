@@ -7,7 +7,7 @@
 module operators;
 
 import std.math : sqrt, fabs, cos, sin, exp;
-import geometry : Vec3, dot, norm, helixStep, reorth, chainCentroid, chainVertexDirs;
+import geometry : Vec3, dot, norm, chainCentroid, chainVertexDirs;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, matVecSplit, alpha;
 import lattice : Lattice, nextFace, prevFace, PAT_R, PAT_L, IS_R, IS_L, isRamLow;
 
