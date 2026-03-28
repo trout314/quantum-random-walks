@@ -64,32 +64,24 @@ def build_helix_taus(N, pattern=None):
     """
     Compute the τ operators at each site along a BC helix of N sites.
 
+    Delegates to helix_geometry.build_taus which uses the analytic vertex
+    formula — no sequential reflections, no accumulated numerical error.
+
     Parameters
     ----------
     N : int
         Number of sites.
     pattern : list of int, optional
-        Face-exit pattern. Defaults to BC_HELIX_R.
+        Kept for API compatibility (ignored).
 
     Returns
     -------
     tau_list : list of ndarray (4×4)
         τ operator at each site.
     """
-    if pattern is None:
-        pattern = BC_HELIX_R
-    # Use exact sympy arithmetic for direction reflections to avoid
-    # accumulated floating-point error, then convert to float for τ.
-    from src.tetrahedron import vertices as sym_verts, reflect_directions
-    dirs = list(sym_verts)
-    tau_list = []
-    for n in range(N):
-        a_n = pattern[n % len(pattern)]
-        d = dirs[a_n]
-        d_float = np.array([float(d[i]) for i in range(3)])
-        tau_list.append(make_tau_from_dir(d_float))
-        dirs = reflect_directions(dirs, a_n)
-    return tau_list
+    from src.helix_geometry import build_taus
+    taus_arr = build_taus(N)
+    return [taus_arr[n] for n in range(N)]
 
 
 def build_shift_operator(N, tau_list=None, pattern=None):

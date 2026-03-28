@@ -22,52 +22,10 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import sys
+import sys, os
 
-
-# ---- Geometry & algebra ----
-
-def init_tet():
-    return np.array([
-        [0, 0, 1],
-        [2*np.sqrt(2)/3, 0, -1/3],
-        [-np.sqrt(2)/3, np.sqrt(6)/3, -1/3],
-        [-np.sqrt(2)/3, -np.sqrt(6)/3, -1/3],
-    ])
-
-def reflect(v, n):
-    return v - 2 * np.dot(v, n) * n
-
-def helix_step(pos, dirs, face):
-    e = dirs[face].copy()
-    pos += e * (-2/3)
-    for a in range(4):
-        dirs[a] = reflect(dirs[a], e)
-
-def reorth(dirs):
-    m = dirs.mean(axis=0)
-    dirs -= m
-    for a in range(4):
-        nm = np.linalg.norm(dirs[a])
-        if nm > 1e-15:
-            dirs[a] /= nm
-
-def alpha_mat(idx):
-    m = np.zeros((4, 4), dtype=complex)
-    if idx == 0:
-        m[0,3] = m[1,2] = m[2,1] = m[3,0] = 1
-    elif idx == 1:
-        m[0,3] = -1j; m[1,2] = 1j; m[2,1] = -1j; m[3,0] = 1j
-    elif idx == 2:
-        m[0,2] = 1; m[1,3] = -1; m[2,0] = 1; m[3,1] = -1
-    return m
-
-def make_tau(d):
-    nu = np.sqrt(7) / 4
-    tau = np.diag([nu, nu, -nu, -nu]).astype(complex)
-    for a in range(3):
-        tau += 0.75 * d[a] * alpha_mat(a)
-    return tau
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.helix_geometry import build_taus
 
 def proj_plus(tau):
     return 0.5 * (np.eye(4) + tau)
@@ -84,32 +42,6 @@ def frame_transport(tau_from, tau_to):
 
 
 THETA_BC = np.arccos(-2/3)
-
-
-def build_chain_data(N, pat):
-    """Build taus and exit directions for N sites."""
-    dirs_all = np.zeros((N, 4, 3))
-    exit_dirs = np.zeros((N, 3))
-    taus = np.zeros((N, 4, 4), dtype=complex)
-
-    dirs = init_tet()
-    pos = np.zeros(3)
-
-    for n in range(N):
-        if n == 0:
-            dirs_all[0] = dirs.copy()
-        else:
-            dirs = dirs_all[n-1].copy()
-            helix_step(pos, dirs, pat[(n-1) % 4])
-            if n % 8 == 0:
-                reorth(dirs)
-            dirs_all[n] = dirs
-
-        face = pat[n % 4]
-        exit_dirs[n] = dirs_all[n][face]
-        taus[n] = make_tau(exit_dirs[n])
-
-    return taus, exit_dirs
 
 
 # ---- Fourier analysis of τ operators ----
@@ -312,13 +244,12 @@ def quasi_bloch_quality(N, taus, mix_phi):
 
 def main():
     N = int(sys.argv[1]) if len(sys.argv) > 1 else 400
-    pat = [1, 3, 0, 2]
 
     print(f"Chain: N={N}")
     print(f"θ = arccos(-2/3) = {THETA_BC:.6f} rad = {np.degrees(THETA_BC):.3f}°")
 
     print("\nBuilding chain...")
-    taus, exit_dirs = build_chain_data(N, pat)
+    taus = build_taus(N)
 
     # ============================================================
     # Part 1: Fourier spectrum of τ operators
@@ -361,7 +292,7 @@ def main():
     # ============================================================
     N_sweep = 200  # smaller N for speed
     print(f"\n=== φ_mix sweep (N={N_sweep}) ===")
-    taus_sweep, _ = build_chain_data(N_sweep, pat)
+    taus_sweep = build_taus(N_sweep)
 
     phi_values = [0.0, 0.02, 0.05, 0.08, 0.12, 0.2, 0.3, 0.5]
     sweep_results = []

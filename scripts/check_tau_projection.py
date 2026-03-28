@@ -7,6 +7,10 @@ Analyze the walk's tau operator at several sites to understand:
 """
 
 import numpy as np
+import sys, os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.helix_geometry import build_taus, make_tau, exit_direction
 
 # Dirac matrices (matching walk_1d.c)
 alpha = np.zeros((3, 4, 4), dtype=complex)
@@ -15,45 +19,14 @@ alpha[1] = [[0,0,0,-1j],[0,0,1j,0],[0,-1j,0,0],[1j,0,0,0]]
 alpha[2] = [[0,0,1,0],[0,0,0,-1],[1,0,0,0],[0,-1,0,0]]
 beta = np.diag([1.0, 1.0, -1.0, -1.0]).astype(complex)
 
-# Tetrahedral directions (matching walk_1d.c init_tet)
-d0 = np.array([0, 0, 1.0])
-d1 = np.array([2*np.sqrt(2)/3, 0, -1/3])
-d2 = np.array([-np.sqrt(2)/3, np.sqrt(6)/3, -1/3])
-d3 = np.array([-np.sqrt(2)/3, -np.sqrt(6)/3, -1/3])
-tet_dirs = [d0, d1, d2, d3]
-
-def make_tau(e_vec):
-    """tau = (sqrt(7)/4)*beta + (3/4)*(e.alpha)"""
-    nu = np.sqrt(7) / 4
-    tau = nu * beta.copy()
-    for a in range(3):
-        tau += 0.75 * e_vec[a] * alpha[a]
-    return tau
-
-def reflect(dirs, face):
-    """Reflect all directions through face direction (matching walk helix_step)."""
-    e = dirs[face]
-    new_dirs = []
-    for d in dirs:
-        new_dirs.append(d - 2 * np.dot(d, e) * e)
-    return new_dirs
-
-# Build helix chain (R-pattern {1,3,0,2})
 PAT_R = [1, 3, 0, 2]
 PAT_L = [0, 1, 2, 3]
 
 def build_chain(pat, n_sites):
     """Build chain and return tau at each site."""
-    dirs = [d.copy() for d in tet_dirs]
-    taus = []
-    faces = []
-    for i in range(n_sites):
-        face = pat[i % 4]
-        faces.append(face)
-        e = dirs[face] / np.linalg.norm(dirs[face])
-        taus.append(make_tau(e))
-        # Step: reflect through face
-        dirs = reflect(dirs, face)
+    taus_arr = build_taus(n_sites)
+    taus = [taus_arr[i] for i in range(n_sites)]
+    faces = [pat[i % 4] for i in range(n_sites)]
     return taus, faces
 
 print("=" * 60)

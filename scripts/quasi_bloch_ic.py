@@ -22,53 +22,12 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import sys
+import sys, os
 
-# ---- Geometry & algebra (reused) ----
-
-def init_tet():
-    return np.array([
-        [0, 0, 1],
-        [2*np.sqrt(2)/3, 0, -1/3],
-        [-np.sqrt(2)/3, np.sqrt(6)/3, -1/3],
-        [-np.sqrt(2)/3, -np.sqrt(6)/3, -1/3],
-    ])
-
-def reflect(v, n):
-    return v - 2 * np.dot(v, n) * n
-
-def helix_step(pos, dirs, face):
-    e = dirs[face].copy()
-    pos += e * (-2/3)
-    for a in range(4):
-        dirs[a] = reflect(dirs[a], e)
-
-def reorth(dirs):
-    m = dirs.mean(axis=0)
-    dirs -= m
-    for a in range(4):
-        nm = np.linalg.norm(dirs[a])
-        if nm > 1e-15:
-            dirs[a] /= nm
-
-def alpha_mat(idx):
-    m = np.zeros((4, 4), dtype=complex)
-    if idx == 0:
-        m[0,3] = m[1,2] = m[2,1] = m[3,0] = 1
-    elif idx == 1:
-        m[0,3] = -1j; m[1,2] = 1j; m[2,1] = -1j; m[3,0] = 1j
-    elif idx == 2:
-        m[0,2] = 1; m[1,3] = -1; m[2,0] = 1; m[3,1] = -1
-    return m
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.helix_geometry import build_taus
 
 BETA = np.diag([1.0, 1.0, -1.0, -1.0]).astype(complex)
-
-def make_tau(d):
-    nu = np.sqrt(7) / 4
-    tau = np.diag([nu, nu, -nu, -nu]).astype(complex)
-    for a in range(3):
-        tau += 0.75 * d[a] * alpha_mat(a)
-    return tau
 
 def proj_plus(tau):
     return 0.5 * (np.eye(4) + tau)
@@ -84,25 +43,6 @@ def frame_transport(tau_from, tau_to):
     return scale * (np.eye(4) + prod)
 
 THETA_BC = np.arccos(-2/3)
-
-
-def build_chain_taus(N, pat):
-    dirs_all = np.zeros((N, 4, 3))
-    taus = np.zeros((N, 4, 4), dtype=complex)
-    dirs = init_tet()
-    pos = np.zeros(3)
-    for n in range(N):
-        if n == 0:
-            dirs_all[0] = dirs.copy()
-        else:
-            dirs = dirs_all[n-1].copy()
-            helix_step(pos, dirs, pat[(n-1) % 4])
-            if n % 8 == 0:
-                reorth(dirs)
-            dirs_all[n] = dirs
-        face = pat[n % 4]
-        taus[n] = make_tau(dirs_all[n][face])
-    return taus
 
 
 def build_vmix_block(tau, mix_phi):
@@ -236,14 +176,13 @@ def main():
     mix_phi = float(sys.argv[2]) if len(sys.argv) > 2 else 0.08
     M = int(sys.argv[3]) if len(sys.argv) > 3 else 3
 
-    pat = [1, 3, 0, 2]
     m_dirac = 0.9 * mix_phi  # effective Dirac mass
 
     print(f"N={N}, φ_mix={mix_phi}, M={M}")
     print(f"Effective Dirac mass: m = {m_dirac:.4f}")
 
     print("Building chain...")
-    taus = build_chain_taus(N, pat)
+    taus = build_taus(N)
 
     print("Computing walk blocks and Fourier coefficients...")
     F_blocks, G_blocks = compute_walk_blocks(N, taus, mix_phi)

@@ -13,53 +13,12 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import sys
+import sys, os
 
-# ---- Geometry (matching the D code) ----
-
-def init_tet():
-    return np.array([
-        [0, 0, 1],
-        [2*np.sqrt(2)/3, 0, -1/3],
-        [-np.sqrt(2)/3, np.sqrt(6)/3, -1/3],
-        [-np.sqrt(2)/3, -np.sqrt(6)/3, -1/3],
-    ])
-
-def reflect(v, n):
-    return v - 2 * np.dot(v, n) * n
-
-def helix_step(pos, dirs, face):
-    e = dirs[face].copy()
-    pos += e * (-2/3)
-    for a in range(4):
-        dirs[a] = reflect(dirs[a], e)
-
-def reorth(dirs):
-    m = dirs.mean(axis=0)
-    dirs -= m
-    for a in range(4):
-        n = np.linalg.norm(dirs[a])
-        if n > 1e-15:
-            dirs[a] /= n
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.helix_geometry import build_taus, centroid
 
 # ---- Dirac algebra ----
-
-def alpha(idx):
-    m = np.zeros((4, 4), dtype=complex)
-    if idx == 0:
-        m[0,3] = m[1,2] = m[2,1] = m[3,0] = 1
-    elif idx == 1:
-        m[0,3] = -1j; m[1,2] = 1j; m[2,1] = -1j; m[3,0] = 1j
-    elif idx == 2:
-        m[0,2] = 1; m[1,3] = -1; m[2,0] = 1; m[3,1] = -1
-    return m
-
-def make_tau(d):
-    nu = np.sqrt(7) / 4
-    tau = np.diag([nu, nu, -nu, -nu]).astype(complex)
-    for a in range(3):
-        tau += 0.75 * d[a] * alpha(a)
-    return tau
 
 def proj_plus(tau):
     return 0.5 * (np.eye(4) + tau)
@@ -73,37 +32,6 @@ def frame_transport(tau_from, tau_to):
     cos_half = np.sqrt((1 + cos_theta) / 2)
     scale = 1 / (2 * cos_half)
     return scale * (np.eye(4) + prod)
-
-# ---- Build chain ----
-
-def build_chain(N, pat):
-    """Build chain geometry and operators for N sites."""
-    positions = np.zeros((N, 3))
-    dirs_all = np.zeros((N, 4, 3))
-    face_idx = np.zeros(N, dtype=int)
-    taus = np.zeros((N, 4, 4), dtype=complex)
-
-    dirs = init_tet()
-    pos = np.zeros(3)
-
-    for n in range(N):
-        if n == 0:
-            dirs_all[0] = dirs.copy()
-            positions[0] = pos.copy()
-            face_idx[0] = pat[0]
-        else:
-            dirs = dirs_all[n-1].copy()
-            pos = positions[n-1].copy()
-            helix_step(pos, dirs, pat[(n-1) % 4])
-            if n % 8 == 0:
-                reorth(dirs)
-            dirs_all[n] = dirs
-            positions[n] = pos
-            face_idx[n] = pat[n % 4]
-
-        taus[n] = make_tau(dirs_all[n][face_idx[n]])
-
-    return positions, dirs_all, face_idx, taus
 
 # ---- Build walk operator ----
 
@@ -191,10 +119,8 @@ def main():
     N = int(sys.argv[1]) if len(sys.argv) > 1 else 200
     phi = float(sys.argv[2]) if len(sys.argv) > 2 else 0.08
 
-    pat = [1, 3, 0, 2]  # R helix
-
     print(f"Building chain: N={N} sites, phi={phi}")
-    positions, dirs_all, face_idx, taus = build_chain(N, pat)
+    taus = build_taus(N)
 
     print(f"Building walk operator: {4*N}x{4*N} matrix")
     W = build_walk_operator(N, taus, phi)
