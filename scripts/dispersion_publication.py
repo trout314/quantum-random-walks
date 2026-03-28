@@ -52,34 +52,63 @@ def main():
     chi_pp = make_pp_spinor(taus, center)
 
     # ================================================================
-    # (a) Eigenvalue spectrum
+    # (a) Eigenvalue spectrum via W(k) — clean band structure
     # ================================================================
-    print("\n--- (a) Eigenvalue spectrum ---")
-    # Use smaller N for cleaner spectrum (less crowded)
-    N_spec = 600
-    taus_spec = build_chain_taus(N_spec, pat)
-    W_spec = build_full_walk(N_spec, taus_spec, mix_phi)
-    print(f"Diagonalizing {4*N_spec}×{4*N_spec}...")
-    evals, evecs = np.linalg.eig(W_spec)
-    E_all = np.angle(evals)
+    print("\n--- (a) Eigenvalue spectrum via W(k) ---")
+    THETA_BC = np.arccos(-2/3)
 
-    freqs = np.fft.fftfreq(N_spec) * 2 * np.pi
-    k_all = np.zeros(len(E_all))
-    ipr_all = np.zeros(len(E_all))
-    for j in range(len(E_all)):
-        psi_j = evecs[:, j].reshape(N_spec, 4)
-        total_power = np.zeros(N_spec)
-        for a in range(4):
-            ft = np.fft.fft(psi_j[:, a])
-            total_power += np.abs(ft)**2
-        total_power[0] = 0
-        k_all[j] = freqs[np.argmax(total_power)]
-        prob = np.sum(np.abs(psi_j)**2, axis=1)
-        prob /= prob.sum()
-        ipr_all[j] = 1.0 / np.sum(prob**2)
+    # Compute Fourier coefficients of the walk blocks
+    N_fc = N  # use the full chain for accurate Fourier coefficients
+    M_harm = 5  # truncation
+    ns_fc = np.arange(N_fc)
 
-    extended = ipr_all > N_spec / 10
-    print(f"Extended states: {extended.sum()}/{len(E_all)}")
+    # Walk blocks: (Wψ)(m) = F_m ψ(m-1) + G_m ψ(m+1)
+    F_blocks = np.zeros((N_fc, 4, 4), dtype=complex)
+    G_blocks = np.zeros((N_fc, 4, 4), dtype=complex)
+    for m in range(N_fc):
+        from quasi_bloch_l1 import build_vmix_block
+        V_m = build_vmix_block(taus[m], mix_phi)
+        m_prev = (m - 1) % N_fc
+        m_next = (m + 1) % N_fc
+        U_fwd = frame_transport(taus[m_prev], taus[m])
+        U_bwd = frame_transport(taus[m_next], taus[m])
+        Pp_prev = proj_plus(taus[m_prev])
+        Pm_next = proj_minus(taus[m_next])
+        F_blocks[m] = V_m @ U_fwd @ Pp_prev
+        G_blocks[m] = V_m @ U_bwd @ Pm_next
+
+    # Fourier coefficients
+    F_hat = np.zeros((2 * M_harm + 1, 4, 4), dtype=complex)
+    G_hat = np.zeros((2 * M_harm + 1, 4, 4), dtype=complex)
+    for l_idx, l in enumerate(range(-M_harm, M_harm + 1)):
+        exp_f = np.exp(-1j * l * ns_fc * THETA_BC)
+        for i in range(4):
+            for j in range(4):
+                F_hat[l_idx, i, j] = np.mean(F_blocks[:, i, j] * exp_f)
+                G_hat[l_idx, i, j] = np.mean(G_blocks[:, i, j] * exp_f)
+
+    # Sweep k, diagonalize W(k) at each point
+    n_k_spec = 400
+    k_spec = np.linspace(-np.pi, np.pi, n_k_spec, endpoint=False)
+    dim_wk = 4 * (2 * M_harm + 1)
+    E_bands = np.zeros((n_k_spec, dim_wk))
+
+    for ik, k in enumerate(k_spec):
+        Wk = np.zeros((dim_wk, dim_wk), dtype=complex)
+        for mp in range(-M_harm, M_harm + 1):
+            for m in range(-M_harm, M_harm + 1):
+                dm = mp - m
+                l_idx = dm + M_harm
+                if 0 <= l_idx < 2 * M_harm + 1:
+                    row = (mp + M_harm) * 4
+                    col = (m + M_harm) * 4
+                    Wk[row:row+4, col:col+4] += (
+                        np.exp(-1j * k) * F_hat[l_idx] +
+                        np.exp(1j * k) * G_hat[l_idx])
+        evals_k = np.linalg.eigvals(Wk)
+        E_bands[ik] = np.sort(np.angle(evals_k))
+
+    print(f"W(k) band structure: {n_k_spec} k-points, {dim_wk} bands")
 
     # ================================================================
     # (b) Group velocity from peak splitting
@@ -160,12 +189,16 @@ def main():
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
 
-    # --- (a) Spectrum ---
+    # --- (a) Spectrum from W(k) ---
     ax = axes[0]
-    mask = extended & (np.abs(E_all) > 0.005)
-    ax.scatter(np.abs(k_all[mask]), np.abs(E_all[mask]),
-               s=3, alpha=0.25, c='#2166ac', rasterized=True, zorder=1)
-    k_th = np.linspace(0, 1.2, 300)
+    # Plot each band as a smooth curve
+    for band in range(E_bands.shape[1]):
+        E_b = E_bands[:, band]
+        # Only plot positive-E portion in [0, pi] for clarity
+        pos_k = k_spec >= 0
+        ax.plot(k_spec[pos_k], np.abs(E_b[pos_k]),
+                '-', color='#2166ac', lw=0.8, alpha=0.6, rasterized=True)
+    k_th = np.linspace(0, np.pi, 300)
     E_dirac = np.sqrt(k_th**2 + m_eff**2)
     ax.plot(k_th, E_dirac, 'r-', lw=2.5, zorder=2,
             label=r'$E = \sqrt{k^2 + m^2}$')
@@ -173,7 +206,7 @@ def main():
     ax.axhline(m_eff, color='r', ls=':', alpha=0.3)
     ax.set_xlabel('Momentum  k', fontsize=13)
     ax.set_ylabel('Quasi-energy  |E|', fontsize=13)
-    ax.set_title('(a)  Eigenvalue spectrum', fontsize=14, fontweight='bold')
+    ax.set_title('(a)  Band structure from W(k)', fontsize=14, fontweight='bold')
     ax.set_xlim(0, 1.2)
     ax.set_ylim(0, 1.4)
     ax.legend(fontsize=10, loc='upper left')
