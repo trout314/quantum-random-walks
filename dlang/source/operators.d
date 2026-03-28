@@ -7,9 +7,9 @@
 module operators;
 
 import std.math : sqrt, fabs, cos, sin, exp;
-import geometry : Vec3, dot, norm, chainCentroid, chainVertexDirs;
+import geometry : Vec3, dot, norm, chainCentroid;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, matVecSplit, alpha;
-import lattice : Lattice, nextFace, prevFace, PAT_R, PAT_L, IS_R, IS_L, isRamLow;
+import lattice : Lattice, IS_R, IS_L, isRamLow;
 
 // ---- Spinor helpers ----
 
@@ -34,55 +34,45 @@ struct ShiftResult {
 }
 
 private int tryExtendFwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
-                         const int[4] pat, ref double[4] shiftedRe,
+                         ref double[4] shiftedRe,
                          ref double[4] shiftedIm, double thresh2) {
     double amp2 = 0;
     foreach (a; 0 .. 4) amp2 += shiftedRe[a]*shiftedRe[a] + shiftedIm[a]*shiftedIm[a];
     if (amp2 < thresh2) return -1;
 
-    int face = lat.chainFace(s, isR);
-    int nf = nextFace(pat, face);
-
-    // Compute new site geometry from analytic formula
+    // Compute new site position from analytic formula
     int chainId = isR ? lat.sites[s].rChain : lat.sites[s].lChain;
     auto ch = &lat.chains[chainId];
     int newChainIdx = ch.rootIdx + cast(int) ch.ops.length;
     Vec3 p = chainCentroid(&ch.origin, newChainIdx);
-    auto d = chainVertexDirs(&ch.origin, newChainIdx);
 
-    int nb = lat.allocSite(p, d);
+    int nb = lat.allocSite(p);
     if (nb < 0) return -2;  // lattice full
-    lat.setChainFace(nb, isR, nf);
     lat.chainAppend(chainId, nb);
     return nb;
 }
 
 private int tryExtendBwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
-                         const int[4] pat, ref double[4] shiftedRe,
+                         ref double[4] shiftedRe,
                          ref double[4] shiftedIm, double thresh2) {
     double amp2 = 0;
     foreach (a; 0 .. 4) amp2 += shiftedRe[a]*shiftedRe[a] + shiftedIm[a]*shiftedIm[a];
     if (amp2 < thresh2) return -1;
 
-    int face = lat.chainFace(s, isR);
-    int pf = prevFace(pat, face);
-
-    // Compute new site geometry from analytic formula
+    // Compute new site position from analytic formula
     int chainId = isR ? lat.sites[s].rChain : lat.sites[s].lChain;
     auto ch = &lat.chains[chainId];
     int newChainIdx = ch.rootIdx - 1;
     Vec3 p = chainCentroid(&ch.origin, newChainIdx);
-    auto d = chainVertexDirs(&ch.origin, newChainIdx);
 
-    int nb = lat.allocSite(p, d);
+    int nb = lat.allocSite(p);
     if (nb < 0) return -2;  // lattice full
-    lat.setChainFace(nb, isR, pf);
     lat.chainPrepend(chainId, nb);
     return nb;
 }
 
 ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
-                                     const int[4] pat, double thresh2,
+                                     double thresh2,
                                      double pruneThresh2 = 0) {
     import core.thread : Thread;
     import std.parallelism : parallel, taskPool;
@@ -170,7 +160,7 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
             double[4] shRe = 0, shIm = 0;
             matVecSplit(Pp, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
                         shRe.ptr, shIm.ptr);
-            int nb = ramLow ? -2 : tryExtendFwd!hasCoin(lat, endSite, isR, pat, shRe, shIm, thresh2);
+            int nb = ramLow ? -2 : tryExtendFwd!hasCoin(lat, endSite, isR, shRe, shIm, thresh2);
             if (nb >= 0) {
                 auto newOp = lat.siteOps(endSite, isR);
                 double[4] resRe = 0, resIm = 0;
@@ -198,7 +188,7 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
             double[4] shRe = 0, shIm = 0;
             matVecSplit(Pm, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
                         shRe.ptr, shIm.ptr);
-            int nb = ramLow ? -2 : tryExtendBwd!hasCoin(lat, endSite, isR, pat, shRe, shIm, thresh2);
+            int nb = ramLow ? -2 : tryExtendBwd!hasCoin(lat, endSite, isR, shRe, shIm, thresh2);
             if (nb >= 0) {
                 auto newOp = lat.siteOps(endSite, isR);
                 double[4] resRe = 0, resIm = 0;
@@ -416,8 +406,8 @@ private void unlinkChainEnd(bool hasCoin)(ref Lattice!hasCoin lat, int s,
         }
     }
 
-    if (isR) { lat.sites[s].rChain = -1; lat.sites[s].rIdx = -1; lat.sites[s].rFace = -1; }
-    else     { lat.sites[s].lChain = -1; lat.sites[s].lIdx = -1; lat.sites[s].lFace = -1; }
+    if (isR) { lat.sites[s].rChain = -1; lat.sites[s].rIdx = -1; }
+    else     { lat.sites[s].lChain = -1; lat.sites[s].lIdx = -1; }
 
     if (lat.sites[s].rChain < 0 && lat.sites[s].lChain < 0)
         lat.removeSite(s);
@@ -473,7 +463,6 @@ PruneResult pruneChainEnds(bool hasCoin)(ref Lattice!hasCoin lat, double thresh2
 
 unittest {
     import lattice : Lattice, ProximityGrid, generateSites;
-    import geometry : initTet;
 
     auto lat = Lattice!false.create(100000);
     double sigma = 1.5;
@@ -495,7 +484,7 @@ unittest {
         lat.psiIm[i] *= normFactor;
     }
 
-    auto res = applyShift(lat, false, PAT_L, 1e-20);
+    auto res = applyShift(lat, false, 1e-20);
 
     double postNorm = 0;
     foreach (i; 0 .. 4 * lat.nsites)

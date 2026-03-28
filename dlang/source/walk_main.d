@@ -10,7 +10,7 @@ import std.math : sqrt, cos, sin, exp;
 import std.conv : to;
 import std.stdio : writef, writefln, stderr, stdout;
 import geometry : Vec3, dot, STEP_LEN;
-import lattice : Lattice, ProximityGrid, generateSites, PAT_R, PAT_L, IS_R, IS_L, isRamLow, freeRamBytes;
+import lattice : Lattice, ProximityGrid, generateSites, IS_R, IS_L, isRamLow, freeRamBytes;
 import dirac : Mat4, makeTau, frameTransport, matVecSplit, projPlus, projMinus;
 import operators : applyShift, applyCoin, applyVmix, ShiftResult;
 import observables : computeObservables, Observables;
@@ -258,13 +258,13 @@ void run(WalkParams p) {
             // With HAS_COIN=false, applyCoin is a no-op (compiled out)
             applyCoin(lat, IS_L);
             auto tCoinL = MonoTime.currTime;
-            auto resL = applyShift(lat, IS_L, PAT_L, extThresh2, pruneThresh2);
+            auto resL = applyShift(lat, IS_L, extThresh2, pruneThresh2);
             auto tShiftL = MonoTime.currTime;
             applyVmix(lat, IS_L, p.mixPhi);
             auto tVmixL = MonoTime.currTime;
             applyCoin(lat, IS_R);
             auto tCoinR = MonoTime.currTime;
-            auto resR = applyShift(lat, IS_R, PAT_R, extThresh2, pruneThresh2);
+            auto resR = applyShift(lat, IS_R, extThresh2, pruneThresh2);
             auto tShiftR = MonoTime.currTime;
             applyVmix(lat, IS_R, p.mixPhi);
             auto tVmixR = MonoTime.currTime;

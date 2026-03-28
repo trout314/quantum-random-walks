@@ -11,7 +11,7 @@
 module lattice;
 
 import std.math : sqrt, exp, fabs, cos, sin;
-import geometry : Vec3, Mat3, dot, norm, initTet, helixStep, reorth, STEP_LEN, buildAllA4Rotations,
+import geometry : Vec3, dot, norm, initTet, buildAllA4Rotations,
     ChainOrigin, computeChainOrigin, chainCentroid, chainExitDir, chainVertexDirs;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, alpha;
 import core.sys.linux.sys.sysinfo : sysinfo, sysinfo_;
@@ -37,34 +37,8 @@ bool isRamLow() {
 enum bool IS_R = true;
 enum bool IS_L = false;
 
-/// BC helix face patterns.
-immutable int[4] PAT_R = [1, 3, 0, 2];
-immutable int[4] PAT_L = [0, 2, 1, 3];
-
-/// Perpendicularity mapping: given an R-chain face, return the L-chain face
-/// that ensures disjoint face pairs (each walker step on exactly one chain).
-/// R pair {rFace, prevFace(PAT_R, rFace)} and L pair {lFace, prevFace(PAT_L, lFace)}
-/// must partition all 4 faces.
-int perpFace(bool fromR, int face) {
-    // Mapping: 0↔1, 2↔3
-    immutable int[4] map = [1, 0, 3, 2];
-    return map[face];
-}
-
 /// Tolerance for detecting degenerate cross products (near-parallel vectors).
 enum double DEGEN_TOL = 1e-10;
-
-int nextFace(const int[4] pat, int curFace) {
-    foreach (i; 0 .. 4)
-        if (pat[i] == curFace) return pat[(i + 1) % 4];
-    return pat[0];
-}
-
-int prevFace(const int[4] pat, int curFace) {
-    foreach (i; 0 .. 4)
-        if (pat[i] == curFace) return pat[(i + 3) % 4];
-    return pat[0];
-}
 
 /// Deque backed by a flat array. Active elements are buf[lo .. hi].
 struct Deque(T) {
@@ -181,10 +155,8 @@ struct Chain(bool hasCoin) {
 /// Per-site data.
 struct Site {
     Vec3 pos;
-    Vec3[4] dirs;
     int rChain = -1, rIdx = -1;
     int lChain = -1, lIdx = -1;
-    int rFace = -1, lFace = -1;
 }
 
 /// Spatial hash for minimum-distance site proximity checks.
@@ -372,11 +344,12 @@ struct Lattice(bool hasCoin) {
         int nsites;
         int[] freeList;
         int freeCount;
-        // Per chain: isR, rootSite, rootIdx, siteId list
+        // Per chain: isR, rootSite, rootIdx, siteId list, origin
         bool[] chainIsR;
         int[] chainRootSite;
         int[] chainRootIdx;
         int[][] chainSiteIds;
+        ChainOrigin[] chainOrigins;
     }
 
     Snapshot takeSnapshot() const {
@@ -390,10 +363,12 @@ struct Lattice(bool hasCoin) {
         snap.chainRootSite = new int[nc];
         snap.chainRootIdx = new int[nc];
         snap.chainSiteIds = new int[][nc];
+        snap.chainOrigins = new ChainOrigin[nc];
         foreach (i, ref ch; chains) {
             snap.chainIsR[i] = ch.isR;
             snap.chainRootSite[i] = ch.rootSite;
             snap.chainRootIdx[i] = ch.rootIdx;
+            snap.chainOrigins[i] = ch.origin;
             auto ids = new int[ch.ops.length];
             foreach (j; 0 .. ch.ops.length)
                 ids[j] = ch.ops[j].siteId;
@@ -418,12 +393,7 @@ struct Lattice(bool hasCoin) {
             chains[ci].isR = isR;
             chains[ci].rootSite = snap.chainRootSite[ci];
             chains[ci].rootIdx = snap.chainRootIdx[ci];
-            {
-                int rs = snap.chainRootSite[ci];
-                int rf = isR ? sites[rs].rFace : sites[rs].lFace;
-                if (rf >= 0)
-                    chains[ci].origin = computeChainOrigin(sites[rs].pos, sites[rs].dirs, rf, isR);
-            }
+            chains[ci].origin = snap.chainOrigins[ci];
 
             // Clear and refill ops, reusing existing deque buffer
             int n = cast(int) ids.length;
@@ -448,13 +418,13 @@ struct Lattice(bool hasCoin) {
         tmpIm[0 .. 4 * nsites] = 0;
     }
 
-    int allocSite(Vec3 pos, Vec3[4] dirs) {
+    int allocSite(Vec3 pos) {
         int id;
         if (freeCount > 0) id = freeList[--freeCount];
         else if (nsites < capacity) id = nsites++;
         else if (grow()) id = nsites++;
         else return -1;  // out of RAM — caller must handle gracefully
-        sites[id] = Site(pos, dirs);
+        sites[id] = Site(pos);
         psiRe[4*id .. 4*id+4] = 0;
         psiIm[4*id .. 4*id+4] = 0;
         return id;
@@ -490,16 +460,7 @@ struct Lattice(bool hasCoin) {
         return chains[chainId].ops[idx - 1].siteId;
     }
 
-    int chainFace(int siteId, bool isR) const {
-        return isR ? sites[siteId].rFace : sites[siteId].lFace;
-    }
-
-    void setChainFace(int siteId, bool isR, int face) {
-        if (isR) sites[siteId].rFace = face; else sites[siteId].lFace = face;
-    }
-
     /// Get the exit direction for site siteId on the given chirality chain.
-    /// Replaces the old pattern: makeTau(sites[s].dirs[chainFace(s, isR)])
     Vec3 exitDirForSite(int siteId, bool isR) const {
         int chainId = isR ? sites[siteId].rChain : sites[siteId].lChain;
         if (chainId < 0) return Vec3(0, 0, 0);
@@ -508,7 +469,6 @@ struct Lattice(bool hasCoin) {
     }
 
     /// Check if site has a chain of given chirality.
-    /// Replaces: chainFace(s, isR) >= 0
     bool hasChain(int siteId, bool isR) const {
         return (isR ? sites[siteId].rChain : sites[siteId].lChain) >= 0;
     }
@@ -612,27 +572,16 @@ struct Lattice(bool hasCoin) {
 private struct ChainSeed { int siteId; bool isR; }
 
 /// Create a new chain with the given root site.  Returns the chain ID.
-/// If face >= 0, use that face; otherwise default to pat[0].
-private int makeChain(bool hasCoin)(ref Lattice!hasCoin lat, int rootSite, bool isR, int face = -1) {
-    const int[4] pat = isR ? PAT_R : PAT_L;
-    if (face < 0) {
-        // If the site already has the other chirality's chain, use the
-        // perpendicularity mapping to determine this chain's starting face.
-        if (lat.hasChain(rootSite, !isR))
-            face = perpFace(!isR, lat.chainFace(rootSite, !isR));
-        else
-            face = pat[0];
-    }
-    lat.setChainFace(rootSite, isR, face);
-
+/// dirs: tetrahedral vertex directions at the root site.
+/// face: which vertex direction is the exit direction for this chain.
+private int makeChain(bool hasCoin)(ref Lattice!hasCoin lat, int rootSite, bool isR,
+                                    Vec3[4] dirs, int face) {
     int chainId = cast(int) lat.chains.length;
     Chain!hasCoin newChain;
     newChain.isR = isR;
     newChain.rootSite = rootSite;
     newChain.rootIdx = 0;
-    newChain.origin = computeChainOrigin(lat.sites[rootSite].pos,
-                                          lat.sites[rootSite].dirs,
-                                          face, isR);
+    newChain.origin = computeChainOrigin(lat.sites[rootSite].pos, dirs, face, isR);
     SiteOps!hasCoin rootOp;
     rootOp.siteId = rootSite;
     static if (hasCoin) {
@@ -648,6 +597,42 @@ private int makeChain(bool hasCoin)(ref Lattice!hasCoin lat, int rootSite, bool 
     else     { lat.sites[rootSite].lChain = chainId; lat.sites[rootSite].lIdx = 0; }
 
     return chainId;
+}
+
+/// Perpendicularity mapping: given an R-chain face, return the L-chain face.
+/// Mapping: 0<->1, 2<->3.
+private int perpFace(int face) {
+    immutable int[4] map = [1, 0, 3, 2];
+    return map[face];
+}
+
+/// Get vertex dirs for a site from its existing chain, for use when creating
+/// a second (cross-chirality) chain. Returns dirs and the face index for the
+/// existing chain's exit direction.
+private void getDirsFromExistingChain(bool hasCoin)(const Lattice!hasCoin lat, int siteId,
+                                                     bool existingIsR,
+                                                     out Vec3[4] dirs, out int existingFace) {
+    int chainId = existingIsR ? lat.sites[siteId].rChain : lat.sites[siteId].lChain;
+    int idx = existingIsR ? lat.sites[siteId].rIdx : lat.sites[siteId].lIdx;
+    auto ch = &lat.chains[chainId];
+    int chainIdx = ch.rootIdx + idx;
+    dirs = chainVertexDirs(&ch.origin, chainIdx);
+    // Determine which face slot holds the exit direction
+    immutable int[4] patR = [1, 3, 0, 2];
+    immutable int[4] patL = [0, 2, 1, 3];
+    auto pat = existingIsR ? patR : patL;
+    int patIdx = ((chainIdx + ch.origin.faceOffset) % 4 + 4) % 4;
+    existingFace = pat[patIdx];
+}
+
+/// Create a cross-chirality chain for a site that already has one chain.
+/// Computes dirs from the existing chain and uses perpFace for the new face.
+private int makeCrossChain(bool hasCoin)(ref Lattice!hasCoin lat, int siteId, bool newIsR) {
+    Vec3[4] dirs;
+    int existingFace;
+    getDirsFromExistingChain!hasCoin(lat, siteId, !newIsR, dirs, existingFace);
+    int newFace = perpFace(existingFace);
+    return makeChain!hasCoin(lat, siteId, newIsR, dirs, newFace);
 }
 
 /// Per-site orbit membership.
@@ -683,35 +668,27 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         return oi;
     }
 
-    // Helper: extend a chain by n steps, return array of new site IDs.
-    // TEMPORARY: uses helixStep for bootstrap, will convert to analytic later.
+    // Helper: extend a chain by n steps using analytic centroid formula.
     int[] extendN(int chainId, bool forward, int n) {
         int[] result;
         auto ch = &lat.chains[chainId];
         bool isR = ch.isR;
-        const int[4] pat = isR ? PAT_R : PAT_L;
-        int endId = forward ? ch.ops[ch.ops.length - 1].siteId : ch.ops[0].siteId;
-        int curFace = lat.chainFace(endId, isR);
-        Vec3 p = lat.sites[endId].pos;
-        Vec3[4] d = lat.sites[endId].dirs;
 
         foreach (_; 0 .. n) {
-            int stepFace = forward ? curFace : prevFace(pat, curFace);
-            helixStep(p, d, stepFace);
-            int nbFace = forward ? nextFace(pat, curFace) : stepFace;
-            Vec3[4] dd = d; reorth(dd);
+            int newChainIdx = forward
+                ? ch.rootIdx + cast(int) ch.ops.length
+                : ch.rootIdx - 1;
+            Vec3 p = chainCentroid(&ch.origin, newChainIdx);
 
             int nb = grid.findSiteNear(p, mateTol);
             if (nb < 0) {
-                nb = lat.allocSite(p, dd);
+                nb = lat.allocSite(p);
                 grid.add(p, nb);
             }
             if (!lat.hasChain(nb, isR)) {
-                lat.setChainFace(nb, isR, nbFace);
                 if (forward) lat.chainAppend(chainId, nb);
                 else         lat.chainPrepend(chainId, nb);
             }
-            curFace = nbFace;
             result ~= nb;
         }
         return result;
@@ -723,12 +700,13 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 
     // Depth 0: origin
     auto d0 = initTet();
-    int origin = lat.allocSite(Vec3(0, 0, 0), d0);
+    int origin = lat.allocSite(Vec3(0, 0, 0));
     grid.add(Vec3(0, 0, 0), origin);
 
     // Origin's R and L chains, extended 2 steps each direction
-    int rCh = makeChain!hasCoin(lat, origin, IS_R); nChains++;
-    int lCh = makeChain!hasCoin(lat, origin, IS_L); nChains++;
+    // R-chain uses face 1, L-chain uses perpFace(1)=0
+    int rCh = makeChain!hasCoin(lat, origin, IS_R, d0, 1); nChains++;
+    int lCh = makeCrossChain!hasCoin(lat, origin, IS_L); nChains++;
     auto rFwd = extendN(rCh, true, 2);   // [depth1_A, depth2_B]
     auto rBwd = extendN(rCh, false, 2);  // [depth1_C, depth2_D]
     auto lFwd = extendN(lCh, true, 2);   // [depth1_E, depth2_F]
@@ -738,15 +716,8 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     int[4] d1sites = [rFwd[0], rBwd[0], lFwd[0], lBwd[0]];
     int[] depth2cross;
     foreach (s; d1sites) {
-        bool parentIsR = lat.sites[s].rChain >= 0 &&
-                         lat.chains[lat.sites[s].rChain].rootSite != s;
-        // If s is on origin's R-chain, cross-chirality is L; if on L-chain, cross is R.
-        bool crossIsR = (lat.sites[s].lChain < 0);  // needs L? then crossIsR=false
-        if (lat.hasChain(s, !crossIsR))
-            crossIsR = !crossIsR;  // pick whichever chirality s doesn't have
-        // Actually simpler: s has one chirality from origin's chain; create the other
         bool needR = !lat.hasChain(s, IS_R);
-        int cc = makeChain!hasCoin(lat, s, needR); nChains++;
+        int cc = makeCrossChain!hasCoin(lat, s, needR); nChains++;
         auto fwd = extendN(cc, true, 1);
         auto bwd = extendN(cc, false, 1);
         depth2cross ~= fwd[0];
@@ -759,13 +730,13 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 
     // Create cross-chirality chains for all depth-2 sites (just roots, no extension)
     foreach (s; depth2) {
-        if (!lat.hasChain(s, IS_R)) { makeChain!hasCoin(lat, s, IS_R); nChains++; }
-        if (!lat.hasChain(s, IS_L)) { makeChain!hasCoin(lat, s, IS_L); nChains++; }
+        if (!lat.hasChain(s, IS_R)) { makeCrossChain!hasCoin(lat, s, IS_R); nChains++; }
+        if (!lat.hasChain(s, IS_L)) { makeCrossChain!hasCoin(lat, s, IS_L); nChains++; }
     }
     // Also ensure depth-1 sites have both chiralities
     foreach (s; d1sites) {
-        if (!lat.hasChain(s, IS_R)) { makeChain!hasCoin(lat, s, IS_R); nChains++; }
-        if (!lat.hasChain(s, IS_L)) { makeChain!hasCoin(lat, s, IS_L); nChains++; }
+        if (!lat.hasChain(s, IS_R)) { makeCrossChain!hasCoin(lat, s, IS_R); nChains++; }
+        if (!lat.hasChain(s, IS_L)) { makeCrossChain!hasCoin(lat, s, IS_L); nChains++; }
     }
 
     // ==== Register orbits ====
@@ -815,48 +786,45 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     frontier ~= 2;  // depth-2 orbit
     int[] unconnected;  // sites created but not yet linked to a chain
 
-    // Helper: try to connect site yi to a predecessor's chain.
-    // Computes 4 reverse helix steps from yi, searches for a predecessor
-    // at a chain end, and appends/prepends yi.  Returns true if connected.
+    // Helper: try to connect site yi to an existing chain.
+    // Searches all chains for one whose analytic next/prev position matches yi.
     bool tryConnect(int yi, Vec3 yiP) {
-        Vec3[4] yiD = lat.sites[yi].dirs;
-        foreach (face; 0 .. 4) {
-            Vec3 predP = yiP;
-            Vec3[4] predD = yiD;
-            helixStep(predP, predD, face);
+        // Check each chain to see if yi is its analytic next or prev site
+        foreach (ci, ref ch; lat.chains) {
+            int n = ch.ops.length;
+            if (n == 0) continue;
 
-            int pred = grid.findSiteNear(predP, mateTol);
-            if (pred < 0 || pred == yi) continue;
-
-            foreach (pR; [true, false]) {
-                if (!lat.hasChain(pred, pR)) continue;
-                int pFace = lat.chainFace(pred, pR);
-                const int[4] pPat = pR ? PAT_R : PAT_L;
-
-                // Forward: pred's curFace == face → yi is next
-                if (pFace == face) {
-                    int pCh = pR ? lat.sites[pred].rChain : lat.sites[pred].lChain;
-                    auto pch = &lat.chains[pCh];
-                    if (pch.ops[pch.ops.length - 1].siteId == pred) {
-                        lat.setChainFace(yi, pR, nextFace(pPat, pFace));
-                        lat.chainAppend(pCh, yi);
-                        if (!lat.hasChain(yi, !pR)) {
-                            makeChain!hasCoin(lat, yi, !pR);
+            // Forward end: check if analytic next position matches yi
+            {
+                int nextIdx = ch.rootIdx + n;
+                Vec3 nextP = chainCentroid(&ch.origin, nextIdx);
+                Vec3 diff = Vec3(nextP.x - yiP.x, nextP.y - yiP.y, nextP.z - yiP.z);
+                double d2 = diff.x*diff.x + diff.y*diff.y + diff.z*diff.z;
+                if (d2 < mateTol * mateTol) {
+                    bool isR = ch.isR;
+                    if (!lat.hasChain(yi, isR)) {
+                        lat.chainAppend(cast(int) ci, yi);
+                        if (!lat.hasChain(yi, !isR)) {
+                            makeCrossChain!hasCoin(lat, yi, !isR);
                             nChains++;
                         }
                         return true;
                     }
                 }
+            }
 
-                // Backward: prevFace(pPat, pFace) == face → yi is prev
-                if (prevFace(pPat, pFace) == face) {
-                    int pCh = pR ? lat.sites[pred].rChain : lat.sites[pred].lChain;
-                    auto pch = &lat.chains[pCh];
-                    if (pch.ops[0].siteId == pred) {
-                        lat.setChainFace(yi, pR, face);
-                        lat.chainPrepend(pCh, yi);
-                        if (!lat.hasChain(yi, !pR)) {
-                            makeChain!hasCoin(lat, yi, !pR);
+            // Backward end: check if analytic prev position matches yi
+            {
+                int prevIdx = ch.rootIdx - 1;
+                Vec3 prevP = chainCentroid(&ch.origin, prevIdx);
+                Vec3 diff = Vec3(prevP.x - yiP.x, prevP.y - yiP.y, prevP.z - yiP.z);
+                double d2 = diff.x*diff.x + diff.y*diff.y + diff.z*diff.z;
+                if (d2 < mateTol * mateTol) {
+                    bool isR = ch.isR;
+                    if (!lat.hasChain(yi, isR)) {
+                        lat.chainPrepend(cast(int) ci, yi);
+                        if (!lat.hasChain(yi, !isR)) {
+                            makeCrossChain!hasCoin(lat, yi, !isR);
                             nChains++;
                         }
                         return true;
@@ -878,38 +846,32 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         int rj = orb.members[0].rotIdx;
 
         // Ensure primary has both chains
-        if (!lat.hasChain(x0, IS_R)) { makeChain!hasCoin(lat, x0, IS_R); nChains++; }
-        if (!lat.hasChain(x0, IS_L)) { makeChain!hasCoin(lat, x0, IS_L); nChains++; }
+        if (!lat.hasChain(x0, IS_R)) { makeCrossChain!hasCoin(lat, x0, IS_R); nChains++; }
+        if (!lat.hasChain(x0, IS_L)) { makeCrossChain!hasCoin(lat, x0, IS_L); nChains++; }
 
         bool anyExtended = false;
 
         // Try all 4 directions from the primary to find viable child positions
         foreach (tryR; [true, false]) {
             foreach (tryFwd; [true, false]) {
-                const int[4] pat = tryR ? PAT_R : PAT_L;
                 int x0Ch = tryR ? lat.sites[x0].rChain : lat.sites[x0].lChain;
                 auto ch0 = &lat.chains[x0Ch];
                 int x0End = tryFwd ? ch0.ops[ch0.ops.length - 1].siteId
                                    : ch0.ops[0].siteId;
                 if (x0End != x0) continue;
 
-                int curFace = lat.chainFace(x0, tryR);
-                Vec3 p = lat.sites[x0].pos;
-                Vec3[4] d = lat.sites[x0].dirs;
-                int stepFace = tryFwd ? curFace : prevFace(pat, curFace);
-                helixStep(p, d, stepFace);
+                // Compute analytic next position from the chain
+                int newChainIdx = tryFwd
+                    ? ch0.rootIdx + cast(int) ch0.ops.length
+                    : ch0.rootIdx - 1;
+                Vec3 p = chainCentroid(&ch0.origin, newChainIdx);
 
                 if (exp(-dot(p, p) / (2 * sigma * sigma)) < seedThresh) continue;
                 if (grid.isTooClose(p)) continue;
                 if (isRamLow()) continue;
 
-                Vec3[4] dd = d;
-                reorth(dd);
-
                 // Canonical child position
                 Vec3 canP = a4rots[rj].applyTranspose(p);
-                Vec3[4] canD;
-                foreach (fi; 0 .. 4) canD[fi] = a4rots[rj].applyTranspose(dd[fi]);
 
                 // Phase 1: Create all 12 child sites and register in grid
                 int[12] newIds;  int[12] newRots;  int newN = 0;
@@ -920,10 +882,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
                     Vec3 yiP = a4rots[ri].apply(canP);
                     if (grid.isTooClose(yiP)) continue;
 
-                    Vec3[4] yiD;
-                    foreach (fi; 0 .. 4) yiD[fi] = a4rots[ri].apply(canD[fi]);
-
-                    int yi = lat.allocSite(yiP, yiD);
+                    int yi = lat.allocSite(yiP);
                     if (yi < 0) { oom = true; break; }
                     grid.add(yiP, yi);
 
@@ -980,13 +939,6 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 // ---- D unit tests ----
 
 unittest {
-    foreach (f; 0 .. 4) {
-        assert(prevFace(PAT_R, nextFace(PAT_R, f)) == f);
-        assert(nextFace(PAT_R, prevFace(PAT_R, f)) == f);
-    }
-}
-
-unittest {
     auto lat = Lattice!false.create(100000);
     double sigma = 1.5;
     double stepLen = 2.0 / 3.0;
@@ -1016,13 +968,12 @@ unittest {
 
 unittest {
     auto lat = Lattice!false.create(100);
-    auto d = initTet();
-    int id0 = lat.allocSite(Vec3(0, 0, 0), d);
-    int id1 = lat.allocSite(Vec3(1, 0, 0), d);
+    int id0 = lat.allocSite(Vec3(0, 0, 0));
+    int id1 = lat.allocSite(Vec3(1, 0, 0));
     assert(lat.nsites == 2);
     lat.removeSite(id0);
     assert(lat.freeCount == 1);
-    int id2 = lat.allocSite(Vec3(2, 0, 0), d);
+    int id2 = lat.allocSite(Vec3(2, 0, 0));
     assert(id2 == id0);
     assert(lat.freeCount == 0);
 }
