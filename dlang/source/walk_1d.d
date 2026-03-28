@@ -432,66 +432,100 @@ void run1d(Walk1dParams p) {
                     chi0Re[0], chi0Im[0], chi0Re[1], chi0Im[1],
                     chi0Re[2], chi0Im[2], chi0Re[3], chi0Im[3]);
 
-    // Gaussian IC with momentum kick.
-    // Frame transport keeps spinor aligned with local tau eigenbasis.
-    bool useTransport = true;
-    double norm2 = 0;
-
-    // Forward from center
-    {
-        double[4] chiCurRe = chi0Re;
-        double[4] chiCurIm = chi0Im;
-        foreach (i; center .. hi + 1) {
-            double x = cast(double)(i - center);
-            double w = exp(-x*x / (2 * p.sigma * p.sigma));
-            double phRe = cos(p.k0 * x), phIm = sin(p.k0 * x);
+    // icType=3: load IC directly from /tmp/optimal_ic.dat
+    if (p.icType == 3) {
+        import std.stdio : File;
+        import std.conv : to;
+        import std.array : split;
+        auto f = File("/tmp/optimal_ic.dat", "r");
+        foreach (line; f.byLine()) {
+            auto s = cast(string) line;
+            if (s.length == 0 || s[0] == '#') continue;
+            auto parts = s.split();
+            if (parts.length < 9) continue;
+            int offset = parts[0].to!int;
+            int site = center + offset;
+            if (site < 0 || site >= MAX_N) continue;
+            ensureSite(ch, site);
             foreach (a; 0 .. 4) {
-                psiRe[4*i + a] = w * (phRe * chiCurRe[a] - phIm * chiCurIm[a]);
-                psiIm[4*i + a] = w * (phRe * chiCurIm[a] + phIm * chiCurRe[a]);
-            }
-            norm2 += w * w;
-            if (useTransport && i < hi) {
-                ensureSite(ch, i + 1);
-                Mat4 U = frameTransport(siteTau(ch, i), siteTau(ch, i+1));
-                double[4] chiNextRe = 0, chiNextIm = 0;
-                matVecSplit(U, chiCurRe.ptr, chiCurIm.ptr, chiNextRe.ptr, chiNextIm.ptr);
-                chiCurRe = chiNextRe;
-                chiCurIm = chiNextIm;
+                psiRe[4*site + a] = parts[1 + 2*a].to!double;
+                psiIm[4*site + a] = parts[2 + 2*a].to!double;
             }
         }
-    }
-
-    // Backward from center
-    {
-        double[4] chiCurRe = chi0Re;
-        double[4] chiCurIm = chi0Im;
-        foreach_reverse (i; lo .. center) {
-            if (useTransport) {
-                ensureSite(ch, i);
-                Mat4 U = frameTransport(siteTau(ch, i+1), siteTau(ch, i));
-                double[4] chiNextRe = 0, chiNextIm = 0;
-                matVecSplit(U, chiCurRe.ptr, chiCurIm.ptr, chiNextRe.ptr, chiNextIm.ptr);
-                chiCurRe = chiNextRe;
-                chiCurIm = chiNextIm;
-            }
-            double x = cast(double)(i - center);
-            double w = exp(-x*x / (2 * p.sigma * p.sigma));
-            double phRe = cos(p.k0 * x), phIm = sin(p.k0 * x);
+        // Normalize
+        double norm2f = 0;
+        foreach (i; lo .. hi + 1)
             foreach (a; 0 .. 4) {
-                psiRe[4*i + a] = w * (phRe * chiCurRe[a] - phIm * chiCurIm[a]);
-                psiIm[4*i + a] = w * (phRe * chiCurIm[a] + phIm * chiCurRe[a]);
+                norm2f += psiRe[4*i+a]*psiRe[4*i+a] + psiIm[4*i+a]*psiIm[4*i+a];
             }
-            norm2 += w * w;
+        double nff = 1.0 / sqrt(norm2f);
+        foreach (i; lo .. hi + 1)
+            foreach (a; 0 .. 4) {
+                psiRe[4*i+a] *= nff;
+                psiIm[4*i+a] *= nff;
+            }
+        stderr.writefln("Loaded IC from /tmp/optimal_ic.dat, norm=%.6f", norm2f);
+    } else {
+        // Gaussian IC with momentum kick.
+        // Frame transport keeps spinor aligned with local tau eigenbasis.
+        bool useTransport = true;
+        double norm2 = 0;
+
+        // Forward from center
+        {
+            double[4] chiCurRe = chi0Re;
+            double[4] chiCurIm = chi0Im;
+            foreach (i; center .. hi + 1) {
+                double x = cast(double)(i - center);
+                double w = exp(-x*x / (2 * p.sigma * p.sigma));
+                double phRe = cos(p.k0 * x), phIm = sin(p.k0 * x);
+                foreach (a; 0 .. 4) {
+                    psiRe[4*i + a] = w * (phRe * chiCurRe[a] - phIm * chiCurIm[a]);
+                    psiIm[4*i + a] = w * (phRe * chiCurIm[a] + phIm * chiCurRe[a]);
+                }
+                norm2 += w * w;
+                if (useTransport && i < hi) {
+                    ensureSite(ch, i + 1);
+                    Mat4 U = frameTransport(siteTau(ch, i), siteTau(ch, i+1));
+                    double[4] chiNextRe = 0, chiNextIm = 0;
+                    matVecSplit(U, chiCurRe.ptr, chiCurIm.ptr, chiNextRe.ptr, chiNextIm.ptr);
+                    chiCurRe = chiNextRe;
+                    chiCurIm = chiNextIm;
+                }
+            }
         }
+
+        // Backward from center
+        {
+            double[4] chiCurRe = chi0Re;
+            double[4] chiCurIm = chi0Im;
+            foreach_reverse (i; lo .. center) {
+                if (useTransport) {
+                    ensureSite(ch, i);
+                    Mat4 U = frameTransport(siteTau(ch, i+1), siteTau(ch, i));
+                    double[4] chiNextRe = 0, chiNextIm = 0;
+                    matVecSplit(U, chiCurRe.ptr, chiCurIm.ptr, chiNextRe.ptr, chiNextIm.ptr);
+                    chiCurRe = chiNextRe;
+                    chiCurIm = chiNextIm;
+                }
+                double x = cast(double)(i - center);
+                double w = exp(-x*x / (2 * p.sigma * p.sigma));
+                double phRe = cos(p.k0 * x), phIm = sin(p.k0 * x);
+                foreach (a; 0 .. 4) {
+                    psiRe[4*i + a] = w * (phRe * chiCurRe[a] - phIm * chiCurIm[a]);
+                    psiIm[4*i + a] = w * (phRe * chiCurIm[a] + phIm * chiCurRe[a]);
+                }
+                norm2 += w * w;
+            }
+        }
+
+        double nf = 1.0 / sqrt(norm2);
+        foreach (i; lo .. hi + 1)
+            foreach (a; 0 .. 4) {
+                psiRe[4*i + a] *= nf;
+                psiIm[4*i + a] *= nf;
+            }
     }
-
-    double nf = 1.0 / sqrt(norm2);
-    foreach (i; lo .. hi + 1)
-        foreach (a; 0 .. 4) {
-            psiRe[4*i + a] *= nf;
-            psiIm[4*i + a] *= nf;
-        }
-
     int activeLo = lo, activeHi = hi + 1;
     immutable double ampThresh = 1e-15;
 
