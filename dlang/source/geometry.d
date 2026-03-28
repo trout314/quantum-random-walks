@@ -167,6 +167,128 @@ void reorth(ref Vec3[4] dirs) {
     }
 }
 
+// ---- Analytic BC helix geometry ----
+//
+// All positions and directions computed from the closed-form vertex formula:
+//   v_k = (r cos(kθ), r sin(kθ), k h)   (unit edge, formula frame)
+// then transformed to the walk code frame via Procrustes alignment.
+// No sequential reflections or reorthogonalization needed.
+
+import std.math : cos, sin;
+
+/// BC helix vertex parameters (unit edge length).
+private enum double THETA_BC = 2.300523983021863;  // arccos(-2/3)
+private enum double R_VERTEX = 0.5196152422706632;  // 3√3/10
+private enum double H_VERTEX = 0.3162277660168379;  // 1/√10
+
+/// Scale factor: unit-sphere tetrahedra / unit-edge tetrahedra.
+private enum double HELIX_SCALE = 1.632993161855452;  // 2√6/3
+
+/// Procrustes alignment rotation (row-major 3×3).
+private immutable double[9] R_ALIGN = [
+    +5.555555555553510e-01, -3.975231960002475e-01, -7.302967433402225e-01,
+    +7.698003589194571e-01, -8.606629658278393e-02, +6.324555320336754e-01,
+    -3.142696805278236e-01, -9.135468796040372e-01, +2.581988897471603e-01,
+];
+
+/// Procrustes alignment translation.
+private immutable double[3] T_ALIGN = [
+    +4.714045207910544e-01, -6.531972647421682e-01, -6.666666666666909e-02,
+];
+
+/// Apply the alignment transform: walk_pos = SCALE * R @ formula_pos + T.
+private Vec3 alignToWalkFrame(Vec3 vf) {
+    double sx = HELIX_SCALE * vf.x;
+    double sy = HELIX_SCALE * vf.y;
+    double sz = HELIX_SCALE * vf.z;
+    return Vec3(
+        R_ALIGN[0]*sx + R_ALIGN[1]*sy + R_ALIGN[2]*sz + T_ALIGN[0],
+        R_ALIGN[3]*sx + R_ALIGN[4]*sy + R_ALIGN[5]*sz + T_ALIGN[1],
+        R_ALIGN[6]*sx + R_ALIGN[7]*sy + R_ALIGN[8]*sz + T_ALIGN[2],
+    );
+}
+
+/// Position of the k-th BC helix vertex in the walk code frame.
+Vec3 helixVertex(int k) {
+    double kd = cast(double) k;
+    double angle = kd * THETA_BC;
+    Vec3 vf = Vec3(R_VERTEX * cos(angle), R_VERTEX * sin(angle), kd * H_VERTEX);
+    return alignToWalkFrame(vf);
+}
+
+/// Centroid (walker position) of the n-th tetrahedron.
+/// Tetrahedron n has vertices {v_n, v_{n+1}, v_{n+2}, v_{n+3}}.
+Vec3 helixCentroid(int n) {
+    Vec3 c = Vec3(0, 0, 0);
+    foreach (k; 0 .. 4)
+        c = c + helixVertex(n + k);
+    return c * 0.25;
+}
+
+/// Unit exit direction at site n.
+/// This is the direction from the centroid toward the dropped vertex v_n
+/// (the vertex not shared with tetrahedron n+1).
+Vec3 helixExitDir(int n) {
+    Vec3 c = helixCentroid(n);
+    Vec3 v = helixVertex(n);
+    Vec3 d = v - c;
+    double nrm = norm(d);
+    if (nrm > NORM_TOL)
+        return d * (1.0 / nrm);
+    return Vec3(0, 0, 1);
+}
+
+/// All 4 unit vertex directions from centroid of tetrahedron n.
+Vec3[4] helixVertexDirs(int n) {
+    Vec3 c = helixCentroid(n);
+    Vec3[4] dirs;
+    foreach (k; 0 .. 4) {
+        Vec3 d = helixVertex(n + k) - c;
+        double nrm = norm(d);
+        if (nrm > NORM_TOL)
+            dirs[k] = d * (1.0 / nrm);
+        else
+            dirs[k] = Vec3(0, 0, 0);
+    }
+    return dirs;
+}
+
+unittest {
+    // Analytic centroid matches reflection-based computation for first few sites
+    Vec3 pos = Vec3(0, 0, 0);
+    auto dirs = initTet();
+    immutable int[4] pat = [1, 3, 0, 2];
+
+    foreach (n; 0 .. 20) {
+        Vec3 c = helixCentroid(n);
+        assert(fabs(c.x - pos.x) < 1e-12, "centroid x mismatch");
+        assert(fabs(c.y - pos.y) < 1e-12, "centroid y mismatch");
+        assert(fabs(c.z - pos.z) < 1e-12, "centroid z mismatch");
+
+        helixStep(pos, dirs, pat[n % 4]);
+        if ((n + 1) % 4 == 0)
+            reorth(dirs);
+    }
+}
+
+unittest {
+    // Exit direction at site 0 matches e_1 = (2√2/3, 0, -1/3) (face 1)
+    Vec3 d = helixExitDir(0);
+    assert(fabs(d.x - tetDirs[1].x) < 1e-10);
+    assert(fabs(d.y - tetDirs[1].y) < 1e-10);
+    assert(fabs(d.z - tetDirs[1].z) < 1e-10);
+}
+
+unittest {
+    // Centroid-to-centroid displacement has magnitude 2/3
+    foreach (n; 0 .. 10) {
+        Vec3 c0 = helixCentroid(n);
+        Vec3 c1 = helixCentroid(n + 1);
+        double d = norm(c1 - c0);
+        assert(fabs(d - STEP_LEN) < 1e-12);
+    }
+}
+
 // ---- C interface for Python interop ----
 
 export extern(C)

@@ -10,7 +10,7 @@ module walk_1d;
 import std.math : sqrt, cos, sin, exp, fabs;
 import std.conv : to;
 import std.stdio : writef, writefln, stderr, stdout, File;
-import geometry : Vec3, dot, norm, helixStep, reorth, initTet;
+import geometry : Vec3, dot, norm, helixStep, reorth, initTet, helixCentroid, helixVertexDirs, helixExitDir;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, matVecSplit, alpha;
 
 enum MAX_N = 500_000;
@@ -101,9 +101,9 @@ Chain1d* newChain1d() {
     return ch;
 }
 
-/// Compute tau from stored geometry at site n.
+/// Compute tau at site n from the analytic exit direction.
 Mat4 siteTau(const Chain1d* ch, int n) {
-    return makeTau(ch.dirs[n][ch.faceIdx[n]]);
+    return makeTau(helixExitDir(n));
 }
 
 /// Build chain geometry and operators up to and including site i.
@@ -111,17 +111,10 @@ void ensureSite(Chain1d* ch, int i) {
     assert(i >= 0 && i < MAX_N, "site out of range");
     while (ch.builtUpTo <= i) {
         int n = ch.builtUpTo;
-        if (n == 0) {
-            ch.dirs[0] = initTet();
-            ch.pos[0] = Vec3(0, 0, 0);
-            ch.faceIdx[0] = ch.pat[0];
-        } else {
-            ch.dirs[n] = ch.dirs[n-1];
-            ch.pos[n] = ch.pos[n-1];
-            helixStep(ch.pos[n], ch.dirs[n], ch.pat[(n-1) % 4]);
-            if (n % 8 == 0) reorth(ch.dirs[n]);
-            ch.faceIdx[n] = ch.pat[n % 4];
-        }
+        // Analytic geometry from vertex formula — no reflections needed.
+        ch.pos[n] = helixCentroid(n);
+        ch.dirs[n] = helixVertexDirs(n);
+        ch.faceIdx[n] = ch.pat[n % 4];
 
         // tau and projectors (local — not stored per-site)
         Mat4 tau = siteTau(ch, n);
