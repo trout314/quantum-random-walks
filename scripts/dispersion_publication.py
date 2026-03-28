@@ -187,14 +187,19 @@ def main():
         v_diracs = np.array([d[1] for d in vel_data])
         ax.loglog(v_diracs, v_walks, 'o', color='#2166ac', ms=8, mew=1.5, mfc='white',
                   zorder=3, label='Walk peak velocity')
-    # Perfect agreement line
-    vline = np.logspace(-2, 0, 100)
+    # Perfect agreement line — fit range to data
+    if vel_data:
+        v_min = min(min(v_walks), min(v_diracs)) * 0.8
+        v_max = max(max(v_walks), max(v_diracs)) * 1.15
+    else:
+        v_min, v_max = 0.1, 1.0
+    vline = np.logspace(np.log10(v_min), np.log10(v_max), 100)
     ax.loglog(vline, vline, 'r-', lw=2, label='Perfect agreement', zorder=2)
     ax.set_xlabel('Dirac solver peak velocity', fontsize=13)
     ax.set_ylabel('Walk peak velocity', fontsize=13)
     ax.set_title('(b)  Group velocity', fontsize=14, fontweight='bold')
-    ax.set_xlim(0.01, 1.0)
-    ax.set_ylim(0.01, 1.0)
+    ax.set_xlim(v_min, v_max)
+    ax.set_ylim(v_min, v_max)
     ax.set_aspect('equal')
     ax.legend(fontsize=10, loc='upper left')
     ax.grid(True, alpha=0.15, which='both')
