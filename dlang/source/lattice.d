@@ -11,7 +11,7 @@
 module lattice;
 
 import std.math : sqrt, exp, fabs, cos, sin;
-import geometry : Vec3, dot, norm, initTet, buildAllA4Rotations,
+import geometry : Vec3, Mat3, dot, norm, initTet, buildAllA4Rotations,
     ChainOrigin, computeChainOrigin, chainCentroid, chainExitDir, chainVertexDirs;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, alpha;
 import core.sys.linux.sys.sysinfo : sysinfo, sysinfo_;
@@ -712,238 +712,222 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 
     int nChains = 0;
 
-    // ==== Bootstrap: depth 0, 1, 2 (17 sites) ====
+    // ==== Symmetric lattice growth ====
+    //
+    // Every site is on exactly one R-chain and one L-chain.
+    // Growth is orbit-driven: extending one canonical chain by one step
+    // creates 12 A4-symmetric copies, each with its cross-chain.
+    //
+    // Algorithm:
+    // 1. Create seed: origin site with R-chain and L-chain
+    // 2. Frontier = set of chain ends to extend
+    // 3. Pick a canonical chain end, compute the next site position p
+    // 4. If p is within the Gaussian envelope:
+    //    a. Compute canonical position canP = A4_inv(p)
+    //    b. Create 12 A4 copies of the new site
+    //    c. For each copy: append to parent chain, create cross-chain
+    //    d. Add new chain ends to frontier
+    // 5. Repeat until frontier is empty
 
-    // Depth 0: origin
+    import geometry : helixVertex, Mat3;
+
+    // ---- Helper: create a site with both chains ----
+
+    /// Apply A4 rotation to a ChainOrigin: rotates pos and frame.
+    ChainOrigin rotateChainOrigin(const ChainOrigin* orig, const Mat3* rot) {
+        ChainOrigin result;
+        // Rotate the frame: new_rot = A4_rot * orig_rot
+        foreach (i; 0 .. 3)
+            foreach (j; 0 .. 3) {
+                double s = 0;
+                foreach (k; 0 .. 3)
+                    s += rot.m[3*i+k] * orig.rot.m[3*k+j];
+                result.rot.m[3*i+j] = s;
+            }
+        result.pos0 = rot.apply(orig.pos0);
+        result.tSign = orig.tSign;
+        result.slotPerm = orig.slotPerm;
+        result.facePat = orig.facePat;
+        result.faceOffset = orig.faceOffset;
+        return result;
+    }
+
+    /// Create a chain from a rotated version of a template chain's origin.
+    int makeRotatedChain(bool hasCoin)(ref Lattice!hasCoin lat, int rootSite,
+                                       const ChainOrigin* templateOrigin,
+                                       const Mat3* rot, bool isR) {
+        int chainId = cast(int) lat.chains.length;
+        Chain!hasCoin newChain;
+        newChain.isR = isR;
+        newChain.rootSite = rootSite;
+        newChain.rootIdx = 0;
+        newChain.origin = rotateChainOrigin(templateOrigin, rot);
+        // Fix pos0 to match actual site position (avoid drift)
+        newChain.origin.pos0 = lat.sites[rootSite].pos;
+
+        SiteOps!hasCoin rootOp;
+        rootOp.siteId = rootSite;
+        static if (hasCoin) {
+            Vec3 e = chainExitDir(&newChain.origin, 0);
+            auto coins = buildDualParityCoins(e, lat.coinCt, lat.coinSt);
+            rootOp.coin1 = coins[0];
+            rootOp.coin2 = coins[1];
+        }
+        newChain.ops.pushBack(rootOp);
+        lat.chains ~= newChain;
+
+        if (isR) { lat.sites[rootSite].rChain = chainId; lat.sites[rootSite].rIdx = 0; }
+        else     { lat.sites[rootSite].lChain = chainId; lat.sites[rootSite].lIdx = 0; }
+
+        return chainId;
+    }
+
+    // ---- Seed: origin with R and L chains ----
+
     int origin = lat.allocSite(Vec3(0, 0, 0));
     grid.add(Vec3(0, 0, 0), origin);
 
-    // Seed R-chain: vertex sequence [v0, v1, v2, v3] from the analytic formula.
-    // These are the standard tet dirs (on the unit sphere) as vertex positions.
-    import geometry : helixVertex;
     Vec3[4] seedVerts;
     foreach (k; 0 .. 4) seedVerts[k] = helixVertex(k);
-    int rCh = makeChainFromVertices!hasCoin(lat, origin, IS_R, seedVerts); nChains++;
+    int seedR = makeChainFromVertices!hasCoin(lat, origin, IS_R, seedVerts); nChains++;
+    int seedL = makeCrossChain!hasCoin(lat, origin, IS_L); nChains++;
 
-    // L-chain at origin: permute seed vertices by CROSS_PERM = [1,3,0,2]
-    int lCh = makeCrossChain!hasCoin(lat, origin, IS_L); nChains++;
-    auto rFwd = extendN(rCh, true, 2);   // [depth1_A, depth2_B]
-    auto rBwd = extendN(rCh, false, 2);  // [depth1_C, depth2_D]
-    auto lFwd = extendN(lCh, true, 2);   // [depth1_E, depth2_F]
-    auto lBwd = extendN(lCh, false, 2);  // [depth1_G, depth2_H]
-
-    // Cross-chirality chains from depth-1 sites, extended 1 step each direction
-    int[4] d1sites = [rFwd[0], rBwd[0], lFwd[0], lBwd[0]];
-    int[] depth2cross;
-    foreach (s; d1sites) {
-        bool needR = !lat.hasChain(s, IS_R);
-        int cc = makeCrossChain!hasCoin(lat, s, needR); nChains++;
-        auto fwd = extendN(cc, true, 1);
-        auto bwd = extendN(cc, false, 1);
-        depth2cross ~= fwd[0];
-        depth2cross ~= bwd[0];
-    }
-
-    // Collect depth-2 sites
-    int[] depth2 = [rFwd[1], rBwd[1], lFwd[1], lBwd[1]];
-    depth2 ~= depth2cross;  // 4 + 8 = 12 sites
-
-    // Create cross-chirality chains for all depth-2 sites (just roots, no extension)
-    foreach (s; depth2) {
-        if (!lat.hasChain(s, IS_R)) { makeCrossChain!hasCoin(lat, s, IS_R); nChains++; }
-        if (!lat.hasChain(s, IS_L)) { makeCrossChain!hasCoin(lat, s, IS_L); nChains++; }
-    }
-    // Also ensure depth-1 sites have both chiralities
-    foreach (s; d1sites) {
-        if (!lat.hasChain(s, IS_R)) { makeCrossChain!hasCoin(lat, s, IS_R); nChains++; }
-        if (!lat.hasChain(s, IS_L)) { makeCrossChain!hasCoin(lat, s, IS_L); nChains++; }
-    }
-
-    // ==== Register orbits ====
-
-    // Orbit 0: origin (size 1)
     addOrbit([origin], [0], 1);
 
-    // Orbit 1: depth-1 sites (size 4) — find A4 rotations by position matching
-    {
-        int[4] ids = d1sites;
-        int[4] rots;
-        Vec3 canP = lat.sites[ids[0]].pos;  // canonical = first depth-1 site
-        foreach (i; 0 .. 4) {
-            Vec3 sp = lat.sites[ids[i]].pos;
-            int bestRi = 0; double bestD = double.max;
-            foreach (ri; 0 .. 12) {
-                Vec3 cand = a4rots[ri].apply(canP);
-                Vec3 dv = cand - sp; double d2 = dot(dv, dv);
-                if (d2 < bestD) { bestD = d2; bestRi = ri; }
-            }
-            rots[i] = bestRi;
-        }
-        addOrbit(ids[], rots[], 4);
+    // ---- Chain orbit tracking ----
+    // For each canonical chain, store the 12 A4-rotated partner chain IDs.
+    // chainOrbit[canonicalChainId] = array of 12 chain IDs (indexed by A4 rotation).
+    int[][int] chainOrbitR;  // canonical R-chain → 12 partner R-chains
+    int[][int] chainOrbitL;  // canonical L-chain → 12 partner L-chains
+
+    // Seed chains are their own orbit (origin is A4-invariant)
+    // Actually the origin IS invariant under A4, so all 12 rotated chains
+    // pass through the same site. But the chains themselves go in 12 different
+    // directions. For the seed, we don't need the full orbit machinery.
+
+    // ---- Frontier: chain ends to extend ----
+    struct FrontierEntry {
+        int chainId;
+        bool forward;
+        int a4rot;  // which A4 rotation this chain corresponds to
     }
+    FrontierEntry[] frontier;
 
-    // Orbit 2: depth-2 sites (size 12)
-    {
-        int[12] ids;
-        int[12] rots;
-        foreach (i; 0 .. 12) ids[i] = depth2[i];
-        Vec3 canP = lat.sites[ids[0]].pos;
-        foreach (i; 0 .. 12) {
-            Vec3 sp = lat.sites[ids[i]].pos;
-            int bestRi = 0; double bestD = double.max;
-            foreach (ri; 0 .. 12) {
-                Vec3 cand = a4rots[ri].apply(canP);
-                Vec3 dv = cand - sp; double d2 = dot(dv, dv);
-                if (d2 < bestD) { bestD = d2; bestRi = ri; }
-            }
-            rots[i] = bestRi;
-        }
-        addOrbit(ids[], rots[], 12);
-    }
+    // Add seed chain ends to frontier
+    frontier ~= FrontierEntry(seedR, true, 0);
+    frontier ~= FrontierEntry(seedR, false, 0);
+    frontier ~= FrontierEntry(seedL, true, 0);
+    frontier ~= FrontierEntry(seedL, false, 0);
 
-    // ==== Orbit-driven frontier ====
-    int[] frontier;
-    frontier ~= 2;  // depth-2 orbit
-    int[] unconnected;  // sites created but not yet linked to a chain
-
-    // Helper: try to connect site yi to an existing chain.
-    // Searches all chains for one whose analytic next/prev position matches yi.
-    bool tryConnect(int yi, Vec3 yiP) {
-        // Check each chain to see if yi is its analytic next or prev site
-        foreach (ci, ref ch; lat.chains) {
-            int n = ch.ops.length;
-            if (n == 0) continue;
-
-            // Forward end: check if analytic next position matches yi
-            {
-                int nextIdx = ch.rootIdx + n;
-                Vec3 nextP = chainCentroid(&ch.origin, nextIdx);
-                Vec3 diff = Vec3(nextP.x - yiP.x, nextP.y - yiP.y, nextP.z - yiP.z);
-                double d2 = diff.x*diff.x + diff.y*diff.y + diff.z*diff.z;
-                if (d2 < mateTol * mateTol) {
-                    bool isR = ch.isR;
-                    if (!lat.hasChain(yi, isR)) {
-                        lat.chainAppend(cast(int) ci, yi);
-                        if (!lat.hasChain(yi, !isR)) {
-                            makeCrossChain!hasCoin(lat, yi, !isR);
-                            nChains++;
-                        }
-                        return true;
-                    }
-                }
-            }
-
-            // Backward end: check if analytic prev position matches yi
-            {
-                int prevIdx = ch.rootIdx - 1;
-                Vec3 prevP = chainCentroid(&ch.origin, prevIdx);
-                Vec3 diff = Vec3(prevP.x - yiP.x, prevP.y - yiP.y, prevP.z - yiP.z);
-                double d2 = diff.x*diff.x + diff.y*diff.y + diff.z*diff.z;
-                if (d2 < mateTol * mateTol) {
-                    bool isR = ch.isR;
-                    if (!lat.hasChain(yi, isR)) {
-                        lat.chainPrepend(cast(int) ci, yi);
-                        if (!lat.hasChain(yi, !isR)) {
-                            makeCrossChain!hasCoin(lat, yi, !isR);
-                            nChains++;
-                        }
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    // ---- Orbit-driven growth ----
+    // ---- Main growth loop ----
     int fIdx = 0;
     while (fIdx < frontier.length) {
-        int orbIdx = frontier[fIdx++];
-        auto orb = &orbits[orbIdx];
-        if (orb.size == 0) continue;
+        auto entry = frontier[fIdx++];
+        auto ch = &lat.chains[entry.chainId];
+        int n = ch.ops.length;
+        if (n == 0) continue;
 
-        int x0 = orb.members[0].siteId;
-        int rj = orb.members[0].rotIdx;
+        // Check this chain end is still the actual end
+        int endSite = entry.forward
+            ? ch.ops[n - 1].siteId
+            : ch.ops[0].siteId;
 
-        // Ensure primary has both chains
-        if (!lat.hasChain(x0, IS_R)) { makeCrossChain!hasCoin(lat, x0, IS_R); nChains++; }
-        if (!lat.hasChain(x0, IS_L)) { makeCrossChain!hasCoin(lat, x0, IS_L); nChains++; }
+        // Compute the next site position along this chain
+        int newChainIdx = entry.forward
+            ? ch.rootIdx + n
+            : ch.rootIdx - 1;
+        Vec3 canP = chainCentroid(&ch.origin, newChainIdx);
 
-        bool anyExtended = false;
+        // Gaussian envelope check
+        if (exp(-dot(canP, canP) / (2 * sigma * sigma)) < seedThresh) continue;
+        if (isRamLow()) continue;
 
-        // Try all 4 directions from the primary to find viable child positions
-        foreach (tryR; [true, false]) {
-            foreach (tryFwd; [true, false]) {
-                int x0Ch = tryR ? lat.sites[x0].rChain : lat.sites[x0].lChain;
-                auto ch0 = &lat.chains[x0Ch];
-                int x0End = tryFwd ? ch0.ops[ch0.ops.length - 1].siteId
-                                   : ch0.ops[0].siteId;
-                if (x0End != x0) continue;
-
-                // Compute analytic next position from the chain
-                int newChainIdx = tryFwd
-                    ? ch0.rootIdx + cast(int) ch0.ops.length
-                    : ch0.rootIdx - 1;
-                Vec3 p = chainCentroid(&ch0.origin, newChainIdx);
-
-                if (exp(-dot(p, p) / (2 * sigma * sigma)) < seedThresh) continue;
-                if (grid.isTooClose(p)) continue;
-                if (isRamLow()) continue;
-
-                // Canonical child position
-                Vec3 canP = a4rots[rj].applyTranspose(p);
-
-                // Phase 1: Create all 12 child sites and register in grid
-                int[12] newIds;  int[12] newRots;  int newN = 0;
-                Vec3[12] newPos;
-                bool oom = false;
-
-                foreach (ri; 0 .. 12) {
-                    Vec3 yiP = a4rots[ri].apply(canP);
-                    if (grid.isTooClose(yiP)) continue;
-
-                    int yi = lat.allocSite(yiP);
-                    if (yi < 0) { oom = true; break; }
-                    grid.add(yiP, yi);
-
-                    newIds[newN] = yi;
-                    newRots[newN] = ri;
-                    newPos[newN] = yiP;
-                    newN++;
-                }
-                if (oom) break;
-
-                // Phase 2: Connect each child to its predecessor's chain.
-                foreach (ni; 0 .. newN) {
-                    if (!tryConnect(newIds[ni], newPos[ni]))
-                        unconnected ~= newIds[ni];
-                }
-
-                if (newN > 0) {
-                    int newOrb = addOrbit(newIds[0 .. newN], newRots[0 .. newN], newN);
-                    frontier ~= newOrb;
-                    anyExtended = true;
+        // Create the canonical new site
+        if (grid.isTooClose(canP)) {
+            // Site already exists (created by a partner) — find and connect
+            int existing = grid.findSiteNear(canP, mateTol);
+            if (existing >= 0 && !lat.hasChain(existing, ch.isR)) {
+                if (entry.forward) lat.chainAppend(entry.chainId, existing);
+                else               lat.chainPrepend(entry.chainId, existing);
+                // Create cross-chain if needed
+                if (!lat.hasChain(existing, !ch.isR)) {
+                    makeCrossChain!hasCoin(lat, existing, !ch.isR);
+                    nChains++;
                 }
             }
+            continue;
         }
 
-        if (anyExtended)
-            frontier ~= orbIdx;
-    }
+        int canSite = lat.allocSite(canP);
+        if (canSite < 0) continue;
+        grid.add(canP, canSite);
 
-    // Retry connecting orphaned sites (predecessors may now be at chain ends)
-    {
-        int prevCount = -1;
-        while (unconnected.length > 0 && unconnected.length != prevCount) {
-            prevCount = cast(int) unconnected.length;
-            int[] still;
-            foreach (yi; unconnected) {
-                Vec3 yiP = lat.sites[yi].pos;
-                if (!tryConnect(yi, yiP))
-                    still ~= yi;
+        // Append/prepend to the parent chain
+        if (entry.forward) lat.chainAppend(entry.chainId, canSite);
+        else               lat.chainPrepend(entry.chainId, canSite);
+
+        // Create cross-chain at canonical site
+        int crossChain = makeCrossChain!hasCoin(lat, canSite, !ch.isR);
+        nChains++;
+
+        // Add new chain ends to frontier
+        frontier ~= FrontierEntry(entry.chainId, entry.forward, 0);
+        frontier ~= FrontierEntry(crossChain, true, 0);
+        frontier ~= FrontierEntry(crossChain, false, 0);
+
+        // ---- Create 11 A4-rotated copies ----
+        // The canonical cross-chain origin serves as the template for partners.
+        auto crossOrigin = &lat.chains[crossChain].origin;
+        auto parentOrigin = &ch.origin;
+
+        int[12] orbitIds;
+        int[12] orbitRots;
+        int orbitN = 0;
+        orbitIds[orbitN] = canSite;
+        orbitRots[orbitN] = 0;
+        orbitN++;
+
+        foreach (ri; 1 .. 12) {
+            Vec3 partnerPos = a4rots[ri].apply(canP);
+
+            if (grid.isTooClose(partnerPos)) {
+                // Partner already exists — connect to rotated chains
+                int existing = grid.findSiteNear(partnerPos, mateTol);
+                if (existing >= 0) {
+                    orbitIds[orbitN] = existing;
+                    orbitRots[orbitN] = ri;
+                    orbitN++;
+                }
+                continue;
             }
-            unconnected = still;
+
+            int partnerSite = lat.allocSite(partnerPos);
+            if (partnerSite < 0) continue;
+            grid.add(partnerPos, partnerSite);
+
+            // Create rotated parent chain (same chirality as canonical parent)
+            int partnerParent = makeRotatedChain!hasCoin(
+                lat, partnerSite, parentOrigin, &a4rots[ri], ch.isR);
+            nChains++;
+
+            // Create rotated cross-chain (opposite chirality)
+            int partnerCross = makeRotatedChain!hasCoin(
+                lat, partnerSite, crossOrigin, &a4rots[ri], !ch.isR);
+            nChains++;
+
+            // Add partner chain ends to frontier
+            frontier ~= FrontierEntry(partnerParent, true, ri);
+            frontier ~= FrontierEntry(partnerParent, false, ri);
+            frontier ~= FrontierEntry(partnerCross, true, ri);
+            frontier ~= FrontierEntry(partnerCross, false, ri);
+
+            orbitIds[orbitN] = partnerSite;
+            orbitRots[orbitN] = ri;
+            orbitN++;
         }
+
+        if (orbitN > 0)
+            addOrbit(orbitIds[0 .. orbitN], orbitRots[0 .. orbitN], orbitN);
     }
 
     // Reserve extra capacity for runtime chain extension
