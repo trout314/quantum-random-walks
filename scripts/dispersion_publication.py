@@ -59,7 +59,7 @@ def main():
 
     # Compute Fourier coefficients of the walk blocks
     N_fc = N  # use the full chain for accurate Fourier coefficients
-    M_harm = 5  # truncation
+    M_harm = 3  # harmonics m = -3,...,+3 → 28 bands
     ns_fc = np.arange(N_fc)
 
     # Walk blocks: (Wψ)(m) = F_m ψ(m-1) + G_m ψ(m+1)
@@ -102,9 +102,10 @@ def main():
                 if 0 <= l_idx < 2 * M_harm + 1:
                     row = (mp + M_harm) * 4
                     col = (m + M_harm) * 4
+                    # Phase from shift: u(n∓1) carries e^{∓imθ}
                     Wk[row:row+4, col:col+4] += (
-                        np.exp(-1j * k) * F_hat[l_idx] +
-                        np.exp(1j * k) * G_hat[l_idx])
+                        np.exp(-1j * k) * np.exp(-1j * m * THETA_BC) * F_hat[l_idx] +
+                        np.exp(1j * k) * np.exp(1j * m * THETA_BC) * G_hat[l_idx])
         evals_k = np.linalg.eigvals(Wk)
         E_bands[ik] = np.sort(np.angle(evals_k))
 
@@ -191,13 +192,24 @@ def main():
 
     # --- (a) Spectrum from W(k) ---
     ax = axes[0]
-    # Plot each band as a smooth curve
+    pos_k = k_spec >= 0
+
+    # Identify the physical band: at each k, the band closest to Dirac
+    E_dirac_at_k = np.sqrt(k_spec[pos_k]**2 + m_eff**2)
+    physical_band = np.zeros(pos_k.sum())
+    for ik in range(pos_k.sum()):
+        diffs = np.abs(np.abs(E_bands[np.where(pos_k)[0][ik]]) - E_dirac_at_k[ik])
+        physical_band[ik] = np.abs(E_bands[np.where(pos_k)[0][ik], np.argmin(diffs)])
+
+    # Plot all bands in light gray
     for band in range(E_bands.shape[1]):
         E_b = E_bands[:, band]
-        # Only plot positive-E portion in [0, pi] for clarity
-        pos_k = k_spec >= 0
         ax.plot(k_spec[pos_k], np.abs(E_b[pos_k]),
-                '-', color='#2166ac', lw=0.8, alpha=0.6, rasterized=True)
+                '-', color='#cccccc', lw=0.5, alpha=0.5, rasterized=True)
+
+    # Overlay physical band in blue
+    ax.plot(k_spec[pos_k], physical_band,
+            '-', color='#2166ac', lw=2, alpha=0.9, label='Walk (physical band)')
     k_th = np.linspace(0, np.pi, 300)
     E_dirac = np.sqrt(k_th**2 + m_eff**2)
     ax.plot(k_th, E_dirac, 'r-', lw=2.5, zorder=2,
