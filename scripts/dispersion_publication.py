@@ -85,11 +85,14 @@ def main():
     # (b) Group velocity from peak splitting
     # ================================================================
     print("\n--- (b) Group velocity ---")
-    sigmas_vel = [8, 10, 11, 12, 13, 15, 16]
-    t_vel = 300
+    # (sigma, t_evolve) pairs — t scaled so peaks clearly separate
+    vel_configs = [
+        (6, 150), (7, 200), (8, 250), (10, 300), (11, 300),
+        (12, 350), (13, 400), (14, 400), (15, 450),
+    ]
 
-    vel_data = []  # (v_walk, v_dirac)
-    for sigma in sigmas_vel:
+    vel_data = []  # (v_walk, v_dirac, sigma)
+    for sigma, t_vel in vel_configs:
         # Walk
         psi = make_transported_ic(N, taus, chi_pp, float(sigma))
         for _ in range(t_vel):
@@ -103,23 +106,25 @@ def main():
         rho_d = dd[-1]['total']
         rho_d_n = rho_d / np.sum(rho_d)
 
-        # Right peak positions
-        thresh = max(sigma * 0.3, 5)
+        # Right peak: must be clearly separated (higher than center)
+        thresh = max(sigma * 0.5, 8)
         rmask_w = xs > thresh
         rmask_d = x_d > thresh
         if rmask_w.any() and rmask_d.any():
             xpk_w = xs[rmask_w][np.argmax(rho_w_sm[rmask_w])]
             xpk_d = x_d[rmask_d][np.argmax(rho_d_n[rmask_d])]
-            if xpk_w > thresh and xpk_d > thresh:
+            center_val_w = rho_w_sm[center]
+            peak_val_w = rho_w_sm[xs == xpk_w][0] if xpk_w in xs else 0
+            if xpk_w > thresh and xpk_d > thresh and peak_val_w > center_val_w * 1.05:
                 v_w = xpk_w / t_vel
                 v_d = xpk_d / t_vel
                 vel_data.append((v_w, v_d, sigma))
                 err = (v_w - v_d) / v_d * 100
-                print(f"  σ={sigma:3d}: v_walk={v_w:.4f}, v_dirac={v_d:.4f}, err={err:+.1f}%")
+                print(f"  σ={sigma:3d}, t={t_vel}: v_walk={v_w:.4f}, v_dirac={v_d:.4f}, err={err:+.1f}%")
             else:
-                print(f"  σ={sigma:3d}: peaks not separated")
+                print(f"  σ={sigma:3d}, t={t_vel}: peaks not separated")
         else:
-            print(f"  σ={sigma:3d}: peaks not separated")
+            print(f"  σ={sigma:3d}, t={t_vel}: peaks not separated")
 
     # ================================================================
     # (c) Wavepacket spreading
