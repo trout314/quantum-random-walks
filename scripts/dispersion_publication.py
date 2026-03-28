@@ -175,34 +175,32 @@ def main():
     ax.grid(True, alpha=0.15)
     ax.text(0.08, m_eff + 0.03, f'm = {m_eff:.4f}', fontsize=9, color='red', alpha=0.6)
 
-    # --- (b) Group velocity ---
+    # --- (b) Group velocity (log-log) ---
     ax = axes[1]
     if vel_data:
-        v_walks = [d[0] for d in vel_data]
-        v_diracs = [d[1] for d in vel_data]
-        ax.plot(v_diracs, v_walks, 'o', color='#2166ac', ms=8, mew=1.5, mfc='white',
-                zorder=3, label='Walk peak velocity')
+        v_walks = np.array([d[0] for d in vel_data])
+        v_diracs = np.array([d[1] for d in vel_data])
+        ax.loglog(v_diracs, v_walks, 'o', color='#2166ac', ms=8, mew=1.5, mfc='white',
+                  zorder=3, label='Walk peak velocity')
     # Perfect agreement line
-    vmax = 1.0
-    ax.plot([0, vmax], [0, vmax], 'r-', lw=2, label='Perfect agreement', zorder=2)
+    vline = np.logspace(-2, 0, 100)
+    ax.loglog(vline, vline, 'r-', lw=2, label='Perfect agreement', zorder=2)
     ax.set_xlabel('Dirac solver peak velocity', fontsize=13)
     ax.set_ylabel('Walk peak velocity', fontsize=13)
     ax.set_title('(b)  Group velocity', fontsize=14, fontweight='bold')
-    ax.set_xlim(0, vmax)
-    ax.set_ylim(0, vmax)
+    ax.set_xlim(0.01, 1.0)
+    ax.set_ylim(0.01, 1.0)
     ax.set_aspect('equal')
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.15)
+    ax.legend(fontsize=10, loc='upper left')
+    ax.grid(True, alpha=0.15, which='both')
 
     # Residual inset
     if vel_data:
-        ax_in = ax.inset_axes([0.52, 0.1, 0.44, 0.38])
+        ax_in = ax.inset_axes([0.55, 0.08, 0.42, 0.38])
         residuals = [(vw - vd) / vd * 100 for vw, vd, _ in vel_data]
-        sigs = [d[2] for d in vel_data]
-        ax_in.bar(range(len(residuals)), residuals, color='#2166ac', alpha=0.7)
-        ax_in.set_xticks(range(len(sigs)))
-        ax_in.set_xticklabels([str(s) for s in sigs], fontsize=7, rotation=45)
-        ax_in.set_xlabel('σ', fontsize=8)
+        v_plot = [d[1] for d in vel_data]
+        ax_in.semilogx(v_plot, residuals, 'o-', color='#2166ac', ms=4, lw=1)
+        ax_in.set_xlabel('v_Dirac', fontsize=8)
         ax_in.set_ylabel('Error (%)', fontsize=8)
         ax_in.axhline(0, color='r', lw=1, alpha=0.5)
         ax_in.tick_params(labelsize=7)
