@@ -138,14 +138,10 @@ void ensureSite(Chain1d* ch, int i) {
             Mat4 PpPrev = projPlus(tauPrev);
             ch.ops[n-1].fwdBlock = mul(frameTransport(tauPrev, tau), PpPrev);
 
-            // U(2) gauge: apply diag(1, e^{iψ}) within P+ eigenbasis on fwdBlock.
-            // fwdBlock = FT · P+ acts from the right on ψ, so we insert the
-            // gauge between P+ and FT: fwdBlock_new = FT · G · P+
-            // where G = |b1><b1| + e^{iψ}|b2><b2| within P+(τ_prev).
-            // Equivalently: fwdBlock_new = fwdBlock · (I + (e^{iψ}-1)|b2><b2|)
+            // U(2) gauge: apply diag(1, e^{iψ}) within P+ eigenbasis on fwdBlock
+            // AND within P- eigenbasis on bwdBlock (for unitarity).
             if (ch.gauge2Phase != 0.0 || ch.gaugeMixTheta != 0.0) {
-                // Gram-Schmidt basis for P+(tau_prev)
-                // bRe[j][a], bIm[j][a]: j=basis index, a=spinor component
+                // --- P+ gauge on fwdBlock ---
                 double[4][2] bRe = 0, bIm = 0;
                 int nFound = 0;
                 foreach (col; 0 .. 4) {
@@ -178,12 +174,10 @@ void ensureSite(Chain1d* ch, int i) {
                     }
                 }
 
-                // Optional mixing rotation: rotate (b1, b2) by angle theta
                 if (nFound >= 2 && ch.gaugeMixTheta != 0.0) {
                     double ct = cos(ch.gaugeMixTheta);
                     double st = sin(ch.gaugeMixTheta);
                     foreach (a; 0 .. 4) {
-                        // b1' = ct*b1 + st*b2,  b2' = -st*b1 + ct*b2
                         double r1 = bRe[0][a], i1 = bIm[0][a];
                         double r2 = bRe[1][a], i2 = bIm[1][a];
                         bRe[0][a] = ct * r1 + st * r2;
@@ -193,7 +187,6 @@ void ensureSite(Chain1d* ch, int i) {
                     }
                 }
 
-                // Multiply fwdBlock from right by (I + (e^{i psi}-1)|b2><b2|)
                 if (nFound >= 2 && ch.gauge2Phase != 0.0) {
                     double gc = cos(ch.gauge2Phase) - 1.0;
                     double gs = sin(ch.gauge2Phase);
@@ -215,9 +208,65 @@ void ensureSite(Chain1d* ch, int i) {
                         }
                     }
                 }
+
+                // --- P- gauge on bwdBlock (same phase, for unitarity) ---
+                if (ch.gauge2Phase != 0.0) {
+                    double[4][2] bmRe = 0, bmIm = 0;
+                    int nmF = 0;
+                    foreach (col; 0 .. 4) {
+                        if (nmF >= 2) break;
+                        double[4] vRe = 0, vIm = 0;
+                        foreach (a; 0 .. 4) {
+                            vRe[a] = Pm.re[4*a+col];
+                            vIm[a] = Pm.im[4*a+col];
+                        }
+                        foreach (j; 0 .. nmF) {
+                            double dRe = 0, dIm = 0;
+                            foreach (a; 0 .. 4) {
+                                dRe += bmRe[j][a]*vRe[a] + bmIm[j][a]*vIm[a];
+                                dIm += bmRe[j][a]*vIm[a] - bmIm[j][a]*vRe[a];
+                            }
+                            foreach (a; 0 .. 4) {
+                                vRe[a] -= dRe*bmRe[j][a] - dIm*bmIm[j][a];
+                                vIm[a] -= dRe*bmIm[j][a] + dIm*bmRe[j][a];
+                            }
+                        }
+                        double nm2 = 0;
+                        foreach (a; 0 .. 4) nm2 += vRe[a]*vRe[a] + vIm[a]*vIm[a];
+                        if (nm2 > 1e-10) {
+                            double inv = 1.0 / sqrt(nm2);
+                            foreach (a; 0 .. 4) {
+                                bmRe[nmF][a] = inv * vRe[a];
+                                bmIm[nmF][a] = inv * vIm[a];
+                            }
+                            nmF++;
+                        }
+                    }
+                    if (nmF >= 2) {
+                        double gc = cos(ch.gauge2Phase) - 1.0;
+                        double gs = sin(ch.gauge2Phase);
+                        foreach (a; 0 .. 4) {
+                            double dotRe = 0, dotIm = 0;
+                            foreach (b; 0 .. 4) {
+                                int ab = 4*a+b;
+                                dotRe += ch.ops[n].bwdBlock.re[ab] * bmRe[1][b]
+                                       + ch.ops[n].bwdBlock.im[ab] * bmIm[1][b];
+                                dotIm += ch.ops[n].bwdBlock.im[ab] * bmRe[1][b]
+                                       - ch.ops[n].bwdBlock.re[ab] * bmIm[1][b];
+                            }
+                            double cRe = gc * dotRe - gs * dotIm;
+                            double cIm = gc * dotIm + gs * dotRe;
+                            foreach (b; 0 .. 4) {
+                                int ab = 4*a+b;
+                                ch.ops[n].bwdBlock.re[ab] += cRe * bmRe[1][b] - cIm * bmIm[1][b];
+                                ch.ops[n].bwdBlock.im[ab] += cRe * bmIm[1][b] + cIm * bmRe[1][b];
+                            }
+                        }
+                    }
+                }
             }
 
-            // Same for P- eigenbasis on bwdBlock: diag(1, e^{iψ_m}) within P-(τ)
+            // Additional independent P- gauge (gauge2PhaseM)
             if (ch.gauge2PhaseM != 0.0) {
                 double[4][2] bmRe = 0, bmIm = 0;
                 int nmFound = 0;
