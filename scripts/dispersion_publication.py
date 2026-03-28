@@ -185,24 +185,19 @@ def main():
     if vel_data:
         v_walks = np.array([d[0] for d in vel_data])
         v_diracs = np.array([d[1] for d in vel_data])
-        ax.loglog(v_diracs, v_walks, 'o', color='#2166ac', ms=8, mew=1.5, mfc='white',
-                  zorder=3, label='Walk peak velocity')
-    # Perfect agreement line — fit range to data
-    if vel_data:
-        v_min = min(min(v_walks), min(v_diracs)) * 0.8
-        v_max = max(max(v_walks), max(v_diracs)) * 1.15
-    else:
-        v_min, v_max = 0.1, 1.0
-    vline = np.logspace(np.log10(v_min), np.log10(v_max), 100)
-    ax.loglog(vline, vline, 'r-', lw=2, label='Perfect agreement', zorder=2)
+        ax.plot(v_diracs, v_walks, 'o', color='#2166ac', ms=8, mew=1.5, mfc='white',
+                zorder=3, label='Walk peak velocity')
+    # Perfect agreement line
+    vline = np.linspace(0, 1.0, 100)
+    ax.plot(vline, vline, 'r-', lw=2, label='Perfect agreement', zorder=2)
     ax.set_xlabel('Dirac solver peak velocity', fontsize=13)
     ax.set_ylabel('Walk peak velocity', fontsize=13)
     ax.set_title('(b)  Group velocity', fontsize=14, fontweight='bold')
-    ax.set_xlim(v_min, v_max)
-    ax.set_ylim(v_min, v_max)
+    ax.set_xlim(0, 1.0)
+    ax.set_ylim(0, 1.0)
     ax.set_aspect('equal')
     ax.legend(fontsize=10, loc='upper left')
-    ax.grid(True, alpha=0.15, which='both')
+    ax.grid(True, alpha=0.15)
 
     # Residual inset
     if vel_data:
@@ -210,7 +205,7 @@ def main():
         residuals = np.array([(vw - vd) / vd * 100 for vw, vd, _ in vel_data])
         v_plot = np.array([d[1] for d in vel_data])
         order = np.argsort(v_plot)
-        ax_in.semilogx(v_plot[order], residuals[order], 'o-', color='#2166ac', ms=4, lw=1)
+        ax_in.plot(v_plot[order], residuals[order], 'o-', color='#2166ac', ms=4, lw=1)
         ax_in.set_xlabel('v_Dirac', fontsize=8)
         ax_in.set_ylabel('Error (%)', fontsize=8)
         ax_in.axhline(0, color='r', lw=1, alpha=0.5)
