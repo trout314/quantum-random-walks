@@ -25,9 +25,7 @@ struct Walk1dParams {
     double mixPhi = 0.0;   // post-shift mixing angle
     int spiralType = 0;    // 0=R, 1=L
     int icType = 0;        // 0=(1,0,0,0), 1=(1,0,1,0)/√2, 2=P+/P- symmetric
-    double gauge2Phase = 0.0;  // phase on 2nd P+ basis vector in fwdBlock
-    double gauge2PhaseM = 0.0; // phase on 2nd P- basis vector in bwdBlock
-    double gaugeMixTheta = 0.0; // mixing angle between P+ basis vectors
+    double[4] gaugePhases = 0;  // site-dependent phase: gaugePhases[n % 4]
 }
 
 Walk1dParams parseArgs1d(string[] args) {
@@ -41,9 +39,10 @@ Walk1dParams parseArgs1d(string[] args) {
     if (args.length > 7) p.mixPhi = args[7].to!double;
     if (args.length > 8) p.spiralType = args[8].to!int;
     if (args.length > 9) p.icType = args[9].to!int;
-    if (args.length > 10) p.gauge2Phase = args[10].to!double;
-    if (args.length > 11) p.gauge2PhaseM = args[11].to!double;
-    if (args.length > 12) p.gaugeMixTheta = args[12].to!double;
+    if (args.length > 10) p.gaugePhases[0] = args[10].to!double;
+    if (args.length > 11) p.gaugePhases[1] = args[11].to!double;
+    if (args.length > 12) p.gaugePhases[2] = args[12].to!double;
+    if (args.length > 13) p.gaugePhases[3] = args[13].to!double;
     return p;
 }
 
@@ -69,9 +68,7 @@ struct Chain1d {
     int coinType;
     bool useCoin2, useCoin3;
     double mixPhi;
-    double gauge2Phase;
-    double gauge2PhaseM;
-    double gaugeMixTheta;
+    double[4] gaugePhases;
 }
 
 /// Allocate all Chain1d arrays from a single GC buffer.
@@ -141,9 +138,10 @@ void ensureSite(Chain1d* ch, int i) {
             // U(2) gauge at site n-1: build the full 4×4 unitary gauge matrix
             // G = I + (e^{iψ}-1)(|b2+><b2+| + |b2-><b2-|)
             // using tauPrev's eigenbasis, then multiply both blocks by G.
-            if (ch.gauge2Phase != 0.0) {
+            // The phase ψ depends on site position: gaugePhases[(n-1) % 4].
+            double gphase = ch.gaugePhases[(n-1) % 4];
+            if (gphase != 0.0) {
                 Mat4 PmPrev = projMinus(tauPrev);
-                double gphase = ch.gauge2Phase;
 
                 // Gram-Schmidt b2 for P+ and P- of tauPrev
                 double[4][2][2] bRe = 0, bIm = 0;  // [pm][basis_idx][component]
@@ -194,62 +192,7 @@ void ensureSite(Chain1d* ch, int i) {
                     ch.ops[n-1].bwdBlock = mul(ch.ops[n-1].bwdBlock, G);
             }
 
-            // Additional independent P- gauge (gauge2PhaseM)
-            if (ch.gauge2PhaseM != 0.0) {
-                double[4][2] bmRe = 0, bmIm = 0;
-                int nmFound = 0;
-                foreach (col; 0 .. 4) {
-                    if (nmFound >= 2) break;
-                    double[4] vRe = 0, vIm = 0;
-                    foreach (a; 0 .. 4) {
-                        vRe[a] = Pm.re[4*a+col];
-                        vIm[a] = Pm.im[4*a+col];
-                    }
-                    foreach (j; 0 .. nmFound) {
-                        double dRe = 0, dIm = 0;
-                        foreach (a; 0 .. 4) {
-                            dRe += bmRe[j][a] * vRe[a] + bmIm[j][a] * vIm[a];
-                            dIm += bmRe[j][a] * vIm[a] - bmIm[j][a] * vRe[a];
-                        }
-                        foreach (a; 0 .. 4) {
-                            vRe[a] -= dRe * bmRe[j][a] - dIm * bmIm[j][a];
-                            vIm[a] -= dRe * bmIm[j][a] + dIm * bmRe[j][a];
-                        }
-                    }
-                    double nm2 = 0;
-                    foreach (a; 0 .. 4) nm2 += vRe[a]*vRe[a] + vIm[a]*vIm[a];
-                    if (nm2 > 1e-10) {
-                        double inv = 1.0 / sqrt(nm2);
-                        foreach (a; 0 .. 4) {
-                            bmRe[nmFound][a] = inv * vRe[a];
-                            bmIm[nmFound][a] = inv * vIm[a];
-                        }
-                        nmFound++;
-                    }
-                }
-
-                if (nmFound >= 2) {
-                    double gc = cos(ch.gauge2PhaseM) - 1.0;
-                    double gs = sin(ch.gauge2PhaseM);
-                    foreach (a; 0 .. 4) {
-                        double dotRe = 0, dotIm = 0;
-                        foreach (b; 0 .. 4) {
-                            int ab = 4*a+b;
-                            dotRe += ch.ops[n].bwdBlock.re[ab] * bmRe[1][b]
-                                   + ch.ops[n].bwdBlock.im[ab] * bmIm[1][b];
-                            dotIm += ch.ops[n].bwdBlock.im[ab] * bmRe[1][b]
-                                   - ch.ops[n].bwdBlock.re[ab] * bmIm[1][b];
-                        }
-                        double cRe = gc * dotRe - gs * dotIm;
-                        double cIm = gc * dotIm + gs * dotRe;
-                        foreach (b; 0 .. 4) {
-                            int ab = 4*a+b;
-                            ch.ops[n].bwdBlock.re[ab] += cRe * bmRe[1][b] - cIm * bmIm[1][b];
-                            ch.ops[n].bwdBlock.im[ab] += cRe * bmIm[1][b] + cIm * bmRe[1][b];
-                        }
-                    }
-                }
-            }
+            // (old gauge2PhaseM block removed — now handled by gaugePhases)
         }
 
         // Coins
@@ -429,9 +372,7 @@ void run1d(Walk1dParams p) {
     ch.st = st;
     ch.coinType = p.coinType;
     ch.mixPhi = p.mixPhi;
-    ch.gauge2Phase = p.gauge2Phase;
-    ch.gauge2PhaseM = p.gauge2PhaseM;
-    ch.gaugeMixTheta = p.gaugeMixTheta;
+    ch.gaugePhases = p.gaugePhases;
 
     // Initialize wavepacket centered at MAX_N/2
     int center = MAX_N / 2;
