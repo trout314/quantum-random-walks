@@ -7,7 +7,7 @@
 module operators;
 
 import std.math : sqrt, fabs, cos, sin, exp;
-import geometry : Vec3, dot, norm, helixStep, reorth;
+import geometry : Vec3, dot, norm, helixStep, reorth, chainCentroid, chainVertexDirs;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, matVecSplit, alpha;
 import lattice : Lattice, nextFace, prevFace, PAT_R, PAT_L, IS_R, IS_L, isRamLow;
 
@@ -43,15 +43,16 @@ private int tryExtendFwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
     int face = lat.chainFace(s, isR);
     int nf = nextFace(pat, face);
 
-    Vec3 p = lat.sites[s].pos;
-    auto d = lat.sites[s].dirs;
-    helixStep(p, d, face);
-    reorth(d);
+    // Compute new site geometry from analytic formula
+    int chainId = isR ? lat.sites[s].rChain : lat.sites[s].lChain;
+    auto ch = &lat.chains[chainId];
+    int newChainIdx = ch.rootIdx + cast(int) ch.ops.length;
+    Vec3 p = chainCentroid(&ch.origin, newChainIdx);
+    auto d = chainVertexDirs(&ch.origin, newChainIdx);
 
     int nb = lat.allocSite(p, d);
     if (nb < 0) return -2;  // lattice full
     lat.setChainFace(nb, isR, nf);
-    int chainId = isR ? lat.sites[s].rChain : lat.sites[s].lChain;
     lat.chainAppend(chainId, nb);
     return nb;
 }
@@ -66,15 +67,16 @@ private int tryExtendBwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
     int face = lat.chainFace(s, isR);
     int pf = prevFace(pat, face);
 
-    Vec3 p = lat.sites[s].pos;
-    auto d = lat.sites[s].dirs;
-    helixStep(p, d, pf);
-    reorth(d);
+    // Compute new site geometry from analytic formula
+    int chainId = isR ? lat.sites[s].rChain : lat.sites[s].lChain;
+    auto ch = &lat.chains[chainId];
+    int newChainIdx = ch.rootIdx - 1;
+    Vec3 p = chainCentroid(&ch.origin, newChainIdx);
+    auto d = chainVertexDirs(&ch.origin, newChainIdx);
 
     int nb = lat.allocSite(p, d);
     if (nb < 0) return -2;  // lattice full
     lat.setChainFace(nb, isR, pf);
-    int chainId = isR ? lat.sites[s].rChain : lat.sites[s].lChain;
     lat.chainPrepend(chainId, nb);
     return nb;
 }

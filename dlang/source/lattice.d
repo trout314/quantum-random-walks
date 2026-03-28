@@ -11,7 +11,8 @@
 module lattice;
 
 import std.math : sqrt, exp, fabs, cos, sin;
-import geometry : Vec3, Mat3, dot, norm, helixStep, reorth, initTet, REORTH_INTERVAL, buildAllA4Rotations;
+import geometry : Vec3, Mat3, dot, norm, helixStep, reorth, initTet, REORTH_INTERVAL, buildAllA4Rotations,
+    ChainOrigin, computeChainOrigin, chainCentroid, chainExitDir, chainVertexDirs;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, alpha;
 import core.sys.linux.sys.sysinfo : sysinfo, sysinfo_;
 
@@ -174,6 +175,7 @@ struct Chain(bool hasCoin) {
     int rootSite;
     int rootIdx;
     Deque!(SiteOps!hasCoin) ops;
+    ChainOrigin origin;  /// analytic helix parameters for this chain
 }
 
 /// Per-site data.
@@ -416,6 +418,12 @@ struct Lattice(bool hasCoin) {
             chains[ci].isR = isR;
             chains[ci].rootSite = snap.chainRootSite[ci];
             chains[ci].rootIdx = snap.chainRootIdx[ci];
+            {
+                int rs = snap.chainRootSite[ci];
+                int rf = isR ? sites[rs].rFace : sites[rs].lFace;
+                if (rf >= 0)
+                    chains[ci].origin = computeChainOrigin(sites[rs].pos, sites[rs].dirs, rf, isR);
+            }
 
             // Clear and refill ops, reusing existing deque buffer
             int n = cast(int) ids.length;
@@ -610,6 +618,9 @@ private int makeChain(bool hasCoin)(ref Lattice!hasCoin lat, int rootSite, bool 
     newChain.isR = isR;
     newChain.rootSite = rootSite;
     newChain.rootIdx = 0;
+    newChain.origin = computeChainOrigin(lat.sites[rootSite].pos,
+                                          lat.sites[rootSite].dirs,
+                                          face, isR);
     SiteOps!hasCoin rootOp;
     rootOp.siteId = rootSite;
     static if (hasCoin) {
