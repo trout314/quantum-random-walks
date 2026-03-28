@@ -85,7 +85,7 @@ def main():
     # (b) Group velocity from peak splitting
     # ================================================================
     print("\n--- (b) Group velocity ---")
-    sigmas_vel = [8, 10, 11, 12, 13, 15, 16, 18, 20, 25, 30]
+    sigmas_vel = [8, 10, 11, 12, 13, 15, 16]
     t_vel = 300
 
     vel_data = []  # (v_walk, v_dirac)
@@ -197,9 +197,10 @@ def main():
     # Residual inset
     if vel_data:
         ax_in = ax.inset_axes([0.55, 0.08, 0.42, 0.38])
-        residuals = [(vw - vd) / vd * 100 for vw, vd, _ in vel_data]
-        v_plot = [d[1] for d in vel_data]
-        ax_in.semilogx(v_plot, residuals, 'o-', color='#2166ac', ms=4, lw=1)
+        residuals = np.array([(vw - vd) / vd * 100 for vw, vd, _ in vel_data])
+        v_plot = np.array([d[1] for d in vel_data])
+        order = np.argsort(v_plot)
+        ax_in.semilogx(v_plot[order], residuals[order], 'o-', color='#2166ac', ms=4, lw=1)
         ax_in.set_xlabel('v_Dirac', fontsize=8)
         ax_in.set_ylabel('Error (%)', fontsize=8)
         ax_in.axhline(0, color='r', lw=1, alpha=0.5)
