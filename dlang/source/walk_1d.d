@@ -10,7 +10,7 @@ module walk_1d;
 import std.math : sqrt, cos, sin, exp, fabs;
 import std.conv : to;
 import std.stdio : writef, writefln, stderr, stdout, File;
-import geometry : Vec3, dot, norm, helixStep, reorth, initTet, helixCentroid, helixVertexDirs, helixExitDir;
+import geometry : Vec3, dot, norm, initTet, helixCentroid, helixVertexDirs, helixExitDir;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, matVecSplit, alpha;
 
 enum MAX_N = 500_000;
