@@ -253,6 +253,218 @@ Vec3[4] helixVertexDirs(int n) {
     return dirs;
 }
 
+// ---- Parameterized helix for arbitrary chain origins (3D lattice) ----
+
+/// Origin data for a BC helix chain starting at an arbitrary site.
+/// Stores the rotation from the standard frame to the chain's local frame,
+/// plus the starting position and chirality sign.
+struct ChainOrigin {
+    Mat3 rot;       /// rotation from standard frame to chain frame
+    Vec3 pos0;      /// position of chain's first centroid
+    double tSign;   /// +1 for R-helix, -1 for L-helix
+}
+
+/// Compute the chain origin from a site's position, directions, and chirality.
+/// Finds the rotation R such that R maps the standard initial exit direction
+/// to the chain's exit direction at its root, and R maps the standard
+/// initial centroid displacement pattern to the chain's displacement pattern.
+ChainOrigin computeChainOrigin(Vec3 pos, Vec3[4] dirs, int face, bool isR) {
+    ChainOrigin origin;
+    origin.pos0 = pos;
+    origin.tSign = isR ? 1.0 : -1.0;
+
+    // The standard helix exit direction at site 0
+    Vec3 stdExit = helixExitDir(0);
+
+    // The chain's exit direction (the face direction at the root site)
+    Vec3 chainExit = dirs[face];
+    double cn = norm(chainExit);
+    if (cn > NORM_TOL) chainExit = chainExit * (1.0 / cn);
+
+    // Build rotation using Kabsch on all 4 vertex directions.
+    // Standard dirs at site 0:
+    Vec3[4] stdDirs = helixVertexDirs(0);
+
+    // Chain dirs (already unit vectors in dirs[])
+    // We need to find the permutation + rotation that maps stdDirs → dirs.
+    // Use the fact that all 4 directions sum to zero and have pairwise dot = -1/3.
+    // The rotation R satisfies R · stdDirs[k] ≈ dirs[perm[k]].
+    // For Kabsch, we need the correspondence. Use the exit direction to anchor:
+    // stdDirs[0] is the exit dir in standard frame, dirs[face] is exit in chain frame.
+    // Match stdDirs[0] → dirs[face], then find best R for the remaining 3.
+
+    // Build correspondence: stdDirs[0] → dirs[face]
+    // For the other 3 std dirs, find the best-matching chain dir by dot product.
+    int[4] perm;
+    perm[0] = face;
+    bool[4] used;
+    used[face] = true;
+
+    foreach (si; 1 .. 4) {
+        double bestDot = -2;
+        int bestJ = -1;
+        foreach (j; 0 .. 4) {
+            if (used[j]) continue;
+            double d = dot(stdDirs[si], dirs[j]); // approximate: dirs may be rotated
+            // Actually we want the j that, under R, maps stdDirs[si] closest to dirs[j].
+            // Since R maps stdDirs[0]→dirs[face], use the ANGULAR relationship:
+            // dot(stdDirs[0], stdDirs[si]) should equal dot(dirs[face], dirs[j])
+            // All pairs have dot = -1/3, so this doesn't disambiguate.
+            // Use cross products instead: stdDirs[0] × stdDirs[si] should map to dirs[face] × dirs[j]
+            // (up to rotation). Match by maximizing triple product consistency.
+
+            // Simpler: just use greedy matching. Build a crude R from the exit direction
+            // alignment, then use it to predict where stdDirs[si] maps, and pick closest.
+            if (si == 1 && bestJ < 0) { bestJ = j; continue; } // need initial R
+        }
+        // Fall back to a different strategy: Kabsch on all matched pairs.
+    }
+
+    // Actually, simpler approach: build R from the 4×3 → 4×3 Kabsch directly,
+    // trying all 24 permutations and picking the one with smallest residual.
+    // But this is expensive. Since we only do it once per chain creation, it's OK.
+
+    // Find R by constraining: stdDirs[0] must map to dirs[face] (exit direction).
+    // Among all permutations with p[0] = face, compute R = (3/4) Σ dirs[p[k]] ⊗ stdDirs[k]
+    // and pick the one that best reproduces the centroid displacement at site 1.
+    //
+    // For tetrahedral directions, ALL A4 rotations give zero residual on the 4 directions
+    // (because E·Eᵀ = (4/3)I makes the Kabsch degenerate). The exit direction constraint
+    // + centroid check resolves this ambiguity.
+
+    double bestErr = 1e30;
+    Mat3 bestR;
+
+    static immutable int[4][24] allPerms = computeAllPerms();
+    foreach (ref p; allPerms) {
+        // Constraint: the exit direction must match
+        if (p[0] != face) continue;
+
+        // R_ij = (3/4) Σ_k dirs[p[k]]_i · stdDirs[k]_j
+        Mat3 R;
+        foreach (i; 0 .. 3)
+            foreach (j; 0 .. 3) {
+                double s = 0;
+                foreach (k; 0 .. 4) {
+                    double di = void, sj = void;
+                    final switch (i) { case 0: di=dirs[p[k]].x; break; case 1: di=dirs[p[k]].y; break; case 2: di=dirs[p[k]].z; break; }
+                    final switch (j) { case 0: sj=stdDirs[k].x; break; case 1: sj=stdDirs[k].y; break; case 2: sj=stdDirs[k].z; break; }
+                    s += di * sj;
+                }
+                R.m[3*i+j] = 0.75 * s;
+            }
+
+        // Check determinant — only proper rotations (det ≈ +1) are valid.
+        double det = R.m[0]*(R.m[4]*R.m[8]-R.m[5]*R.m[7])
+                   - R.m[1]*(R.m[3]*R.m[8]-R.m[5]*R.m[6])
+                   + R.m[2]*(R.m[3]*R.m[7]-R.m[4]*R.m[6]);
+        if (det < 0) continue;  // skip improper rotations
+
+        // Disambiguate using centroid displacements to sites 1 and 2.
+        double err = 0;
+        foreach (site; 1 .. 3) {
+            Vec3 stdDelta = helixCentroid(site) - helixCentroid(0);
+            Vec3 chainDelta = R.apply(stdDelta);
+            // The actual chain displacement: walk code gives known positions
+            // For site 1: -(2/3) * dirs[face]
+            // For site 2: need to reflect and step again — but we don't want reflections!
+            // Instead, compare R · (helixExitDir(site)) with expected chain exit dir.
+            Vec3 stdExitN = helixExitDir(site);
+            Vec3 chainExitMapped = R.apply(stdExitN);
+            // The mapped exit dir should be a unit tetrahedral direction at the chain site.
+            // Use displacement check for site 1:
+            Vec3 actualDelta = dirs[face] * (-STEP_LEN);
+            if (site == 1) {
+                Vec3 diff = chainDelta - actualDelta;
+                err += diff.x*diff.x + diff.y*diff.y + diff.z*diff.z;
+            }
+        }
+
+        if (err < bestErr) {
+            bestErr = err;
+            bestR = R;
+        }
+    }
+
+    origin.rot = bestR;
+    return origin;
+}
+
+/// Helper: compute all 24 permutations of {0,1,2,3} at compile time.
+private int[4][24] computeAllPerms() {
+    int[4][24] result;
+    int idx = 0;
+    foreach (a; 0 .. 4)
+        foreach (b; 0 .. 4) {
+            if (b == a) continue;
+            foreach (c; 0 .. 4) {
+                if (c == a || c == b) continue;
+                int d = 6 - a - b - c;
+                result[idx++] = [a, b, c, d];
+            }
+        }
+    return result;
+}
+
+/// Vertex position for a chain with given origin, at formula vertex index k.
+private Vec3 chainHelixVertex(const ChainOrigin* origin, int k) {
+    double kd = cast(double) k;
+    double angle = kd * THETA_BC * origin.tSign;
+    // Formula-frame vertex (unit edge)
+    Vec3 vf = Vec3(R_VERTEX * cos(angle), R_VERTEX * sin(angle), kd * H_VERTEX);
+    // Transform to standard walk frame
+    Vec3 vStd = alignToWalkFrame(vf);
+    // Subtract standard centroid(0) to get displacement from origin
+    Vec3 c0Std = helixCentroid(0);
+    Vec3 delta = vStd - c0Std;
+    // Rotate to chain frame and translate
+    return origin.rot.apply(delta) + origin.pos0;
+}
+
+/// Centroid at chain index n for a chain with given origin.
+Vec3 chainCentroid(const ChainOrigin* origin, int n) {
+    Vec3 c = Vec3(0, 0, 0);
+    foreach (k; 0 .. 4)
+        c = c + chainHelixVertex(origin, n + k);
+    return c * 0.25;
+}
+
+/// Exit direction at chain index n for a chain with given origin.
+Vec3 chainExitDir(const ChainOrigin* origin, int n) {
+    Vec3 c = chainCentroid(origin, n);
+    Vec3 v = chainHelixVertex(origin, n);
+    Vec3 d = v - c;
+    double nrm = norm(d);
+    if (nrm > NORM_TOL)
+        return d * (1.0 / nrm);
+    return Vec3(0, 0, 1);
+}
+
+/// All 4 vertex directions at chain index n for a chain with given origin.
+Vec3[4] chainVertexDirs(const ChainOrigin* origin, int n) {
+    Vec3 c = chainCentroid(origin, n);
+    Vec3[4] dirs;
+    foreach (k; 0 .. 4) {
+        Vec3 d = chainHelixVertex(origin, n + k) - c;
+        double nrm = norm(d);
+        if (nrm > NORM_TOL)
+            dirs[k] = d * (1.0 / nrm);
+    }
+    return dirs;
+}
+
+unittest {
+    // ChainOrigin at standard origin should match helixCentroid/helixExitDir
+    Vec3[4] stdDirs;
+    stdDirs[] = tetDirs[];
+    auto origin = computeChainOrigin(Vec3(0,0,0), stdDirs, 1, true);
+    foreach (n; 0 .. 10) {
+        Vec3 c1 = chainCentroid(&origin, n);
+        Vec3 c2 = helixCentroid(n);
+        assert(norm(c1 - c2) < 1e-10, "chainCentroid mismatch at standard origin");
+    }
+}
+
 unittest {
     // Analytic centroid matches reflection-based computation for first few sites
     Vec3 pos = Vec3(0, 0, 0);
