@@ -6,7 +6,9 @@ The IC is a 4-component spinor at each site, stored as:
 """
 import numpy as np, sys, os
 sys.path.insert(0, os.path.dirname(__file__))
-from fourier_dispersion import build_chain, build_walk_operator
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from fourier_dispersion import build_walk_operator
+from src.helix_geometry import build_taus, centroid
 
 def build_optimal_ic(N_small=400, sigma=50, mixPhi=0.03, energy_cutoff=0.08,
                      outfile='/tmp/optimal_ic.dat'):
@@ -14,7 +16,7 @@ def build_optimal_ic(N_small=400, sigma=50, mixPhi=0.03, energy_cutoff=0.08,
     center = N_small // 2
 
     print(f"Building walk operator (N={N_small})...")
-    positions, dirs_all, face_idx, taus = build_chain(N_small, pat)
+    taus = build_taus(N_small)
     W = build_walk_operator(N_small, taus, mixPhi)
 
     print("Diagonalizing...")
