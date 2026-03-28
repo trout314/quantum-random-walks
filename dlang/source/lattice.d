@@ -571,11 +571,34 @@ struct Lattice(bool hasCoin) {
 
 private struct ChainSeed { int siteId; bool isR; }
 
-/// Create a new chain with the given root site.  Returns the chain ID.
-/// dirs: tetrahedral vertex directions at the root site.
-/// face: which vertex direction is the exit direction for this chain.
-private int makeChain(bool hasCoin)(ref Lattice!hasCoin lat, int rootSite, bool isR,
-                                    Vec3[4] dirs, int face) {
+/// The vertex permutation that generates the perpendicular cross-chain.
+/// L-chain vertex sequence = R-chain vertices permuted by [1,3,0,2].
+/// Inverse permutation (R from L) = [2,0,3,1].
+private immutable int[4] CROSS_PERM = [1, 3, 0, 2];
+private immutable int[4] CROSS_PERM_INV = [2, 0, 3, 1];
+
+/// Create a new chain from 4 initial vertices in sequence order.
+/// The chain is a BC helix: tet 0 = {v[0],v[1],v[2],v[3]}, drops v[0] first.
+/// Returns the chain ID.
+private int makeChainFromVertices(bool hasCoin)(ref Lattice!hasCoin lat, int rootSite,
+                                                bool isR, Vec3[4] initialVerts) {
+    // Compute ChainOrigin from initial vertices
+    Vec3 c0 = (initialVerts[0] + initialVerts[1] + initialVerts[2] + initialVerts[3]) * 0.25;
+    Vec3 exitDir = initialVerts[0] - c0;
+    double en = norm(exitDir);
+    if (en > 1e-15) exitDir = exitDir * (1.0 / en);
+
+    // Build dirs array (normalized vertex directions from centroid)
+    Vec3[4] dirs;
+    foreach (k; 0 .. 4) {
+        Vec3 d = initialVerts[k] - c0;
+        double n = norm(d);
+        if (n > 1e-15) dirs[k] = d * (1.0 / n);
+    }
+
+    // face = 0 since the exit direction is always dirs[0] (first vertex = dropped vertex)
+    int face = 0;
+
     int chainId = cast(int) lat.chains.length;
     Chain!hasCoin newChain;
     newChain.isR = isR;
@@ -599,40 +622,33 @@ private int makeChain(bool hasCoin)(ref Lattice!hasCoin lat, int rootSite, bool 
     return chainId;
 }
 
-/// Perpendicularity mapping: given an R-chain face, return the L-chain face.
-/// Mapping: 0<->1, 2<->3.
-private int perpFace(int face) {
-    immutable int[4] map = [1, 0, 3, 2];
-    return map[face];
-}
-
-/// Get vertex dirs for a site from its existing chain, for use when creating
-/// a second (cross-chirality) chain. Returns dirs and the face index for the
-/// existing chain's exit direction.
-private void getDirsFromExistingChain(bool hasCoin)(const Lattice!hasCoin lat, int siteId,
-                                                     bool existingIsR,
-                                                     out Vec3[4] dirs, out int existingFace) {
+/// Create the perpendicular cross-chain at a site that already has one chain.
+/// Uses the [1,3,0,2] vertex permutation to generate the perpendicular helix.
+private int makeCrossChain(bool hasCoin)(ref Lattice!hasCoin lat, int siteId, bool newIsR) {
+    // Get the existing chain's vertex sequence at this site
+    bool existingIsR = !newIsR;
     int chainId = existingIsR ? lat.sites[siteId].rChain : lat.sites[siteId].lChain;
     int idx = existingIsR ? lat.sites[siteId].rIdx : lat.sites[siteId].lIdx;
     auto ch = &lat.chains[chainId];
     int chainIdx = ch.rootIdx + idx;
-    dirs = chainVertexDirs(&ch.origin, chainIdx);
-    // Determine which face slot holds the exit direction
-    immutable int[4] patR = [1, 3, 0, 2];
-    immutable int[4] patL = [0, 2, 1, 3];
-    auto pat = existingIsR ? patR : patL;
-    int patIdx = ((chainIdx + ch.origin.faceOffset) % 4 + 4) % 4;
-    existingFace = pat[patIdx];
-}
 
-/// Create a cross-chirality chain for a site that already has one chain.
-/// Computes dirs from the existing chain and uses perpFace for the new face.
-private int makeCrossChain(bool hasCoin)(ref Lattice!hasCoin lat, int siteId, bool newIsR) {
-    Vec3[4] dirs;
-    int existingFace;
-    getDirsFromExistingChain!hasCoin(lat, siteId, !newIsR, dirs, existingFace);
-    int newFace = perpFace(existingFace);
-    return makeChain!hasCoin(lat, siteId, newIsR, dirs, newFace);
+    // Get the 4 vertices of the existing chain's tet at this site.
+    // Vertex k = centroid + direction * radius. We reconstruct from centroid + dirs.
+    Vec3 c = chainCentroid(&ch.origin, chainIdx);
+    Vec3[4] dirs = chainVertexDirs(&ch.origin, chainIdx);
+    // chainVertexDirs returns unit directions; vertices are at centroid + dir * radius
+    // where radius = distance from centroid to vertex = 1.0 (unit sphere tetrahedron)
+    Vec3[4] existingVerts;
+    foreach (k; 0 .. 4)
+        existingVerts[k] = Vec3(c.x + dirs[k].x, c.y + dirs[k].y, c.z + dirs[k].z);
+
+    // Apply the cross permutation: if going R→L use CROSS_PERM, L→R use inverse
+    auto perm = existingIsR ? CROSS_PERM : CROSS_PERM_INV;
+    Vec3[4] crossVerts;
+    foreach (k; 0 .. 4)
+        crossVerts[k] = existingVerts[perm[k]];
+
+    return makeChainFromVertices!hasCoin(lat, siteId, newIsR, crossVerts);
 }
 
 /// Per-site orbit membership.
@@ -699,13 +715,17 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     // ==== Bootstrap: depth 0, 1, 2 (17 sites) ====
 
     // Depth 0: origin
-    auto d0 = initTet();
     int origin = lat.allocSite(Vec3(0, 0, 0));
     grid.add(Vec3(0, 0, 0), origin);
 
-    // Origin's R and L chains, extended 2 steps each direction
-    // R-chain uses face 1, L-chain uses perpFace(1)=0
-    int rCh = makeChain!hasCoin(lat, origin, IS_R, d0, 1); nChains++;
+    // Seed R-chain: vertex sequence [v0, v1, v2, v3] from the analytic formula.
+    // These are the standard tet dirs (on the unit sphere) as vertex positions.
+    import geometry : helixVertex;
+    Vec3[4] seedVerts;
+    foreach (k; 0 .. 4) seedVerts[k] = helixVertex(k);
+    int rCh = makeChainFromVertices!hasCoin(lat, origin, IS_R, seedVerts); nChains++;
+
+    // L-chain at origin: permute seed vertices by CROSS_PERM = [1,3,0,2]
     int lCh = makeCrossChain!hasCoin(lat, origin, IS_L); nChains++;
     auto rFwd = extendN(rCh, true, 2);   // [depth1_A, depth2_B]
     auto rBwd = extendN(rCh, false, 2);  // [depth1_C, depth2_D]
