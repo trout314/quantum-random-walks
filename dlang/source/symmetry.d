@@ -34,7 +34,7 @@ void checkA4Symmetry(bool hasCoin)(ref Lattice!hasCoin lat, ref ProximityGrid gr
 
         // 4 chain neighbors: R-next, R-prev, L-next, L-prev
         foreach (isR; [true, false]) {
-            if (lat.chainFace(s, isR) < 0) continue;
+            if (!lat.hasChain(s, isR)) continue;
             foreach (dir; 0 .. 2) {
                 int nb = (dir == 0) ? lat.chainNext(s, isR) : lat.chainPrev(s, isR);
                 if (nb < 0 || depth[nb] >= 0) continue;

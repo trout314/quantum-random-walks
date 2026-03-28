@@ -60,8 +60,7 @@ WalkParams parseArgs(string[] args) {
 
 /// Compute frame-transport tau for site s on chain type isR.
 private Mat4 siteTau(ref Lattice!HAS_COIN lat, int s, bool isR) {
-    int face = lat.chainFace(s, isR);
-    return makeTau(lat.sites[s].dirs[face]);
+    return makeTau(lat.exitDirForSite(s, isR));
 }
 
 void initWavepacket(ref Lattice!HAS_COIN lat, double sigma,
@@ -77,7 +76,7 @@ void initWavepacket(ref Lattice!HAS_COIN lat, double sigma,
     // Build P+/P- symmetric reference spinor at the origin.
     // Project (1,0,0,0) onto P+ and P-, normalize each, sum with equal weight.
     {
-        bool originIsR = lat.chainFace(0, true) >= 0;
+        bool originIsR = lat.hasChain(0, true);
         Mat4 tau0 = siteTau(lat, 0, originIsR);
         Mat4 Pp = projPlus(tau0);
         Mat4 Pm = projMinus(tau0);
@@ -123,7 +122,7 @@ void initWavepacket(ref Lattice!HAS_COIN lat, double sigma,
         // Try all 4 chain neighbors: R-next, R-prev, L-next, L-prev
         static immutable bool[2] chiralities = [true, false];
         foreach (isR; chiralities) {
-            if (lat.chainFace(s, isR) < 0) continue;
+            if (!lat.hasChain(s, isR)) continue;
             Mat4 tauS = siteTau(lat, s, isR);
 
             foreach (dir; 0 .. 2) {  // 0=next, 1=prev
@@ -199,8 +198,8 @@ void run(WalkParams p) {
 
     int noR = 0, noL = 0;
     foreach (s; 0 .. lat.nsites) {
-        if (lat.chainFace(s, IS_R) < 0) noR++;
-        if (lat.chainFace(s, IS_L) < 0) noL++;
+        if (!lat.hasChain(s, IS_R)) noR++;
+        if (!lat.hasChain(s, IS_L)) noL++;
     }
     stderr.writefln("Seed: %d sites, %d chains", lat.nsites, nChains);
     stderr.writefln("Coverage: %d without R-chain, %d without L-chain", noR, noL);

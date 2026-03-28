@@ -498,6 +498,21 @@ struct Lattice(bool hasCoin) {
         if (isR) sites[siteId].rFace = face; else sites[siteId].lFace = face;
     }
 
+    /// Get the exit direction for site siteId on the given chirality chain.
+    /// Replaces the old pattern: makeTau(sites[s].dirs[chainFace(s, isR)])
+    Vec3 exitDirForSite(int siteId, bool isR) const {
+        int chainId = isR ? sites[siteId].rChain : sites[siteId].lChain;
+        if (chainId < 0) return Vec3(0, 0, 0);
+        int idx = isR ? sites[siteId].rIdx : sites[siteId].lIdx;
+        return chainExitDir(&chains[chainId].origin, chains[chainId].rootIdx + idx);
+    }
+
+    /// Check if site has a chain of given chirality.
+    /// Replaces: chainFace(s, isR) >= 0
+    bool hasChain(int siteId, bool isR) const {
+        return (isR ? sites[siteId].rChain : sites[siteId].lChain) >= 0;
+    }
+
     /// Get the SiteOps for a site on its chain.
     const(Ops)* siteOps(int siteId, bool isR) const {
         int chainId = isR ? sites[siteId].rChain : sites[siteId].lChain;
@@ -515,22 +530,19 @@ struct Lattice(bool hasCoin) {
         Ops op;
         op.siteId = siteId;
 
-        int face = isR ? sites[siteId].rFace : sites[siteId].lFace;
-        Mat4 tau = makeTau(sites[siteId].dirs[face]);
+        Mat4 tau = makeTau(exitDirForSite(siteId, isR));
 
         if (nextSite >= 0) {
-            int nf = isR ? sites[nextSite].rFace : sites[nextSite].lFace;
-            Mat4 tauNext = makeTau(sites[nextSite].dirs[nf]);
+            Mat4 tauNext = makeTau(exitDirForSite(nextSite, isR));
             op.fwdBlock = mul(frameTransport(tau, tauNext), projPlus(tau));
         }
         if (prevSite >= 0) {
-            int pf = isR ? sites[prevSite].rFace : sites[prevSite].lFace;
-            Mat4 tauPrev = makeTau(sites[prevSite].dirs[pf]);
+            Mat4 tauPrev = makeTau(exitDirForSite(prevSite, isR));
             op.bwdBlock = mul(frameTransport(tau, tauPrev), projMinus(tau));
         }
 
         static if (hasCoin) {
-            Vec3 e = sites[siteId].dirs[face];
+            Vec3 e = exitDirForSite(siteId, isR);
             auto coins = buildDualParityCoins(e, coinCt, coinSt);
             op.coin1 = coins[0];
             op.coin2 = coins[1];
@@ -543,6 +555,11 @@ struct Lattice(bool hasCoin) {
         auto ch = &chains[chainId];
         bool isR = ch.isR;
 
+        // Link site to chain BEFORE buildOps so exitDirForSite works
+        int idx = ch.ops.length;
+        if (isR) { sites[siteId].rChain = chainId; sites[siteId].rIdx = idx; }
+        else     { sites[siteId].lChain = chainId; sites[siteId].lIdx = idx; }
+
         int prevSite = (ch.ops.length > 0) ? ch.ops[ch.ops.length - 1].siteId : -1;
         auto op = buildOps(siteId, prevSite, -1, isR);
         ch.ops.pushBack(op);
@@ -551,21 +568,22 @@ struct Lattice(bool hasCoin) {
         if (ch.ops.length >= 2) {
             int prevIdx = ch.ops.length - 2;
             int ps = ch.ops[prevIdx].siteId;
-            int pf = isR ? sites[ps].rFace : sites[ps].lFace;
-            Mat4 tauPrev = makeTau(sites[ps].dirs[pf]);
-            int sf = isR ? sites[siteId].rFace : sites[siteId].lFace;
-            Mat4 tauNew = makeTau(sites[siteId].dirs[sf]);
+            Mat4 tauPrev = makeTau(exitDirForSite(ps, isR));
+            Mat4 tauNew = makeTau(exitDirForSite(siteId, isR));
             ch.ops[prevIdx].fwdBlock = mul(frameTransport(tauPrev, tauNew), projPlus(tauPrev));
         }
-
-        int idx = ch.ops.length - 1;
-        if (isR) { sites[siteId].rChain = chainId; sites[siteId].rIdx = idx; }
-        else     { sites[siteId].lChain = chainId; sites[siteId].lIdx = idx; }
     }
 
     void chainPrepend(int chainId, int siteId) {
         auto ch = &chains[chainId];
         bool isR = ch.isR;
+
+        // Decrement rootIdx and link site BEFORE buildOps so exitDirForSite works.
+        // The new site at idx=0 has chain formula index = (rootIdx-1) + 0 = rootIdx-1,
+        // which is correct since it's one step before the old first element.
+        ch.rootIdx--;
+        if (isR) { sites[siteId].rChain = chainId; sites[siteId].rIdx = 0; }
+        else     { sites[siteId].lChain = chainId; sites[siteId].lIdx = 0; }
 
         int nextSite = (ch.ops.length > 0) ? ch.ops[0].siteId : -1;
         auto op = buildOps(siteId, -1, nextSite, isR);
@@ -574,23 +592,18 @@ struct Lattice(bool hasCoin) {
         // Update next site's bwdBlock (it now has a predecessor)
         if (ch.ops.length >= 2) {
             int ns = ch.ops[1].siteId;
-            int nf = isR ? sites[ns].rFace : sites[ns].lFace;
-            Mat4 tauNext = makeTau(sites[ns].dirs[nf]);
-            int sf = isR ? sites[siteId].rFace : sites[siteId].lFace;
-            Mat4 tauNew = makeTau(sites[siteId].dirs[sf]);
+            Mat4 tauNext = makeTau(exitDirForSite(ns, isR));
+            Mat4 tauNew = makeTau(exitDirForSite(siteId, isR));
             ch.ops[1].bwdBlock = mul(frameTransport(tauNext, tauNew), projMinus(tauNext));
         }
 
-        // Shift existing indices
+        // Shift existing indices (their chain formula index doesn't change,
+        // but their deque index increased by 1 due to pushFront)
         for (int i = 1; i < ch.ops.length; i++) {
             int existingId = ch.ops[i].siteId;
             if (isR) sites[existingId].rIdx++;
             else     sites[existingId].lIdx++;
         }
-        ch.rootIdx++;
-
-        if (isR) { sites[siteId].rChain = chainId; sites[siteId].rIdx = 0; }
-        else     { sites[siteId].lChain = chainId; sites[siteId].lIdx = 0; }
     }
 }
 
@@ -605,9 +618,8 @@ private int makeChain(bool hasCoin)(ref Lattice!hasCoin lat, int rootSite, bool 
     if (face < 0) {
         // If the site already has the other chirality's chain, use the
         // perpendicularity mapping to determine this chain's starting face.
-        int otherFace = lat.chainFace(rootSite, !isR);
-        if (otherFace >= 0)
-            face = perpFace(!isR, otherFace);
+        if (lat.hasChain(rootSite, !isR))
+            face = perpFace(!isR, lat.chainFace(rootSite, !isR));
         else
             face = pat[0];
     }
@@ -624,7 +636,7 @@ private int makeChain(bool hasCoin)(ref Lattice!hasCoin lat, int rootSite, bool 
     SiteOps!hasCoin rootOp;
     rootOp.siteId = rootSite;
     static if (hasCoin) {
-        Vec3 e = lat.sites[rootSite].dirs[lat.chainFace(rootSite, isR)];
+        Vec3 e = chainExitDir(&newChain.origin, 0);
         auto coins = buildDualParityCoins(e, lat.coinCt, lat.coinSt);
         rootOp.coin1 = coins[0];
         rootOp.coin2 = coins[1];
@@ -694,7 +706,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
                 nb = lat.allocSite(p, dd);
                 grid.add(p, nb);
             }
-            if (lat.chainFace(nb, isR) < 0) {
+            if (!lat.hasChain(nb, isR)) {
                 lat.setChainFace(nb, isR, nbFace);
                 if (forward) lat.chainAppend(chainId, nb);
                 else         lat.chainPrepend(chainId, nb);
@@ -730,10 +742,10 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
                          lat.chains[lat.sites[s].rChain].rootSite != s;
         // If s is on origin's R-chain, cross-chirality is L; if on L-chain, cross is R.
         bool crossIsR = (lat.sites[s].lChain < 0);  // needs L? then crossIsR=false
-        if (lat.chainFace(s, !crossIsR) >= 0)
+        if (lat.hasChain(s, !crossIsR))
             crossIsR = !crossIsR;  // pick whichever chirality s doesn't have
         // Actually simpler: s has one chirality from origin's chain; create the other
-        bool needR = lat.chainFace(s, IS_R) < 0;
+        bool needR = !lat.hasChain(s, IS_R);
         int cc = makeChain!hasCoin(lat, s, needR); nChains++;
         auto fwd = extendN(cc, true, 1);
         auto bwd = extendN(cc, false, 1);
@@ -747,13 +759,13 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 
     // Create cross-chirality chains for all depth-2 sites (just roots, no extension)
     foreach (s; depth2) {
-        if (lat.chainFace(s, IS_R) < 0) { makeChain!hasCoin(lat, s, IS_R); nChains++; }
-        if (lat.chainFace(s, IS_L) < 0) { makeChain!hasCoin(lat, s, IS_L); nChains++; }
+        if (!lat.hasChain(s, IS_R)) { makeChain!hasCoin(lat, s, IS_R); nChains++; }
+        if (!lat.hasChain(s, IS_L)) { makeChain!hasCoin(lat, s, IS_L); nChains++; }
     }
     // Also ensure depth-1 sites have both chiralities
     foreach (s; d1sites) {
-        if (lat.chainFace(s, IS_R) < 0) { makeChain!hasCoin(lat, s, IS_R); nChains++; }
-        if (lat.chainFace(s, IS_L) < 0) { makeChain!hasCoin(lat, s, IS_L); nChains++; }
+        if (!lat.hasChain(s, IS_R)) { makeChain!hasCoin(lat, s, IS_R); nChains++; }
+        if (!lat.hasChain(s, IS_L)) { makeChain!hasCoin(lat, s, IS_L); nChains++; }
     }
 
     // ==== Register orbits ====
@@ -817,8 +829,8 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
             if (pred < 0 || pred == yi) continue;
 
             foreach (pR; [true, false]) {
+                if (!lat.hasChain(pred, pR)) continue;
                 int pFace = lat.chainFace(pred, pR);
-                if (pFace < 0) continue;
                 const int[4] pPat = pR ? PAT_R : PAT_L;
 
                 // Forward: pred's curFace == face → yi is next
@@ -828,7 +840,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
                     if (pch.ops[pch.ops.length - 1].siteId == pred) {
                         lat.setChainFace(yi, pR, nextFace(pPat, pFace));
                         lat.chainAppend(pCh, yi);
-                        if (lat.chainFace(yi, !pR) < 0) {
+                        if (!lat.hasChain(yi, !pR)) {
                             makeChain!hasCoin(lat, yi, !pR);
                             nChains++;
                         }
@@ -843,7 +855,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
                     if (pch.ops[0].siteId == pred) {
                         lat.setChainFace(yi, pR, face);
                         lat.chainPrepend(pCh, yi);
-                        if (lat.chainFace(yi, !pR) < 0) {
+                        if (!lat.hasChain(yi, !pR)) {
                             makeChain!hasCoin(lat, yi, !pR);
                             nChains++;
                         }
@@ -866,8 +878,8 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         int rj = orb.members[0].rotIdx;
 
         // Ensure primary has both chains
-        if (lat.chainFace(x0, IS_R) < 0) { makeChain!hasCoin(lat, x0, IS_R); nChains++; }
-        if (lat.chainFace(x0, IS_L) < 0) { makeChain!hasCoin(lat, x0, IS_L); nChains++; }
+        if (!lat.hasChain(x0, IS_R)) { makeChain!hasCoin(lat, x0, IS_R); nChains++; }
+        if (!lat.hasChain(x0, IS_L)) { makeChain!hasCoin(lat, x0, IS_L); nChains++; }
 
         bool anyExtended = false;
 
@@ -985,8 +997,8 @@ unittest {
     assert(lat.nsites > 1);
     assert(nChains > 0);
     assert(lat.chains.length > 0);
-    assert(lat.chainFace(0, true) >= 0);
-    assert(lat.chainFace(0, false) >= 0);
+    assert(lat.hasChain(0, true));
+    assert(lat.hasChain(0, false));
 
     foreach (s; 0 .. lat.nsites) {
         int nxt = lat.chainNext(s, true);

@@ -98,7 +98,7 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
 
     // Copy identity for sites not on a chain of this type
     foreach (s; 0 .. ns) {
-        if (lat.chainFace(s, isR) < 0) {
+        if (!lat.hasChain(s, isR)) {
             lat.tmpRe[4*s .. 4*s+4] = lat.psiRe[4*s .. 4*s+4];
             lat.tmpIm[4*s .. 4*s+4] = lat.psiIm[4*s .. 4*s+4];
         }
@@ -165,8 +165,7 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
         // Forward end
         {
             int endSite = ch.ops[n-1].siteId;
-            int face = lat.chainFace(endSite, isR);
-            Mat4 tau = makeTau(lat.sites[endSite].dirs[face]);
+            Mat4 tau = makeTau(lat.exitDirForSite(endSite, isR));
             Mat4 Pp = projPlus(tau);
             double[4] shRe = 0, shIm = 0;
             matVecSplit(Pp, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
@@ -194,8 +193,7 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
         // Backward end
         {
             int endSite = ch.ops[0].siteId;
-            int face = lat.chainFace(endSite, isR);
-            Mat4 tau = makeTau(lat.sites[endSite].dirs[face]);
+            Mat4 tau = makeTau(lat.exitDirForSite(endSite, isR));
             Mat4 Pm = projMinus(tau);
             double[4] shRe = 0, shIm = 0;
             matVecSplit(Pm, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
@@ -293,10 +291,9 @@ void applyVmix(bool hasCoin)(ref Lattice!hasCoin lat, bool isR, double mixPhi) {
     int ns = lat.nsites;
 
     foreach (s; 0 .. ns) {
-        int face = lat.chainFace(s, isR);
-        if (face < 0) continue;
+        if (!lat.hasChain(s, isR)) continue;
 
-        Mat4 tau = makeTau(lat.sites[s].dirs[face]);
+        Mat4 tau = makeTau(lat.exitDirForSite(s, isR));
         Mat4 Pp = projPlus(tau);
         Mat4 Pm = projMinus(tau);
 
@@ -386,10 +383,9 @@ private bool checkPruneEligible(bool hasCoin)(const Lattice!hasCoin lat, int s,
     int nb = isFwd ? lat.chainPrev(s, isR) : lat.chainNext(s, isR);
     if (nb < 0) return true;
 
-    int face = lat.chainFace(nb, isR);
-    if (face < 0) return true;
+    if (!lat.hasChain(nb, isR)) return true;
 
-    Mat4 tau = makeTau(lat.sites[nb].dirs[face]);
+    Mat4 tau = makeTau(lat.exitDirForSite(nb, isR));
     Mat4 P = isFwd ? projPlus(tau) : projMinus(tau);
 
     double[4] vRe = 0, vIm = 0;
@@ -412,7 +408,7 @@ private void unlinkChainEnd(bool hasCoin)(ref Lattice!hasCoin lat, int s,
     } else {
         assert(ch.ops[0].siteId == s);
         ch.ops.popFront();
-        ch.rootIdx--;
+        ch.rootIdx++;
         for (int i = 0; i < ch.ops.length; i++) {
             int id = ch.ops[i].siteId;
             if (isR) lat.sites[id].rIdx--;
@@ -436,30 +432,30 @@ PruneResult pruneChainEnds(bool hasCoin)(ref Lattice!hasCoin lat, double thresh2
     do {
         prunedThisPass = 0;
         foreach (s; 0 .. lat.nsites) {
-            if (lat.chainFace(s, true) < 0 && lat.chainFace(s, false) < 0) continue;
+            if (!lat.hasChain(s, true) && !lat.hasChain(s, false)) continue;
 
-            if (lat.chainFace(s, true) >= 0 && lat.chainNext(s, true) == -1) {
+            if (lat.hasChain(s, true) && lat.chainNext(s, true) == -1) {
                 if (checkPruneEligible!hasCoin(lat, s, true, true, thresh2)) {
                     total.probPruned += spinorNorm2!hasCoin(lat, s);
                     unlinkChainEnd!hasCoin(lat, s, true, true);
                     prunedThisPass++; continue;
                 }
             }
-            if (lat.chainFace(s, true) >= 0 && lat.chainPrev(s, true) == -1) {
+            if (lat.hasChain(s, true) && lat.chainPrev(s, true) == -1) {
                 if (checkPruneEligible!hasCoin(lat, s, true, false, thresh2)) {
                     total.probPruned += spinorNorm2!hasCoin(lat, s);
                     unlinkChainEnd!hasCoin(lat, s, true, false);
                     prunedThisPass++; continue;
                 }
             }
-            if (lat.chainFace(s, false) >= 0 && lat.chainNext(s, false) == -1) {
+            if (lat.hasChain(s, false) && lat.chainNext(s, false) == -1) {
                 if (checkPruneEligible!hasCoin(lat, s, false, true, thresh2)) {
                     total.probPruned += spinorNorm2!hasCoin(lat, s);
                     unlinkChainEnd!hasCoin(lat, s, false, true);
                     prunedThisPass++; continue;
                 }
             }
-            if (lat.chainFace(s, false) >= 0 && lat.chainPrev(s, false) == -1) {
+            if (lat.hasChain(s, false) && lat.chainPrev(s, false) == -1) {
                 if (checkPruneEligible!hasCoin(lat, s, false, false, thresh2)) {
                     total.probPruned += spinorNorm2!hasCoin(lat, s);
                     unlinkChainEnd!hasCoin(lat, s, false, false);
