@@ -398,6 +398,16 @@ void run1d(Walk1dParams p) {
         // (1,0,1,0)/√2
         double inv = 1.0 / sqrt(2.0);
         chi0Re = [inv, 0, inv, 0];
+    } else if (p.icType == 4) {
+        // Walk-optimal spinor (from low-energy eigenstate construction)
+        // Frame-transported by the Gaussian IC code below.
+        chi0Re = [0.5354, 0.5058, 0.3043, 0.5959];
+        chi0Im = [-0.0235, -0.0777, -0.0402, -0.0406];
+        // Normalize
+        double nChi = 0;
+        foreach (a; 0 .. 4) nChi += chi0Re[a]*chi0Re[a] + chi0Im[a]*chi0Im[a];
+        double invChi = 1.0 / sqrt(nChi);
+        foreach (a; 0 .. 4) { chi0Re[a] *= invChi; chi0Im[a] *= invChi; }
     } else {
         // P+/P- symmetric: project (1,0,0,0) onto P+ and P-,
         // normalize each, sum to get equal weight in both subspaces.
