@@ -798,39 +798,10 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         return chainId;
     }
 
-    // ---- Chain orbit: a group of 12 A4-related chains ----
-    struct ChainOrbit {
-        int[12] chainIds;  // one per A4 rotation
-        int count;         // how many are valid (may be < 12 near boundaries)
-    }
-    ChainOrbit[] chainOrbits;
-
-    /// Create a chain orbit: given a canonical chain's origin and root site,
-    /// create all 12 A4-rotated chains at the 12 rotated root positions.
-    /// Each rotated root site must already exist.
-    int createChainOrbit(int[12] rootSites, const ChainOrigin* canonicalOrigin, bool isR) {
-        ChainOrbit co;
-        co.count = 12;
-        foreach (ri; 0 .. 12) {
-            co.chainIds[ri] = makeRotatedChain!hasCoin(
-                lat, rootSites[ri], canonicalOrigin, &a4rots[ri], isR);
-            nChains++;
-        }
-        int orbitId = cast(int) chainOrbits.length;
-        chainOrbits ~= co;
-        return orbitId;
-    }
-
     // Pre-allocate chains array to avoid reallocation during growth.
-    // Each site creates ~2 chains, and we expect at most initCap sites.
     lat.chains.reserve(lat.capacity * 3);
 
     // ---- Seed: origin with one R-chain and one L-chain ----
-    // The origin is treated identically to every other site: it sits at the
-    // crossing of exactly one R-chain and one L-chain. The A4 symmetry
-    // emerges from the orbit creation at each growth step — we don't need
-    // 12 seed chains to get it.
-
     int origin = lat.allocSite(Vec3(0, 0, 0));
     grid.add(Vec3(0, 0, 0), origin);
     addOrbit([origin], [0], 1);
@@ -840,35 +811,20 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     int seedR = makeChainFromVertices!hasCoin(lat, origin, IS_R, seedVerts); nChains++;
     int seedL = lat.makeCrossChain(origin, IS_L); nChains++;
 
-    // Single-chain orbits for the seed (no A4 partners — just the canonical pair).
-    // The growth loop will create A4 partner chains at the first extension sites.
-    ChainOrbit seedRCO;
-    seedRCO.count = 1;
-    seedRCO.chainIds[0] = seedR;
-    chainOrbits ~= seedRCO;
-    int seedROrbitId = cast(int) chainOrbits.length - 1;
-
-    ChainOrbit seedLCO;
-    seedLCO.count = 1;
-    seedLCO.chainIds[0] = seedL;
-    chainOrbits ~= seedLCO;
-    int seedLOrbitId = cast(int) chainOrbits.length - 1;
-
-    // ---- Frontier: priority queue ordered by distance from origin ----
-    // Sites closer to the origin are extended first, ensuring the interior
-    // fills before the boundary.
+    // ---- Frontier: priority queue of site orbits, ordered by distance ----
+    // Each entry is a site orbit. We pick a representative, find a chain end
+    // to extend, and create the 12 A4-symmetric copies.
     struct FrontierEntry {
-        int chainOrbitId;
+        int orbitIdx;
+        int chainId;   // which chain at the representative site to extend
         bool forward;
-        double dist2;  // |next position|² — smaller = higher priority
+        double dist2;
     }
 
-    // Min-heap by dist2
     FrontierEntry[] heap;
 
     void heapPush(FrontierEntry e) {
         heap ~= e;
-        // Sift up
         int i = cast(int) heap.length - 1;
         while (i > 0) {
             int parent = (i - 1) / 2;
@@ -882,7 +838,6 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         auto result = heap[0];
         heap[0] = heap[heap.length - 1];
         heap.length--;
-        // Sift down
         int i = 0;
         while (true) {
             int left = 2 * i + 1, right = 2 * i + 2, smallest = i;
@@ -897,141 +852,198 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         return result;
     }
 
-    /// Compute the next chain index for extension.
-    int nextExtensionIdx(int chainId, bool forward) {
-        int n = lat.chains[chainId].ops.length;
-        assert(n > 0, "Cannot extend empty chain");
-        return forward
-            ? lat.chains[chainId].rootIdx + n
-            : lat.chains[chainId].rootIdx - 1;
+    /// Find a chain end at site s that can be extended. Returns the chain ID
+    /// and direction (forward/backward), or chainId=-1 if no extension possible.
+    /// Also returns the position of the proposed extension.
+    struct ExtensionCandidate {
+        int chainId;
+        bool forward;
+        Vec3 pos;
+        double dist2;
     }
 
-    /// Compute dist² for the next extension position of a chain orbit.
-    double extensionDist2(int chainOrbitId, bool forward) {
-        int canId = chainOrbits[chainOrbitId].chainIds[0];
-        int idx = nextExtensionIdx(canId, forward);
-        Vec3 p = chainCentroid(&lat.chains[canId].origin, idx);
-        return dot(p, p);
+    ExtensionCandidate findExtension(int siteId) {
+        ExtensionCandidate best;
+        best.chainId = -1;
+        best.dist2 = double.max;
+
+        foreach (isR; [true, false]) {
+            int chainId = isR ? lat.sites[siteId].rChain : lat.sites[siteId].lChain;
+            if (chainId < 0) continue;
+            int idx = isR ? lat.sites[siteId].rIdx : lat.sites[siteId].lIdx;
+            int n = lat.chains[chainId].ops.length;
+
+            // Check forward end
+            if (idx == n - 1) {
+                int nextIdx = lat.chains[chainId].rootIdx + n;
+                Vec3 p = chainCentroid(&lat.chains[chainId].origin, nextIdx);
+                double d2 = dot(p, p);
+                if (d2 < best.dist2) {
+                    best = ExtensionCandidate(chainId, true, p, d2);
+                }
+            }
+
+            // Check backward end
+            if (idx == 0) {
+                int prevIdx = lat.chains[chainId].rootIdx - 1;
+                Vec3 p = chainCentroid(&lat.chains[chainId].origin, prevIdx);
+                double d2 = dot(p, p);
+                if (d2 < best.dist2) {
+                    best = ExtensionCandidate(chainId, false, p, d2);
+                }
+            }
+        }
+        return best;
     }
 
-    // Seed the frontier
-    heapPush(FrontierEntry(seedROrbitId, true,  extensionDist2(seedROrbitId, true)));
-    heapPush(FrontierEntry(seedROrbitId, false, extensionDist2(seedROrbitId, false)));
-    heapPush(FrontierEntry(seedLOrbitId, true,  extensionDist2(seedLOrbitId, true)));
-    heapPush(FrontierEntry(seedLOrbitId, false, extensionDist2(seedLOrbitId, false)));
+    /// At partner site X_i, find the chain + direction whose extension matches
+    /// the target position (= A4 rotation of the canonical extension position).
+    ExtensionCandidate findMatchingExtension(int siteId, Vec3 targetPos) {
+        ExtensionCandidate best;
+        best.chainId = -1;
+        best.dist2 = double.max;
+
+        foreach (isR; [true, false]) {
+            int chainId = isR ? lat.sites[siteId].rChain : lat.sites[siteId].lChain;
+            if (chainId < 0) continue;
+            int idx = isR ? lat.sites[siteId].rIdx : lat.sites[siteId].lIdx;
+            int n = lat.chains[chainId].ops.length;
+
+            // Check forward end
+            if (idx == n - 1) {
+                int nextIdx = lat.chains[chainId].rootIdx + n;
+                Vec3 p = chainCentroid(&lat.chains[chainId].origin, nextIdx);
+                Vec3 dv = Vec3(p.x - targetPos.x, p.y - targetPos.y, p.z - targetPos.z);
+                double d2 = dv.x*dv.x + dv.y*dv.y + dv.z*dv.z;
+                if (d2 < best.dist2) {
+                    best = ExtensionCandidate(chainId, true, p, d2);
+                }
+            }
+
+            // Check backward end
+            if (idx == 0) {
+                int prevIdx = lat.chains[chainId].rootIdx - 1;
+                Vec3 p = chainCentroid(&lat.chains[chainId].origin, prevIdx);
+                Vec3 dv = Vec3(p.x - targetPos.x, p.y - targetPos.y, p.z - targetPos.z);
+                double d2 = dv.x*dv.x + dv.y*dv.y + dv.z*dv.z;
+                if (d2 < best.dist2) {
+                    best = ExtensionCandidate(chainId, false, p, d2);
+                }
+            }
+        }
+        return best;
+    }
+
+    /// Add ALL extendable chain ends from a site orbit to the frontier.
+    void addOrbitToFrontier(int orbitIdx) {
+        auto orb = &orbits[orbitIdx];
+        if (orb.size == 0) return;
+        int x0 = orb.members[0].siteId;
+        foreach (isR; [true, false]) {
+            int chainId = isR ? lat.sites[x0].rChain : lat.sites[x0].lChain;
+            if (chainId < 0) continue;
+            int idx = isR ? lat.sites[x0].rIdx : lat.sites[x0].lIdx;
+            int n = lat.chains[chainId].ops.length;
+            if (idx == n - 1) {
+                int nextIdx = lat.chains[chainId].rootIdx + n;
+                Vec3 p = chainCentroid(&lat.chains[chainId].origin, nextIdx);
+                heapPush(FrontierEntry(orbitIdx, chainId, true, dot(p, p)));
+            }
+            if (idx == 0) {
+                int prevIdx = lat.chains[chainId].rootIdx - 1;
+                Vec3 p = chainCentroid(&lat.chains[chainId].origin, prevIdx);
+                heapPush(FrontierEntry(orbitIdx, chainId, false, dot(p, p)));
+            }
+        }
+    }
+
+    addOrbitToFrontier(0);  // seed: origin orbit
 
     // ---- Main growth loop ----
-    // Process the closest-to-origin entry first.
     while (heap.length > 0) {
         auto entry = heapPop();
-        // Copy the orbit's chain IDs by value to avoid dangling references
-        // after lat.chains or chainOrbits realloc.
-        int[12] orbitChainIds = chainOrbits[entry.chainOrbitId].chainIds;
-        int canChainId = orbitChainIds[0];
-        int canNewIdx = nextExtensionIdx(canChainId, entry.forward);
-        Vec3 canP = chainCentroid(&lat.chains[canChainId].origin, canNewIdx);
+        auto orb = &orbits[entry.orbitIdx];
+        if (orb.size == 0) continue;
 
-        // Gaussian envelope check on canonical position
+        // Step 1: Use the specific chain/direction from the frontier entry
+        int x0 = orb.members[0].siteId;
+        int ext0chain = entry.chainId;
+        bool ext0fwd = entry.forward;
+
+        // Verify this chain end is still extendable (may have been extended by another entry)
+        {
+            int idx = lat.sites[x0].rChain == ext0chain ? lat.sites[x0].rIdx : lat.sites[x0].lIdx;
+            int n = lat.chains[ext0chain].ops.length;
+            if (ext0fwd && idx != n - 1) continue;
+            if (!ext0fwd && idx != 0) continue;
+        }
+
+        int nextIdx = ext0fwd
+            ? lat.chains[ext0chain].rootIdx + lat.chains[ext0chain].ops.length
+            : lat.chains[ext0chain].rootIdx - 1;
+        Vec3 canP = chainCentroid(&lat.chains[ext0chain].origin, nextIdx);
+
+        // Gaussian envelope check
         if (exp(-dot(canP, canP) / (2 * sigma * sigma)) < seedThresh) continue;
+        if (grid.isTooClose(canP)) continue;
         if (isRamLow()) continue;
 
-        // Check canonical position only — A4 symmetry guarantees all 12 partners
-        // have the same Gaussian magnitude and proximity structure.
-        bool parentIsR = lat.chains[canChainId].isR;
+        // Step 2: Create the canonical new site Y_0
+        int y0 = lat.allocSite(canP);
+        if (y0 < 0) continue;
+        grid.add(canP, y0);
 
-        if (grid.isTooClose(canP)) continue;  // dMin proximity check
-
-        // Create new sites and extend all chains in the orbit.
-        int orbitCount = chainOrbits[entry.chainOrbitId].count;
-        int[12] newSites;
-        int newCount = 0;
-
-        foreach (ri; 0 .. orbitCount) {
-            int chainId = orbitChainIds[ri];
-            int newIdx = nextExtensionIdx(chainId, entry.forward);
-            Vec3 p = chainCentroid(&lat.chains[chainId].origin, newIdx);
-
-            int newSite = lat.allocSite(p);
-            if (newSite < 0) continue;
-            grid.add(p, newSite);
-
-            if (entry.forward) lat.chainAppend(chainId, newSite);
-            else               lat.chainPrepend(chainId, newSite);
-
-            newSites[newCount++] = newSite;
-        }
-
-        if (newCount == 0) continue;
-
-        // Add the parent orbit back to continue extending
-        heapPush(FrontierEntry(entry.chainOrbitId, entry.forward,
-                               extensionDist2(entry.chainOrbitId, entry.forward)));
-
-        // Create cross-chains for all new sites (one per site = 12 new chains).
-        // These form a new chain orbit.
-        // Use the canonical new site's cross-chain as the template.
-        // Every new site MUST get a cross-chain. Assert they're truly new.
-        int canNewSite = newSites[0];
-        assert(!lat.hasChain(canNewSite, !parentIsR), "New site already has cross-chain");
-
-        int canCross = lat.makeCrossChain(canNewSite, !parentIsR);
+        if (ext0fwd) lat.chainAppend(ext0chain, y0);
+        else         lat.chainPrepend(ext0chain, y0);
+        lat.makeCrossChain(y0, !lat.chains[ext0chain].isR);
         nChains++;
 
-        // Copy the canonical cross-chain origin before creating partners
-        // (to avoid dangling pointer after lat.chains reallocs)
-        ChainOrigin canCrossOrigin = lat.chains[canCross].origin;
+        // Step 3: Create A4 partners Y_1..Y_11
+        int[12] newSites;
+        int[12] newRots;
+        int newCount = 0;
+        newSites[newCount] = y0;
+        newRots[newCount] = 0;
+        newCount++;
 
-        ChainOrbit crossCO;
-        crossCO.count = newCount;
-        crossCO.chainIds[0] = canCross;
+        int r0 = orb.members[0].rotIdx;  // A4 rotation of X_0
 
-        foreach (ni; 1 .. newCount) {
-            int site = newSites[ni];
-            assert(!lat.hasChain(site, !parentIsR), "New partner site already has cross-chain");
+        foreach (mi; 1 .. orb.size) {
+            int xi = orb.members[mi].siteId;
+            int ri = orb.members[mi].rotIdx;
 
-            // Find the A4 rotation from canonical to this partner.
-            Vec3 sp = lat.sites[site].pos;
-            Vec3 cp = lat.sites[canNewSite].pos;
-            int bestRi = 0;
-            double bestD = double.max;
-            foreach (ri; 0 .. 12) {
-                Vec3 rp = a4rots[ri].apply(cp);
-                Vec3 dv = Vec3(rp.x - sp.x, rp.y - sp.y, rp.z - sp.z);
-                double d2 = dv.x*dv.x + dv.y*dv.y + dv.z*dv.z;
-                if (d2 < bestD) { bestD = d2; bestRi = ri; }
-            }
+            // The target position for Y_i = A4_rot(ri) @ A4_rot(r0)^{-1} @ canP
+            // Since A4 rotations are orthogonal, inverse = transpose
+            Vec3 relP = a4rots[r0].applyTranspose(canP);
+            Vec3 targetP = a4rots[ri].apply(relP);
 
-            int partnerCross = makeRotatedChain!hasCoin(
-                lat, site, &canCrossOrigin, &a4rots[bestRi], !parentIsR);
+            // Find which chain at X_i extends to targetP
+            auto extI = findMatchingExtension(xi, targetP);
+            if (extI.chainId < 0) continue;  // shouldn't happen
+            assert(extI.dist2 < mateTol * mateTol,
+                   "Partner extension position doesn't match target");
+
+            int yi = lat.allocSite(targetP);
+            if (yi < 0) continue;
+            grid.add(targetP, yi);
+
+            if (extI.forward) lat.chainAppend(extI.chainId, yi);
+            else              lat.chainPrepend(extI.chainId, yi);
+            lat.makeCrossChain(yi, !lat.chains[extI.chainId].isR);
             nChains++;
-            crossCO.chainIds[ni] = partnerCross;
+
+            newSites[newCount] = yi;
+            newRots[newCount] = ri;
+            newCount++;
         }
 
-        int crossOrbitId = cast(int) chainOrbits.length;
-        chainOrbits ~= crossCO;
-
-        // Add cross-chain orbit (both directions)
-        heapPush(FrontierEntry(crossOrbitId, true,
-                               extensionDist2(crossOrbitId, true)));
-        heapPush(FrontierEntry(crossOrbitId, false,
-                               extensionDist2(crossOrbitId, false)));
-
-        // Register site orbit
+        // Register site orbit and add to frontier
         if (newCount > 0) {
-            int[12] orbitRots;
-            foreach (ni; 0 .. newCount) {
-                Vec3 sp = lat.sites[newSites[ni]].pos;
-                Vec3 cp = lat.sites[newSites[0]].pos;
-                int bestRi = 0; double bestD = double.max;
-                foreach (ri; 0 .. 12) {
-                    Vec3 rp = a4rots[ri].apply(cp);
-                    Vec3 dv = Vec3(rp.x - sp.x, rp.y - sp.y, rp.z - sp.z);
-                    double d2 = dv.x*dv.x + dv.y*dv.y + dv.z*dv.z;
-                    if (d2 < bestD) { bestD = d2; bestRi = ri; }
-                }
-                orbitRots[ni] = bestRi;
-            }
-            addOrbit(newSites[0 .. newCount], orbitRots[0 .. newCount], newCount);
+            int newOrb = addOrbit(newSites[0 .. newCount], newRots[0 .. newCount], newCount);
+
+            // Add both old and new orbits back to the frontier
+            addOrbitToFrontier(entry.orbitIdx);
+            addOrbitToFrontier(newOrb);
         }
     }
 

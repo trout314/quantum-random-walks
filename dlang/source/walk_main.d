@@ -281,6 +281,10 @@ void run(WalkParams p) {
             totalPruned += resL.probPruned + resR.probPruned;
             int nPruned = resL.nPruned + resR.nPruned;
 
+            stderr.writefln("    S_L: absorbed=%.4e created=%d capFull=%d  S_R: absorbed=%.4e created=%d capFull=%d  sites=%d",
+                            resL.probAbsorbed, resL.nCreated, resL.nCapFull,
+                            resR.probAbsorbed, resR.nCreated, resR.nCapFull, lat.nsites);
+
             if (t % STATUS_INTERVAL == 0) {
                 auto ms(MonoTime a, MonoTime b) { return (b - a).total!"msecs"; }
                 stderr.writefln("    timing: obs=%dms coinL=%dms shiftL=%dms coinR=%dms shiftR=%dms pruned=%d",
