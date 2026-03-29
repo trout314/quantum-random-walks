@@ -154,12 +154,14 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
     // Pass 2: chain-end extension (serial — mutates lattice)
     bool ramLow = false;
     foreach (ci; activeChains) {
-        auto ch = &lat.chains[ci];
-        int n = ch.ops.length;
+        // NOTE: Always re-fetch chain pointer after any operation that may
+        // append to lat.chains (e.g. makeCrossChain), because D dynamic
+        // array reallocation invalidates pointers.
+        int n = lat.chains[ci].ops.length;
 
         // Forward end
         {
-            int endSite = ch.ops[n-1].siteId;
+            int endSite = lat.chains[ci].ops[n-1].siteId;
             Vec3 exitDir = lat.exitDirForSite(endSite, isR);
             Mat4 tau = makeTau(exitDir);
             Mat4 Pp = projPlus(tau);
@@ -173,9 +175,12 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                 lat.tmpRe[4*nb .. 4*nb+4] = 0;
                 lat.tmpIm[4*nb .. 4*nb+4] = 0;
 
-                auto newOp = lat.siteOps(endSite, isR);
+                // Compute U·P+·psi directly instead of using siteOps
+                Vec3 exitDirNb = lat.exitDirForSite(nb, isR);
+                Mat4 tauNb = makeTau(exitDirNb);
+                Mat4 fwdBlock = mul(frameTransport(tau, tauNb), Pp);
                 double[4] resRe = 0, resIm = 0;
-                matVecSplit(newOp.fwdBlock, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
+                matVecSplit(fwdBlock, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
                             resRe.ptr, resIm.ptr);
                 foreach (a; 0 .. 4) {
                     lat.tmpRe[4*nb + a] = resRe[a];
@@ -194,7 +199,7 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
 
         // Backward end
         {
-            int endSite = ch.ops[0].siteId;
+            int endSite = lat.chains[ci].ops[0].siteId;
             Vec3 exitDir = lat.exitDirForSite(endSite, isR);
             Mat4 tau = makeTau(exitDir);
             Mat4 Pm = projMinus(tau);
@@ -208,9 +213,12 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                 lat.tmpRe[4*nb .. 4*nb+4] = 0;
                 lat.tmpIm[4*nb .. 4*nb+4] = 0;
 
-                auto newOp = lat.siteOps(endSite, isR);
+                // Compute U·P-·psi directly instead of using siteOps
+                Vec3 exitDirNb = lat.exitDirForSite(nb, isR);
+                Mat4 tauNb = makeTau(exitDirNb);
+                Mat4 bwdBlock = mul(frameTransport(tau, tauNb), Pm);
                 double[4] resRe = 0, resIm = 0;
-                matVecSplit(newOp.bwdBlock, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
+                matVecSplit(bwdBlock, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
                             resRe.ptr, resIm.ptr);
                 foreach (a; 0 .. 4) {
                     lat.tmpRe[4*nb + a] = resRe[a];
