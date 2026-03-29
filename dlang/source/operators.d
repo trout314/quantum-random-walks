@@ -1,8 +1,13 @@
 /**
  * operators.d — Walk step operators: shift, coin, V-mixing, and pruning.
  *
- * Templated on hasCoin: when false, coin application is compiled out entirely.
- * All operators use precomputed per-site blocks from the chain deques.
+ * The shift is split into a pure linear-algebra step (pureShift) that
+ * reports overflow at chain ends, and a separate handleOverflow that
+ * decides whether to extend, absorb, or ignore.  This decouples the
+ * unitary operator from lattice mutation and makes it reusable for both
+ * the 1D and 3D walks.
+ *
+ * Templated on hasCoin: when false, coin application is compiled out.
  */
 module operators;
 
@@ -24,68 +29,43 @@ double spinorNorm2(bool hasCoin)(const Lattice!hasCoin lat, int s) {
     return n;
 }
 
-// ---- Adaptive shift operator ----
+// ===========================================================================
+//  Pure shift — no lattice mutation, returns overflow at chain ends
+// ===========================================================================
 
-struct ShiftResult {
-    int nCreated = 0;
-    int nCapFull = 0;    // extensions skipped due to lattice capacity
-    double probAbsorbed = 0;
-    int nPruned = 0;
-    double probPruned = 0;
+/// Overflow from one chain end during the pure shift.
+struct ChainEndOverflow {
+    int chainIdx;       /// index into activeChains (for caller bookkeeping)
+    int chainId;        /// lattice chain ID
+    int endSiteId;      /// the boundary site whose P± projected out
+    bool isFwd;         /// true = forward end (P+), false = backward (P-)
+    double[4] ampRe = 0;
+    double[4] ampIm = 0;
+    Vec3 exitDir;       /// exit direction at the boundary site (for frame transport)
 }
 
-private int tryExtendFwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
-                         ref double[4] shiftedRe,
-                         ref double[4] shiftedIm, double thresh2) {
-    double amp2 = 0;
-    foreach (a; 0 .. 4) amp2 += shiftedRe[a]*shiftedRe[a] + shiftedIm[a]*shiftedIm[a];
-    if (amp2 < thresh2) return -1;
-
-    // Compute new site position from analytic formula
-    int chainId = isR ? lat.sites[s].rChain : lat.sites[s].lChain;
-    auto ch = &lat.chains[chainId];
-    int newChainIdx = ch.rootIdx + cast(int) ch.ops.length;
-    Vec3 p = chainCentroid(&ch.origin, newChainIdx);
-
-    int nb = lat.allocSite(p);
-    if (nb < 0) return -2;  // lattice full
-    lat.chainAppend(chainId, nb);
-    // Every site must be on both R and L chains. Create the cross-chain immediately.
-    lat.makeCrossChain(nb, !isR);
-    return nb;
+struct PureShiftResult {
+    ChainEndOverflow[] overflows;
+    int[] activeChains;    /// chain IDs that were processed
 }
 
-private int tryExtendBwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
-                         ref double[4] shiftedRe,
-                         ref double[4] shiftedIm, double thresh2) {
-    double amp2 = 0;
-    foreach (a; 0 .. 4) amp2 += shiftedRe[a]*shiftedRe[a] + shiftedIm[a]*shiftedIm[a];
-    if (amp2 < thresh2) return -1;
-
-    // Compute new site position from analytic formula
-    int chainId = isR ? lat.sites[s].rChain : lat.sites[s].lChain;
-    auto ch = &lat.chains[chainId];
-    int newChainIdx = ch.rootIdx - 1;
-    Vec3 p = chainCentroid(&ch.origin, newChainIdx);
-
-    int nb = lat.allocSite(p);
-    if (nb < 0) return -2;  // lattice full
-    lat.chainPrepend(chainId, nb);
-    lat.makeCrossChain(nb, !isR);
-    return nb;
-}
-
-ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
-                                     double thresh2,
-                                     double pruneThresh2 = 0,
-                                     CoarseGrid* cgrid = null) {
-    import core.thread : Thread;
-    import std.parallelism : parallel, taskPool;
+/**
+ * Pure shift operator — gathers interior amplitudes and reports overflow.
+ *
+ * After this call:
+ *   - lat.psiRe/Im contain the shifted amplitudes for interior sites
+ *     and identity-copied amplitudes for sites not on this chain type.
+ *   - Chain-end P± components are returned as overflow, NOT written to psi.
+ *   - The caller must handle overflow (extend, absorb, or ignore).
+ *
+ * This function calls swapBuffers internally.
+ */
+PureShiftResult pureShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR) {
+    import std.parallelism : parallel;
     alias ChainT = Lattice!hasCoin.ChainT;
-    alias Ops = Lattice!hasCoin.Ops;
 
     int ns = lat.nsites;
-    ShiftResult result;
+    PureShiftResult result;
 
     // Zero tmp
     lat.tmpRe[0 .. 4 * ns] = 0;
@@ -99,11 +79,7 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
         }
     }
 
-    // Process chains in two passes:
-    // 1. Interior sites (parallel) — gather from neighbors, no write conflicts
-    // 2. Chain-end extension (serial) — mutates lattice
-
-    // Collect chain indices for this chirality (reuse static buffer)
+    // Collect active chains for this chirality
     static int[] chainIds;
     if (chainIds.length < lat.chains.length)
         chainIds = new int[lat.chains.length];
@@ -111,13 +87,12 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
     foreach (ci, ref ch; lat.chains)
         if (ch.isR == isR && ch.ops.length > 0)
             chainIds[nci++] = cast(int) ci;
-    auto activeChains = chainIds[0 .. nci];
+    result.activeChains = chainIds[0 .. nci].dup;
 
-    // Pass 1: interior gather (parallel across chains)
-    import std.parallelism : parallel;
+    // ---- Interior gather (parallel across chains) ----
     enum BATCH_DIVISOR = 16;
     int batchSize = (nci > BATCH_DIVISOR) ? nci / BATCH_DIVISOR : 1;
-    foreach (ci; parallel(activeChains, batchSize)) {
+    foreach (ci; parallel(result.activeChains, batchSize)) {
         auto ch = &lat.chains[ci];
         int n = ch.ops.length;
 
@@ -151,98 +126,190 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
         }
     }
 
-    // Pass 2: chain-end extension (serial — mutates lattice)
-    bool ramLow = false;
-    foreach (ci; activeChains) {
-        // NOTE: Always re-fetch chain pointer after any operation that may
-        // append to lat.chains (e.g. makeCrossChain), because D dynamic
-        // array reallocation invalidates pointers.
-        int n = lat.chains[ci].ops.length;
+    // ---- Compute overflow at chain ends (serial, read-only) ----
+    // Pre-allocate: at most 2 overflows per chain (fwd + bwd)
+    result.overflows.reserve(2 * nci);
 
-        // Forward end
+    foreach (idx, ci; result.activeChains) {
+        auto ch = &lat.chains[ci];
+        int n = ch.ops.length;
+
+        // Forward end: P+ @ psi[last]
         {
-            int endSite = lat.chains[ci].ops[n-1].siteId;
+            int endSite = ch.ops[n-1].siteId;
             Vec3 exitDir = lat.exitDirForSite(endSite, isR);
             Mat4 tau = makeTau(exitDir);
             Mat4 Pp = projPlus(tau);
-            double[4] shRe = 0, shIm = 0;
+            ChainEndOverflow ov;
+            ov.chainIdx = cast(int) idx;
+            ov.chainId = ci;
+            ov.endSiteId = endSite;
+            ov.isFwd = true;
+            ov.exitDir = exitDir;
             matVecSplit(Pp, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
-                        shRe.ptr, shIm.ptr);
-            int nb = ramLow ? -2 : tryExtendFwd!hasCoin(lat, endSite, isR, shRe, shIm, thresh2);
-            if (nb >= 0) {
-                lat.psiRe[4*nb .. 4*nb+4] = 0;
-                lat.psiIm[4*nb .. 4*nb+4] = 0;
-                lat.tmpRe[4*nb .. 4*nb+4] = 0;
-                lat.tmpIm[4*nb .. 4*nb+4] = 0;
-
-                // Compute U·P+·psi directly instead of using siteOps
-                Vec3 exitDirNb = lat.exitDirForSite(nb, isR);
-                Mat4 tauNb = makeTau(exitDirNb);
-                Mat4 fwdBlock = mul(frameTransport(tau, tauNb), Pp);
-                double[4] resRe = 0, resIm = 0;
-                matVecSplit(fwdBlock, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
-                            resRe.ptr, resIm.ptr);
-                foreach (a; 0 .. 4) {
-                    lat.tmpRe[4*nb + a] = resRe[a];
-                    lat.tmpIm[4*nb + a] = resIm[a];
-                }
-                result.nCreated++;
-                if ((result.nCreated & 0x3FF) == 0 && isRamLow()) ramLow = true;
-            } else {
-                if (nb == -2) result.nCapFull++;
-                foreach (a; 0 .. 4)
-                    result.probAbsorbed += shRe[a]*shRe[a] + shIm[a]*shIm[a];
-                if (cgrid !is null)
-                    cgrid.addAmplitude(lat.sites[endSite].pos, shRe.ptr, shIm.ptr, exitDir);
-            }
+                        ov.ampRe.ptr, ov.ampIm.ptr);
+            result.overflows ~= ov;
         }
 
-        // Backward end
+        // Backward end: P- @ psi[first]
         {
-            int endSite = lat.chains[ci].ops[0].siteId;
+            int endSite = ch.ops[0].siteId;
             Vec3 exitDir = lat.exitDirForSite(endSite, isR);
             Mat4 tau = makeTau(exitDir);
             Mat4 Pm = projMinus(tau);
-            double[4] shRe = 0, shIm = 0;
+            ChainEndOverflow ov;
+            ov.chainIdx = cast(int) idx;
+            ov.chainId = ci;
+            ov.endSiteId = endSite;
+            ov.isFwd = false;
+            ov.exitDir = exitDir;
             matVecSplit(Pm, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
-                        shRe.ptr, shIm.ptr);
-            int nb = ramLow ? -2 : tryExtendBwd!hasCoin(lat, endSite, isR, shRe, shIm, thresh2);
-            if (nb >= 0) {
-                lat.psiRe[4*nb .. 4*nb+4] = 0;
-                lat.psiIm[4*nb .. 4*nb+4] = 0;
-                lat.tmpRe[4*nb .. 4*nb+4] = 0;
-                lat.tmpIm[4*nb .. 4*nb+4] = 0;
-
-                // Compute U·P-·psi directly instead of using siteOps
-                Vec3 exitDirNb = lat.exitDirForSite(nb, isR);
-                Mat4 tauNb = makeTau(exitDirNb);
-                Mat4 bwdBlock = mul(frameTransport(tau, tauNb), Pm);
-                double[4] resRe = 0, resIm = 0;
-                matVecSplit(bwdBlock, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
-                            resRe.ptr, resIm.ptr);
-                foreach (a; 0 .. 4) {
-                    lat.tmpRe[4*nb + a] = resRe[a];
-                    lat.tmpIm[4*nb + a] = resIm[a];
-                }
-                result.nCreated++;
-                if ((result.nCreated & 0x3FF) == 0 && isRamLow()) ramLow = true;
-            } else {
-                if (nb == -2) result.nCapFull++;
-                foreach (a; 0 .. 4)
-                    result.probAbsorbed += shRe[a]*shRe[a] + shIm[a]*shIm[a];
-                if (cgrid !is null)
-                    cgrid.addAmplitude(lat.sites[endSite].pos, shRe.ptr, shIm.ptr, exitDir);
-            }
+                        ov.ampRe.ptr, ov.ampIm.ptr);
+            result.overflows ~= ov;
         }
     }
 
     lat.swapBuffers();
 
-    // Pass 3: incremental pruning — check chain ends in the new wavefunction
+    return result;
+}
+
+// ===========================================================================
+//  Overflow handling — the caller decides what to do with chain-end overflow
+// ===========================================================================
+
+struct ShiftResult {
+    int nCreated = 0;
+    int nCapFull = 0;
+    double probAbsorbed = 0;
+    int nPruned = 0;
+    double probPruned = 0;
+}
+
+/**
+ * Handle overflow from pureShift by extending chains or absorbing.
+ *
+ * For each overflow:
+ *   - If |amp|² >= extThresh2: create a new site, frame-transport the
+ *     overflow there, and deposit the transported amplitude in psi.
+ *   - Otherwise: add |amp|² to probAbsorbed (and optionally to the
+ *     coarse grid).
+ *
+ * This is the only function that mutates the lattice during a walk step.
+ */
+ShiftResult handleOverflow(bool hasCoin)(
+    ref Lattice!hasCoin lat,
+    bool isR,
+    const(ChainEndOverflow)[] overflows,
+    double extThresh2,
+    CoarseGrid* cgrid = null)
+{
+    ShiftResult result;
+    bool ramLow = false;
+
+    foreach (ref ov; overflows) {
+        double amp2 = 0;
+        foreach (a; 0 .. 4)
+            amp2 += ov.ampRe[a]*ov.ampRe[a] + ov.ampIm[a]*ov.ampIm[a];
+
+        if (amp2 < extThresh2) {
+            // Below threshold: absorb
+            result.probAbsorbed += amp2;
+            if (cgrid !is null)
+                cgrid.addAmplitude(lat.sites[ov.endSiteId].pos,
+                                   ov.ampRe.ptr, ov.ampIm.ptr, ov.exitDir);
+            continue;
+        }
+
+        // Try to extend the chain
+        int nb;
+        if (ov.isFwd)
+            nb = ramLow ? -1 : extendChainFwd!hasCoin(lat, ov.endSiteId, isR);
+        else
+            nb = ramLow ? -1 : extendChainBwd!hasCoin(lat, ov.endSiteId, isR);
+
+        if (nb >= 0) {
+            // Frame-transport the overflow amplitude to the new site
+            Mat4 tauEnd = makeTau(ov.exitDir);
+            Vec3 exitDirNb = lat.exitDirForSite(nb, isR);
+            Mat4 tauNb = makeTau(exitDirNb);
+            Mat4 U = frameTransport(tauEnd, tauNb);
+            Mat4 proj = ov.isFwd ? projPlus(tauEnd) : projMinus(tauEnd);
+            Mat4 block = mul(U, proj);
+
+            // Apply block to the ORIGINAL psi at the end site.
+            // After swapBuffers, psi holds the shifted values at interior sites.
+            // But the overflow was computed from the PRE-swap psi.  We stored
+            // the projected amplitude (P± @ old_psi) in ov.amp.  We just need
+            // to transport it: new_amp = U @ ov.amp.
+            double[4] resRe = 0, resIm = 0;
+            foreach (a; 0 .. 4) {
+                foreach (b; 0 .. 4) {
+                    int ab = 4*a+b;
+                    resRe[a] += U.re[ab]*ov.ampRe[b] - U.im[ab]*ov.ampIm[b];
+                    resIm[a] += U.re[ab]*ov.ampIm[b] + U.im[ab]*ov.ampRe[b];
+                }
+            }
+
+            lat.psiRe[4*nb .. 4*nb+4] = resRe[];
+            lat.psiIm[4*nb .. 4*nb+4] = resIm[];
+            result.nCreated++;
+            if ((result.nCreated & 0x3FF) == 0 && isRamLow()) ramLow = true;
+        } else {
+            // Extension failed (lattice full or RAM low): absorb
+            result.probAbsorbed += amp2;
+            if (cgrid !is null)
+                cgrid.addAmplitude(lat.sites[ov.endSiteId].pos,
+                                   ov.ampRe.ptr, ov.ampIm.ptr, ov.exitDir);
+        }
+    }
+
+    return result;
+}
+
+/// Extend a chain forward by one site. Returns new site ID, or -1 if full.
+private int extendChainFwd(bool hasCoin)(ref Lattice!hasCoin lat, int endSite, bool isR) {
+    int chainId = isR ? lat.sites[endSite].rChain : lat.sites[endSite].lChain;
+    int nOps = lat.chains[chainId].ops.length;
+    int newChainIdx = lat.chains[chainId].rootIdx + nOps;
+    Vec3 p = chainCentroid(&lat.chains[chainId].origin, newChainIdx);
+
+    int nb = lat.allocSite(p);
+    if (nb < 0) return -1;
+    lat.chainAppend(chainId, nb);
+    lat.makeCrossChain(nb, !isR);
+    return nb;
+}
+
+/// Extend a chain backward by one site. Returns new site ID, or -1 if full.
+private int extendChainBwd(bool hasCoin)(ref Lattice!hasCoin lat, int endSite, bool isR) {
+    int chainId = isR ? lat.sites[endSite].rChain : lat.sites[endSite].lChain;
+    int newChainIdx = lat.chains[chainId].rootIdx - 1;
+    Vec3 p = chainCentroid(&lat.chains[chainId].origin, newChainIdx);
+
+    int nb = lat.allocSite(p);
+    if (nb < 0) return -1;
+    lat.chainPrepend(chainId, nb);
+    lat.makeCrossChain(nb, !isR);
+    return nb;
+}
+
+// ===========================================================================
+//  Legacy wrapper — calls pureShift + handleOverflow + inline pruning
+// ===========================================================================
+
+ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
+                                     double thresh2,
+                                     double pruneThresh2 = 0,
+                                     CoarseGrid* cgrid = null) {
+    auto shift = pureShift!hasCoin(lat, isR);
+    auto result = handleOverflow!hasCoin(lat, isR, shift.overflows, thresh2, cgrid);
+
+    // Inline pruning (same as before)
     if (pruneThresh2 > 0) {
-        foreach (ci; activeChains) {
+        foreach (ci; shift.activeChains) {
             auto ch = &lat.chains[ci];
-            if (ch.ops.length <= 1) continue;  // don't prune single-site chains
+            if (ch.ops.length <= 1) continue;
 
             // Forward end
             {
@@ -295,7 +362,6 @@ void applyCoin(bool hasCoin)(ref Lattice!hasCoin lat, bool isR) {
             auto op = lat.siteOps(n, isR);
             if (op is null) continue;
 
-            // Apply coin1 then coin2 (dual parity)
             double[4] resRe = 0, resIm = 0;
             matVecSplit(op.coin1, &lat.psiRe[4*n], &lat.psiIm[4*n], resRe.ptr, resIm.ptr);
             lat.psiRe[4*n .. 4*n+4] = resRe[];
