@@ -306,41 +306,42 @@ def coarse_grain(sites, psi_re, psi_im, exit_dirs_r):
 # ---- Main ----
 
 def main():
-    tri_path = os.path.expanduser(
-        '~/Desktop/Discrete-Differential-Geometry/'
-        'standard_triangulations/equilibrated_200.mfd')
+    default_tri = ('~/Desktop/Discrete-Differential-Geometry/'
+                   'standard_triangulations/equilibrated_200.mfd')
+    tri_path = os.path.expanduser(sys.argv[1] if len(sys.argv) > 1 else default_tri)
     tri = Triangulation.load(tri_path)
     print(f"Manifold: {tri.n_tets} tets, {tri.n_verts} verts")
 
-    # Build closed chains
-    print("Tracing chains through manifold...")
-    sites, r_chains, l_chains, exit_dirs_r, exit_dirs_l = build_manifold_lattice(tri)
-    print(f"  {len(sites)} sites, {len(r_chains)} R-chains, {len(l_chains)} L-chains")
-
-    # Chain length statistics
-    r_lens = [len(c) for c in r_chains]
-    l_lens = [len(c) for c in l_chains]
-    print(f"  R-chain lengths: min={min(r_lens)}, max={max(r_lens)}, "
-          f"mean={np.mean(r_lens):.1f}, total={sum(r_lens)}")
-    print(f"  L-chain lengths: min={min(l_lens)}, max={max(l_lens)}, "
-          f"mean={np.mean(l_lens):.1f}, total={sum(l_lens)}")
-
-    # Check coverage: every site should be on exactly one R and one L chain
-    r_coverage = set()
-    for rc in r_chains:
-        r_coverage.update(rc)
-    l_coverage = set()
-    for lc in l_chains:
-        l_coverage.update(lc)
-    print(f"  R-coverage: {len(r_coverage)}/{len(sites)} sites")
-    print(f"  L-coverage: {len(l_coverage)}/{len(sites)} sites")
-
-    # Load D library and build lattice
-    print("\nBuilding D lattice...")
+    # Load D library
     lib = load_d_library()
-    send_lattice_to_d(lib, sites, r_chains, l_chains, exit_dirs_r, exit_dirs_l)
 
-    # Initial condition: balanced spinor (1, 0, i, 0)/√2 at one site
+    # Pass triangulation to D for fast chain tracing
+    lib.manifold_load_triangulation.argtypes = [
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.c_int,
+    ]
+    lib.manifold_load_triangulation.restype = None
+
+    lib.manifold_build_lattice.argtypes = []
+    lib.manifold_build_lattice.restype = ctypes.c_int
+
+    # Pack triangulation data as flat int arrays
+    tets_flat = np.array(tri.tets, dtype=np.int32).flatten()
+    neighbors_flat = np.array(tri.neighbors, dtype=np.int32).flatten()
+
+    print("Loading triangulation into D...")
+    lib.manifold_load_triangulation(
+        tets_flat.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        neighbors_flat.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        tri.n_tets)
+
+    print("Building manifold lattice (chain tracing in D)...")
+    nsites = lib.manifold_build_lattice()
+    nchains = lib.manifold_nchains()
+    print(f"  {nsites} sites ({nsites/tri.n_tets:.0f}× tets), {nchains} chains")
+
+    # Initial condition: balanced spinor (1, 0, i, 0)/√2 at site 0
     ic_re = np.array([1/np.sqrt(2), 0, 0, 0], dtype=np.float64)
     ic_im = np.array([0, 0, 1/np.sqrt(2), 0], dtype=np.float64)
     lib.manifold_set_psi(0,
@@ -350,32 +351,23 @@ def main():
     # Walk parameters
     n_steps = 200
     mix_phi = 0.05
-    nsites = lib.manifold_nsites()
 
     print(f"\nWalk: {n_steps} steps, φ_mix={mix_phi}, {nsites} sites")
-    print(f"{'t':>5} {'norm':>12} {'n_tets':>8} {'grid_norm':>12}")
 
-    # Run walk and observe
-    psi_re = np.zeros(4 * nsites, dtype=np.float64)
-    psi_im = np.zeros(4 * nsites, dtype=np.float64)
+    # Run all steps in D, get norms back
+    norms = np.zeros(n_steps, dtype=np.float64)
+    print(f"  t=0 norm={np.sqrt(lib.manifold_norm2()):12.9f}", flush=True)
+    lib.manifold_run(n_steps, mix_phi,
+                     norms.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
 
-    for t in range(n_steps + 1):
-        norm2 = lib.manifold_norm2()
+    # Print selected steps
+    print(f"{'t':>5} {'norm':>12}")
+    for t in range(n_steps):
+        if t < 5 or t % 20 == 0 or t == n_steps - 1:
+            print(f"{t+1:5d} {np.sqrt(norms[t]):12.9f}")
 
-        # Coarse-grain every 10 steps (or first/last few)
-        if t <= 5 or t % 10 == 0 or t == n_steps:
-            lib.manifold_get_psi(
-                psi_re.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-                psi_im.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
-            mpsi = coarse_grain(sites, psi_re, psi_im, exit_dirs_r)
-            grid_norm = sum(np.real(np.vdot(p, p)) for p in mpsi.values())
-            n_active_tets = len(mpsi)
-            print(f"{t:5d} {np.sqrt(norm2):12.9f} {n_active_tets:8d} {grid_norm:12.9f}")
-        else:
-            print(f"{t:5d} {np.sqrt(norm2):12.9f}")
-
-        if t < n_steps:
-            lib.manifold_step(mix_phi)
+    print(f"\n  Final norm: {np.sqrt(norms[-1]):.15f}")
+    print(f"  Max |norm-1|: {np.max(np.abs(norms - 1.0)):.2e}")
 
 
 if __name__ == '__main__':

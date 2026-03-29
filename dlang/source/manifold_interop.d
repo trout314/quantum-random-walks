@@ -143,3 +143,283 @@ void manifold_run(int nSteps, double mixPhi, double* outNorms) {
     foreach (t; 0 .. nSteps)
         outNorms[t] = manifold_step(mixPhi);
 }
+
+// ===========================================================================
+//  Manifold lattice builder — trace chains through face adjacency in D
+// ===========================================================================
+
+/// Standard tetrahedral exit directions (unit vectors toward each vertex).
+private immutable double[3][4] STD_DIRS = () {
+    import std.math : sqrt;
+    double[3][4] d;
+    d[0] = [0.0, 0.0, 1.0];
+    d[1] = [2*sqrt(2.0)/3, 0.0, -1.0/3];
+    d[2] = [-sqrt(2.0)/3, sqrt(6.0)/3, -1.0/3];
+    d[3] = [-sqrt(2.0)/3, -sqrt(6.0)/3, -1.0/3];
+    return d;
+}();
+
+private immutable int[4] L_PERM = [1, 3, 0, 2];
+private immutable int[4] INV_L_PERM = [2, 0, 3, 1];
+
+/// Triangulation data (set by manifold_load_triangulation).
+private struct Triangulation {
+    int nTets;
+    int[][] tets;       // tets[i] = sorted 4-tuple of vertex labels
+    int[][] neighbors;  // neighbors[i][f] = neighbor tet across face f
+}
+private Triangulation gTri;
+
+/// Load triangulation from arrays passed by Python.
+/// tets: nTets*4 ints (row-major, each row is 4 sorted vertex labels)
+/// neighbors: nTets*4 ints (row-major, neighbors[i][f] = neighbor across face f)
+export extern(C)
+void manifold_load_triangulation(const(int)* tets, const(int)* neighbors, int nTets) {
+    gTri.nTets = nTets;
+    gTri.tets = new int[][nTets];
+    gTri.neighbors = new int[][nTets];
+    foreach (i; 0 .. nTets) {
+        gTri.tets[i] = new int[4];
+        gTri.neighbors[i] = new int[4];
+        foreach (f; 0 .. 4) {
+            gTri.tets[i][f] = tets[4*i + f];
+            gTri.neighbors[i][f] = neighbors[4*i + f];
+        }
+    }
+}
+
+/// A manifold site state: (tet_id, vertex_perm[0..4]).
+/// The vertex perm maps window positions to manifold vertex labels.
+private struct MState {
+    int tetId;
+    int[4] perm;
+
+    size_t toHash() const nothrow @safe {
+        // Simple hash combining tet and perm
+        size_t h = cast(size_t) tetId * 2654435761;
+        foreach (p; perm)
+            h ^= cast(size_t) p * 2246822519 + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+    bool opEquals(ref const MState o) const nothrow @safe {
+        return tetId == o.tetId && perm == o.perm;
+    }
+}
+
+/// Advance one step along a chain: drop perm[0], cross face, pick up new vertex.
+private MState chainStep(MState s) {
+    int dropped = s.perm[0];
+    int[] tetVerts = gTri.tets[s.tetId];
+    // Find which face is opposite the dropped vertex
+    int faceIdx = -1;
+    foreach (f; 0 .. 4)
+        if (tetVerts[f] == dropped) { faceIdx = f; break; }
+    assert(faceIdx >= 0);
+
+    int neighborId = gTri.neighbors[s.tetId][faceIdx];
+    int[] nbVerts = gTri.tets[neighborId];
+
+    // Find the new vertex (in neighbor but not in shared face)
+    int newVert = -1;
+    foreach (v; nbVerts) {
+        bool inOld = false;
+        foreach (p; s.perm[1..4])
+            if (v == p) { inOld = true; break; }
+        if (!inOld) { newVert = v; break; }
+    }
+    assert(newVert >= 0);
+
+    MState next;
+    next.tetId = neighborId;
+    next.perm = [s.perm[1], s.perm[2], s.perm[3], newVert];
+    return next;
+}
+
+/// Trace a chain from a starting state until it loops back.
+/// Returns the chain as an array of MStates.
+private MState[] traceChain(MState start) {
+    MState[] chain;
+    chain.reserve(1024);
+    MState s = start;
+    do {
+        chain ~= s;
+        s = chainStep(s);
+    } while (s != start);
+    return chain;
+}
+
+/// Get the exit direction for a state: STD_DIRS[k] where k is the
+/// position of perm[0] in the sorted tet vertex list.
+private Vec3 exitDir(MState s) {
+    int[] tetVerts = gTri.tets[s.tetId];
+    foreach (k; 0 .. 4)
+        if (tetVerts[k] == s.perm[0])
+            return Vec3(STD_DIRS[k][0], STD_DIRS[k][1], STD_DIRS[k][2]);
+    assert(false, "perm[0] not found in tet vertices");
+}
+
+/// Convert R-state to L-state at the same site.
+private MState rToL(MState r) {
+    MState l;
+    l.tetId = r.tetId;
+    foreach (k; 0 .. 4)
+        l.perm[k] = r.perm[L_PERM[k]];
+    return l;
+}
+
+/// Convert L-state to R-state at the same site.
+private MState lToR(MState l) {
+    MState r;
+    r.tetId = l.tetId;
+    foreach (k; 0 .. 4)
+        r.perm[k] = l.perm[INV_L_PERM[k]];
+    return r;
+}
+
+/// Build the full manifold lattice: trace all R and L chains,
+/// create sites and closed chains in the global lattice.
+///
+/// Returns: number of sites created.
+export extern(C)
+int manifold_build_lattice() {
+    import std.stdio : stderr;
+
+    // Site registry: R-state → site ID
+    int[MState] siteOf;
+    // Exit directions per site per chirality
+    Vec3[] rExitDirs;   // indexed by site ID
+    Vec3[] lExitDirs;
+
+    int nextSid = 0;
+
+    int getSite(MState rState) {
+        auto p = rState in siteOf;
+        if (p) return *p;
+        int sid = nextSid++;
+        siteOf[rState] = sid;
+        // Grow exit dir arrays
+        if (rExitDirs.length <= sid) {
+            rExitDirs.length = sid + 1;
+            lExitDirs.length = sid + 1;
+        }
+        return sid;
+    }
+
+    // BFS over R-chain orbits
+    bool[MState] visitedR;
+    bool[MState] visitedL;
+    MState[] rQueue;
+
+    // Collected chains: (siteIds[], exitDirs[], isR)
+    struct ChainData {
+        int[] sids;
+        Vec3[] dirs;
+        bool isR;
+    }
+    ChainData[] allChains;
+
+    // Seed with tet 0
+    MState startR;
+    startR.tetId = 0;
+    foreach (k; 0 .. 4)
+        startR.perm[k] = gTri.tets[0][k];
+    rQueue ~= startR;
+
+    while (rQueue.length > 0) {
+        MState rs = rQueue[$ - 1];
+        rQueue.length--;
+        if (rs in visitedR) continue;
+
+        // Trace R-chain
+        MState[] rChain = traceChain(rs);
+        foreach (ref st; rChain)
+            visitedR[st] = true;
+
+        // Assign sites and collect R exit dirs
+        ChainData rcd;
+        rcd.isR = true;
+        rcd.sids = new int[rChain.length];
+        rcd.dirs = new Vec3[rChain.length];
+        foreach (i, ref st; rChain) {
+            int sid = getSite(st);
+            rcd.sids[i] = sid;
+            rcd.dirs[i] = exitDir(st);
+            rExitDirs[sid] = rcd.dirs[i];
+        }
+        allChains ~= rcd;
+
+        stderr.writefln("  R-chain %d: period=%d, sites=%d",
+                        cast(int) allChains.length - 1, rChain.length, nextSid);
+
+        // Trace L-chains at each R-chain site
+        foreach (ref st; rChain) {
+            MState lStart = rToL(st);
+            if (lStart in visitedL) continue;
+
+            MState[] lChain = traceChain(lStart);
+            foreach (ref ls; lChain)
+                visitedL[ls] = true;
+
+            ChainData lcd;
+            lcd.isR = false;
+            lcd.sids = new int[lChain.length];
+            lcd.dirs = new Vec3[lChain.length];
+            foreach (i, ref ls; lChain) {
+                MState rEquiv = lToR(ls);
+                int sid = getSite(rEquiv);
+                lcd.sids[i] = sid;
+                lcd.dirs[i] = exitDir(ls);
+                lExitDirs[sid] = lcd.dirs[i];
+
+                // Queue new R-states
+                if (rEquiv !in visitedR)
+                    rQueue ~= rEquiv;
+            }
+            allChains ~= lcd;
+        }
+    }
+
+    stderr.writefln("  Chain tracing done: %d sites, %d chains", nextSid, allChains.length);
+
+    // Create the D lattice
+    gLat = new Lattice!false;
+    *gLat = Lattice!false.create(nextSid + 100);
+    foreach (i; 0 .. nextSid)
+        gLat.allocSite(Vec3(0, 0, 0));
+
+    // Create closed chains
+    foreach (ref cd; allChains) {
+        int n = cast(int) cd.sids.length;
+        int chainId = cast(int) gLat.chains.length;
+        Lattice!false.ChainT newChain;
+        newChain.isR = cd.isR;
+        newChain.isClosed = true;
+        newChain.rootSite = cd.sids[0];
+        newChain.rootIdx = 0;
+
+        alias Ops = Lattice!false.Ops;
+        foreach (i; 0 .. n) {
+            int sid = cd.sids[i];
+            Mat4 tau = makeTau(cd.dirs[i]);
+            int pi = (i > 0) ? i - 1 : n - 1;
+            int ni = (i < n - 1) ? i + 1 : 0;
+            Mat4 tauP = makeTau(cd.dirs[pi]);
+            Mat4 tauN = makeTau(cd.dirs[ni]);
+
+            Ops op;
+            op.siteId = sid;
+            op.fwdBlock = mul(frameTransport(tau, tauN), projPlus(tau));
+            op.bwdBlock = mul(frameTransport(tau, tauP), projMinus(tau));
+            newChain.ops.pushBack(op);
+
+            if (cd.isR) { gLat.sites[sid].rChain = chainId; gLat.sites[sid].rIdx = i; }
+            else        { gLat.sites[sid].lChain = chainId; gLat.sites[sid].lIdx = i; }
+        }
+        gLat.chains ~= newChain;
+    }
+
+    stderr.writefln("  Lattice build done: %d sites, %d chains",
+                    gLat.nsites, gLat.chains.length);
+
+    return nextSid;
+}
