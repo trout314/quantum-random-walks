@@ -811,58 +811,32 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     // Each site creates ~2 chains, and we expect at most initCap sites.
     lat.chains.reserve(lat.capacity * 3);
 
-    // ---- Seed: origin ----
+    // ---- Seed: origin with one R-chain and one L-chain ----
+    // The origin is treated identically to every other site: it sits at the
+    // crossing of exactly one R-chain and one L-chain. The A4 symmetry
+    // emerges from the orbit creation at each growth step — we don't need
+    // 12 seed chains to get it.
 
     int origin = lat.allocSite(Vec3(0, 0, 0));
     grid.add(Vec3(0, 0, 0), origin);
     addOrbit([origin], [0], 1);
 
-    // Seed R-chain: canonical chain through origin.
     Vec3[4] seedVerts;
     foreach (k; 0 .. 4) seedVerts[k] = helixVertex(k);
     int seedR = makeChainFromVertices!hasCoin(lat, origin, IS_R, seedVerts); nChains++;
-    ChainOrigin seedROrigin = lat.chains[seedR].origin;
-
-    // Seed L-chain: canonical cross-chain through origin.
     int seedL = makeCrossChain!hasCoin(lat, origin, IS_L); nChains++;
-    ChainOrigin seedLOrigin = lat.chains[seedL].origin;
 
-    // The origin is A4-invariant, so 12 rotated copies of each chain pass through it.
-    // But the origin site can only belong to ONE R-chain and ONE L-chain.
-    // The other 11 chains of each chirality are "headless" — they have the correct
-    // ChainOrigin (for analytic geometry) but the origin site is NOT in their ops deque.
-    // When the growth loop extends them, their first site will be one step away
-    // from the origin, which is correct.
-
-    /// Create a headless chain: has an origin for analytic geometry but no sites.
-    int makeHeadlessChain(const ChainOrigin* templateOrigin, const Mat3* rot, bool isR) {
-        int chainId = cast(int) lat.chains.length;
-        Chain!hasCoin newChain;
-        newChain.isR = isR;
-        newChain.rootSite = -1;  // no root site
-        newChain.rootIdx = 0;
-        newChain.origin = rotateChainOrigin(templateOrigin, rot);
-        newChain.origin.pos0 = Vec3(0, 0, 0);  // origin position
-        lat.chains ~= newChain;
-        nChains++;
-        return chainId;
-    }
-
-    // Build seed R-chain orbit: canonical + 11 headless partners
+    // Single-chain orbits for the seed (no A4 partners — just the canonical pair).
+    // The growth loop will create A4 partner chains at the first extension sites.
     ChainOrbit seedRCO;
-    seedRCO.count = 12;
+    seedRCO.count = 1;
     seedRCO.chainIds[0] = seedR;
-    foreach (ri; 1 .. 12)
-        seedRCO.chainIds[ri] = makeHeadlessChain(&seedROrigin, &a4rots[ri], IS_R);
     chainOrbits ~= seedRCO;
     int seedROrbitId = cast(int) chainOrbits.length - 1;
 
-    // Build seed L-chain orbit: canonical + 11 headless partners
     ChainOrbit seedLCO;
-    seedLCO.count = 12;
+    seedLCO.count = 1;
     seedLCO.chainIds[0] = seedL;
-    foreach (ri; 1 .. 12)
-        seedLCO.chainIds[ri] = makeHeadlessChain(&seedLOrigin, &a4rots[ri], IS_L);
     chainOrbits ~= seedLCO;
     int seedLOrbitId = cast(int) chainOrbits.length - 1;
 
@@ -909,13 +883,10 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         return result;
     }
 
-    /// Compute the next chain index for extension (handles headless chains).
+    /// Compute the next chain index for extension.
     int nextExtensionIdx(int chainId, bool forward) {
         int n = lat.chains[chainId].ops.length;
-        if (n == 0) {
-            // Headless chain: start from index 1 (fwd) or -1 (bwd), skipping origin
-            return forward ? 1 : -1;
-        }
+        assert(n > 0, "Cannot extend empty chain");
         return forward
             ? lat.chains[chainId].rootIdx + n
             : lat.chains[chainId].rootIdx - 1;
@@ -956,11 +927,12 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 
         if (grid.isTooClose(canP)) continue;  // dMin proximity check
 
-        // All 12 pass — create new sites and extend all chains in the orbit.
+        // Create new sites and extend all chains in the orbit.
+        int orbitCount = chainOrbits[entry.chainOrbitId].count;
         int[12] newSites;
         int newCount = 0;
 
-        foreach (ri; 0 .. 12) {
+        foreach (ri; 0 .. orbitCount) {
             int chainId = orbitChainIds[ri];
             int newIdx = nextExtensionIdx(chainId, entry.forward);
             Vec3 p = chainCentroid(&lat.chains[chainId].origin, newIdx);
