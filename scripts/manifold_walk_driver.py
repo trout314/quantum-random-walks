@@ -216,12 +216,13 @@ def load_d_library():
     lib.manifold_step.argtypes = [ctypes.c_double]
     lib.manifold_step.restype = ctypes.c_double
 
-    lib.manifold_run.argtypes = [
-        ctypes.c_int,
-        ctypes.c_double,
+    lib.manifold_run_observe.argtypes = [
+        ctypes.c_int, ctypes.c_double,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_double),
         ctypes.POINTER(ctypes.c_double),
     ]
-    lib.manifold_run.restype = None
+    lib.manifold_run_observe.restype = None
 
     return lib
 
@@ -354,20 +355,70 @@ def main():
 
     print(f"\nWalk: {n_steps} steps, φ_mix={mix_phi}, {nsites} sites")
 
-    # Run all steps in D, get norms back
+    # Run all steps in D with observables
     norms = np.zeros(n_steps, dtype=np.float64)
+    pr = np.zeros(n_steps, dtype=np.float64)
+    ret_prob = np.zeros(n_steps, dtype=np.float64)
+
     print(f"  t=0 norm={np.sqrt(lib.manifold_norm2()):12.9f}", flush=True)
-    lib.manifold_run(n_steps, mix_phi,
-                     norms.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
+    lib.manifold_run_observe(
+        n_steps, mix_phi,
+        norms.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        pr.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        ret_prob.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
 
     # Print selected steps
-    print(f"{'t':>5} {'norm':>12}")
+    t_arr = np.arange(1, n_steps + 1)
+    print(f"{'t':>5} {'norm':>12} {'PR':>10} {'PR/N':>8} {'return':>12}")
     for t in range(n_steps):
-        if t < 5 or t % 20 == 0 or t == n_steps - 1:
-            print(f"{t+1:5d} {np.sqrt(norms[t]):12.9f}")
+        if t < 5 or t % 50 == 0 or t == n_steps - 1:
+            print(f"{t+1:5d} {np.sqrt(norms[t]):12.9f} {pr[t]:10.1f} "
+                  f"{pr[t]/nsites:8.4f} {ret_prob[t]:12.6e}")
 
     print(f"\n  Final norm: {np.sqrt(norms[-1]):.15f}")
     print(f"  Max |norm-1|: {np.max(np.abs(norms - 1.0)):.2e}")
+    print(f"  PR range: {pr.min():.1f} — {pr.max():.1f} (N={nsites}, N/3={nsites/3:.0f})")
+
+    # Plot
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+
+    # PR vs t
+    ax = axes[0]
+    ax.plot(t_arr, pr, 'b-', linewidth=0.5)
+    ax.axhline(nsites, color='r', linestyle='--', alpha=0.5, label=f'N={nsites}')
+    ax.axhline(nsites/3, color='orange', linestyle='--', alpha=0.5, label=f'N/3={nsites//3}')
+    ax.set_xlabel('Step')
+    ax.set_ylabel('Participation Ratio')
+    ax.set_title('Wavefunction Spreading')
+    ax.legend(fontsize=8)
+
+    # Return probability vs t
+    ax = axes[1]
+    ax.semilogy(t_arr, ret_prob, 'g-', linewidth=0.5)
+    ax.set_xlabel('Step')
+    ax.set_ylabel('Return Probability')
+    ax.set_title('Return to Origin')
+
+    # PR/N vs t (fraction of sites occupied)
+    ax = axes[2]
+    ax.plot(t_arr, pr / nsites, 'b-', linewidth=0.5)
+    ax.axhline(1/3, color='orange', linestyle='--', alpha=0.5, label='1/3 (random matrix)')
+    ax.set_xlabel('Step')
+    ax.set_ylabel('PR / N')
+    ax.set_title('Fractional Spreading')
+    ax.set_ylim(0, 1.0)
+    ax.legend(fontsize=8)
+
+    fig.suptitle(f'Manifold Walk: {tri.n_tets} tets, {nsites} sites, φ={mix_phi}',
+                 fontsize=12)
+    plt.tight_layout()
+    out_path = '/tmp/manifold_walk_spreading.png'
+    plt.savefig(out_path, dpi=150)
+    print(f"\n  Plot saved to {out_path}")
 
 
 if __name__ == '__main__':

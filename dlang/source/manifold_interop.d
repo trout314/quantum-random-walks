@@ -120,28 +120,64 @@ double manifold_norm2() {
     return n2;
 }
 
+/// Compute per-site probability |ψ_s|² for each site, write to outProbs.
+/// Also returns Σ|ψ_s|⁴ (the IPR = inverse participation ratio denominator).
+export extern(C)
+double manifold_site_probs(double* outProbs) {
+    int ns = gLat.nsites;
+    double ipr = 0;
+    foreach (s; 0 .. ns) {
+        double p = 0;
+        foreach (a; 0 .. 4) {
+            double re = gLat.psiRe[4*s+a];
+            double im = gLat.psiIm[4*s+a];
+            p += re*re + im*im;
+        }
+        outProbs[s] = p;
+        ipr += p * p;
+    }
+    return ipr;
+}
+
+/// Compute return probability |⟨ψ(t)|ψ(0)⟩|² for initial state at site 0.
+/// Assumes IC was (1,0,i,0)/√2 at site 0.
+export extern(C)
+double manifold_return_prob() {
+    // ⟨ψ₀|ψ(t)⟩ where ψ₀ = (1,0,i,0)/√2
+    double re = gLat.psiRe[0] / SQRT2 + gLat.psiIm[2] / SQRT2;
+    double im = gLat.psiIm[0] / SQRT2 - gLat.psiRe[2] / SQRT2;
+    return re*re + im*im;
+}
+private enum SQRT2 = 1.4142135623730951;
+
 // ---- Walk step ----
 
 /// Run one full walk step: S_L → Vmix_L → S_R → Vmix_R.
 /// Returns norm² after the step.
 export extern(C)
 double manifold_step(double mixPhi) {
-    // S_L (shift along L-chains, no overflow for closed chains)
-    pureShift!false(*gLat, false);  // isR=false → L-chains
+    pureShift!false(*gLat, false);
     applyVmix!false(*gLat, false, mixPhi);
-
-    // S_R (shift along R-chains)
-    pureShift!false(*gLat, true);   // isR=true → R-chains
+    pureShift!false(*gLat, true);
     applyVmix!false(*gLat, true, mixPhi);
-
     return manifold_norm2();
 }
 
-/// Run nSteps walk steps, writing norm² at each step to outNorms.
+/// Run nSteps walk steps, recording observables at each step.
+/// outNorms[t] = norm², outPR[t] = participation ratio, outReturn[t] = return prob.
 export extern(C)
-void manifold_run(int nSteps, double mixPhi, double* outNorms) {
-    foreach (t; 0 .. nSteps)
-        outNorms[t] = manifold_step(mixPhi);
+void manifold_run_observe(int nSteps, double mixPhi,
+                          double* outNorms, double* outPR, double* outReturn) {
+    int ns = gLat.nsites;
+    auto probs = new double[ns];
+
+    foreach (t; 0 .. nSteps) {
+        double norm2 = manifold_step(mixPhi);
+        double ipr = manifold_site_probs(probs.ptr);
+        outNorms[t] = norm2;
+        outPR[t] = (norm2 * norm2) / ipr;  // PR = (Σp)² / Σp²
+        outReturn[t] = manifold_return_prob();
+    }
 }
 
 // ===========================================================================
