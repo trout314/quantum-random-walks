@@ -595,6 +595,25 @@ struct Lattice(bool hasCoin) {
 
 private struct ChainSeed { int siteId; bool isR; }
 
+/// Compute the 3x3 rotation matrix for a vertex permutation.
+/// R = (3/4) Σ_k tetDirs[perm[k]] ⊗ tetDirs[k] (same formula as A4 rotations).
+Mat3 computeCrossRotation(const int[4] perm) {
+    import geometry : tetDirs;
+    Mat3 R;
+    foreach (i; 0 .. 3)
+        foreach (j; 0 .. 3) {
+            double s = 0;
+            foreach (k; 0 .. 4) {
+                double pi = void, qj = void;
+                final switch (i) { case 0: pi=tetDirs[perm[k]].x; break; case 1: pi=tetDirs[perm[k]].y; break; case 2: pi=tetDirs[perm[k]].z; break; }
+                final switch (j) { case 0: qj=tetDirs[k].x; break; case 1: qj=tetDirs[k].y; break; case 2: qj=tetDirs[k].z; break; }
+                s += pi * qj;
+            }
+            R.m[3*i+j] = 0.75 * s;
+        }
+    return R;
+}
+
 /// The vertex permutation that generates the perpendicular cross-chain.
 /// L-chain vertex sequence = R-chain vertices permuted by [1,3,0,2].
 /// Inverse permutation (R from L) = [2,0,3,1].
