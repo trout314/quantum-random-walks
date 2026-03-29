@@ -73,40 +73,47 @@ void initWavepacket(ref Lattice!HAS_COIN lat, double sigma,
     auto refIm = new double[4 * ns];  refIm[] = 0;
     auto visited = new bool[ns];      visited[] = false;
 
-    // Build P+/P- symmetric reference spinor at the origin.
-    // Project (1,0,0,0) onto P+ and P-, normalize each, sum with equal weight.
+    // Build fully balanced reference spinor at the origin.
+    // Find ψ with <β>=0 and <α_i>=0 for all i, which gives <τ_a>=0 for all 4
+    // tetrahedral faces. This ensures zero net current in every direction.
+    //
+    // Method: β and α_i are 4 Hermitian matrices. We need ψ in the intersection
+    // of their zero-expectation surfaces. Since τ = νβ + (3/4)(d·α), the
+    // conditions <β>=0 and <α_i>=0 automatically give <τ_a>=0 for all a.
+    //
+    // <β>=0 means |ψ₀|²+|ψ₁|² = |ψ₂|²+|ψ₃|² (equal upper/lower weight).
+    // <α_i>=0 gives 3 more real constraints. With 8 real parameters (4 complex)
+    // minus normalization and global phase = 6 DOF, we have 6-4=2 free parameters.
     {
-        bool originIsR = lat.hasChain(0, true);
-        Mat4 tau0 = siteTau(lat, 0, originIsR);
-        Mat4 Pp = projPlus(tau0);
-        Mat4 Pm = projMinus(tau0);
+        // Dirac matrices (matching dirac.d)
+        // β = diag(1,1,-1,-1)
+        // α₁: (0,3)↔1, (1,2)↔1
+        // α₂: (0,3)↔-i, (1,2)↔i
+        // α₃: (0,2)↔1, (1,3)↔-1
 
-        double[4] baseRe = [1, 0, 0, 0];
-        double[4] baseIm = [0, 0, 0, 0];
+        // Represent ψ = (a, b, c, d) with a,b,c,d complex.
+        // <β> = |a|²+|b|²-|c|²-|d|² = 0  →  |a|²+|b|² = |c|²+|d|² = 1/2
+        // <α₁> = 2Re(a*conj(d) + b*conj(c)) = 0
+        // <α₂> = 2Re(i*a*conj(d) - i*b*conj(c)) = 2Im(-a*conj(d) + b*conj(c)) = 0
+        // <α₃> = 2Re(a*conj(c) - b*conj(d)) = 0
+        //
+        // A simple solution: set b=d=0, then <β>=0 requires |a|=|c|.
+        // <α₁> = 0 (both terms zero since b=d=0).
+        // <α₂> = 0 (same).
+        // <α₃> = 2Re(a*conj(c)) = 0, so a and c must be 90° out of phase.
+        // Solution: a = 1/√2, c = i/√2.
 
-        // P+ component
-        double[4] ppRe = 0, ppIm = 0;
-        matVecSplit(Pp, baseRe.ptr, baseIm.ptr, ppRe.ptr, ppIm.ptr);
-        double ppNorm2 = 0;
-        foreach (a; 0 .. 4) ppNorm2 += ppRe[a]*ppRe[a] + ppIm[a]*ppIm[a];
+        refRe[0] = 1.0 / sqrt(2.0);  refIm[0] = 0;
+        refRe[1] = 0;                 refIm[1] = 0;
+        refRe[2] = 0;                 refIm[2] = 1.0 / sqrt(2.0);
+        refRe[3] = 0;                 refIm[3] = 0;
 
-        // P- component
-        double[4] pmRe = 0, pmIm = 0;
-        matVecSplit(Pm, baseRe.ptr, baseIm.ptr, pmRe.ptr, pmIm.ptr);
-        double pmNorm2 = 0;
-        foreach (a; 0 .. 4) pmNorm2 += pmRe[a]*pmRe[a] + pmIm[a]*pmIm[a];
-
-        // Normalize each and sum: ref = (|p+⟩/||p+|| + |p-⟩/||p-||) / √2
-        double ppInv = 1.0 / sqrt(ppNorm2);
-        double pmInv = 1.0 / sqrt(pmNorm2);
-        double scale = 1.0 / sqrt(2.0);
-        foreach (a; 0 .. 4) {
-            refRe[a] = scale * (ppInv * ppRe[a] + pmInv * pmRe[a]);
-            refIm[a] = scale * (ppInv * ppIm[a] + pmInv * pmIm[a]);
-        }
-
-        stderr.writefln("  IC: P+/P- symmetric (P+ weight=%.1f%%, P- weight=%.1f%%)",
-                        50.0, 50.0);
+        // Verify balance
+        double expBeta = refRe[0]*refRe[0] + refIm[0]*refIm[0]
+                       + refRe[1]*refRe[1] + refIm[1]*refIm[1]
+                       - refRe[2]*refRe[2] - refIm[2]*refIm[2]
+                       - refRe[3]*refRe[3] - refIm[3]*refIm[3];
+        stderr.writefln("  IC: fully balanced (1,0,i,0)/√2  <β>=%.6f", expBeta);
     }
     visited[0] = true;
 
