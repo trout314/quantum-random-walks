@@ -320,6 +320,8 @@ void run(WalkParams p) {
             totalPruned += resL.probPruned + resR.probPruned;
             int nPruned = resL.nPruned + resR.nPruned;
 
+            // No renormalization — let the fine lattice drain naturally.
+
             stderr.writefln("    S_L: absorbed=%.4e created=%d capFull=%d  S_R: absorbed=%.4e created=%d capFull=%d  sites=%d",
                             resL.probAbsorbed, resL.nCreated, resL.nCapFull,
                             resR.probAbsorbed, resR.nCreated, resR.nCapFull, lat.nsites);
