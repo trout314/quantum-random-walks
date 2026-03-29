@@ -14,6 +14,7 @@ import operators : pureShift, applyVmix;
 /// Opaque handle for the lattice.  We store a heap-allocated pointer
 /// so the GC keeps it alive across C calls.
 private Lattice!false* gLat;
+private int[] gSiteTet;   // site_id → manifold tet_id (set by manifold_build_lattice)
 
 // ---- Lattice lifecycle ----
 
@@ -108,6 +109,13 @@ void manifold_get_psi(double* outRe, double* outIm) {
     int n4 = 4 * gLat.nsites;
     outRe[0 .. n4] = gLat.psiRe[0 .. n4];
     outIm[0 .. n4] = gLat.psiIm[0 .. n4];
+}
+
+/// Copy site→tet mapping into caller buffer. Buffer must hold nsites ints.
+export extern(C)
+void manifold_get_site_tets(int* outTets) {
+    int ns = gLat.nsites;
+    outTets[0 .. ns] = gSiteTet[0 .. ns];
 }
 
 /// Compute total norm² of the wavefunction.
@@ -333,11 +341,15 @@ int manifold_build_lattice() {
         if (p) return *p;
         int sid = nextSid++;
         siteOf[rState] = sid;
-        // Grow exit dir arrays
+        // Grow arrays
         if (rExitDirs.length <= sid) {
             rExitDirs.length = sid + 1;
             lExitDirs.length = sid + 1;
         }
+        // Record tet mapping
+        if (gSiteTet.length <= sid)
+            gSiteTet.length = sid + 1;
+        gSiteTet[sid] = rState.tetId;
         return sid;
     }
 

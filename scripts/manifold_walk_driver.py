@@ -379,15 +379,42 @@ def main():
     print(f"  Max |norm-1|: {np.max(np.abs(norms - 1.0)):.2e}")
     print(f"  PR range: {pr.min():.1f} — {pr.max():.1f} (N={nsites}, N/3={nsites/3:.0f})")
 
+    # Get final wavefunction for coarse-grained histogram
+    lib.manifold_site_probs.argtypes = [ctypes.POINTER(ctypes.c_double)]
+    lib.manifold_site_probs.restype = ctypes.c_double
+    site_probs = np.zeros(nsites, dtype=np.float64)
+    lib.manifold_site_probs(site_probs.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
+
+    # Get site→tet mapping from D
+    lib.manifold_get_site_tets.argtypes = [ctypes.POINTER(ctypes.c_int)]
+    lib.manifold_get_site_tets.restype = None
+    site_tets = np.zeros(nsites, dtype=np.int32)
+    lib.manifold_get_site_tets(site_tets.ctypes.data_as(ctypes.POINTER(ctypes.c_int)))
+
+    # Coarse-grain: sum site probabilities at each tet
+    tet_probs = np.zeros(tri.n_tets, dtype=np.float64)
+    for sid in range(nsites):
+        tet_probs[site_tets[sid]] += site_probs[sid]
+
+    # Compute vertex degrees for correlation
+    from collections import Counter
+    vert_deg = Counter()
+    for t in tri.tets:
+        for v in t:
+            vert_deg[v] += 1
+    # Average vertex degree per tet
+    tet_avg_deg = np.array([np.mean([vert_deg[v] for v in tri.tets[i]])
+                            for i in range(tri.n_tets)])
+
     # Plot
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
 
     # PR vs t
-    ax = axes[0]
+    ax = axes[0, 0]
     ax.plot(t_arr, pr, 'b-', linewidth=0.5)
     ax.axhline(nsites, color='r', linestyle='--', alpha=0.5, label=f'N={nsites}')
     ax.axhline(nsites/3, color='orange', linestyle='--', alpha=0.5, label=f'N/3={nsites//3}')
@@ -397,28 +424,41 @@ def main():
     ax.legend(fontsize=8)
 
     # Return probability vs t
-    ax = axes[1]
+    ax = axes[0, 1]
     ax.semilogy(t_arr, ret_prob, 'g-', linewidth=0.5)
     ax.set_xlabel('Step')
     ax.set_ylabel('Return Probability')
     ax.set_title('Return to Origin')
 
-    # PR/N vs t (fraction of sites occupied)
-    ax = axes[2]
-    ax.plot(t_arr, pr / nsites, 'b-', linewidth=0.5)
-    ax.axhline(1/3, color='orange', linestyle='--', alpha=0.5, label='1/3 (random matrix)')
-    ax.set_xlabel('Step')
-    ax.set_ylabel('PR / N')
-    ax.set_title('Fractional Spreading')
-    ax.set_ylim(0, 1.0)
+    # Tet probability histogram
+    ax = axes[1, 0]
+    uniform = 1.0 / tri.n_tets
+    ax.hist(tet_probs, bins=50, color='steelblue', edgecolor='navy', alpha=0.7)
+    ax.axvline(uniform, color='r', linestyle='--', linewidth=1.5,
+               label=f'Uniform = {uniform:.4f}')
+    ax.set_xlabel('Probability per tet')
+    ax.set_ylabel('Count')
+    ax.set_title(f'Tet Probability Distribution (t={n_steps})')
     ax.legend(fontsize=8)
+    # Print stats
+    print(f"\n  Tet probs: min={tet_probs.min():.6f} max={tet_probs.max():.6f} "
+          f"mean={tet_probs.mean():.6f} std={tet_probs.std():.6f} "
+          f"(uniform={uniform:.6f})")
+
+    # Tet probability vs average vertex degree
+    ax = axes[1, 1]
+    ax.scatter(tet_avg_deg, tet_probs, s=8, alpha=0.5, c='steelblue')
+    ax.axhline(uniform, color='r', linestyle='--', linewidth=1, alpha=0.5)
+    ax.set_xlabel('Average vertex degree of tet')
+    ax.set_ylabel('Probability')
+    ax.set_title('Probability vs Local Geometry')
 
     fig.suptitle(f'Manifold Walk: {tri.n_tets} tets, {nsites} sites, φ={mix_phi}',
                  fontsize=12)
     plt.tight_layout()
     out_path = '/tmp/manifold_walk_spreading.png'
     plt.savefig(out_path, dpi=150)
-    print(f"\n  Plot saved to {out_path}")
+    print(f"  Plot saved to {out_path}")
 
 
 if __name__ == '__main__':
