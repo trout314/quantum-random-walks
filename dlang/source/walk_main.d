@@ -15,6 +15,7 @@ import dirac : Mat4, makeTau, frameTransport, matVecSplit, projPlus, projMinus;
 import operators : applyShift, applyCoin, applyVmix, ShiftResult;
 import observables : computeObservables, Observables;
 import symmetry : checkA4Symmetry;
+import coarse_grid : CoarseGrid;
 
 enum bool HAS_COIN = false;
 
@@ -29,6 +30,7 @@ struct WalkParams {
     double mixPhi = 0.0;
     double seedThresh = 1e-4;  // amplitude cutoff for site generation
     double dMin = 0.35;        // min distance between sites (0 = no limit)
+    double gridCell = 1.0;     // coarse grid cell size (0 = no grid)
     K0Vec[] kicks;             // momentum kick vectors
 }
 
@@ -44,6 +46,27 @@ WalkParams parseArgs(string[] args) {
     if (args.length > 6) p.mixPhi = args[6].to!double;
     if (args.length > 7) p.seedThresh = args[7].to!double;
     if (args.length > 8) p.dMin = args[8].to!double;
+    if (args.length > 9 && args[9][0] != '0') {
+        // Check if arg 9 is a number (gridCell) or a kick vector
+        bool isKick = false;
+        foreach (c; args[9]) { if (c == ',' || c == ';') { isKick = true; break; } }
+        if (!isKick) {
+            p.gridCell = args[9].to!double;
+            // Shift kicks to arg 10
+            if (args.length > 10) {
+                foreach (triple; args[10].split(";")) {
+                    auto c = triple.split(",");
+                    K0Vec k;
+                    if (c.length > 0) k.x = c[0].to!double;
+                    if (c.length > 1) k.y = c[1].to!double;
+                    if (c.length > 2) k.z = c[2].to!double;
+                    p.kicks ~= k;
+                }
+            }
+            if (p.kicks.length == 0) p.kicks = [K0Vec(0, 0, 0)];
+            return p;
+        }
+    }
     if (args.length > 9) {
         foreach (triple; args[9].split(";")) {
             auto c = triple.split(",");
@@ -234,6 +257,17 @@ void run(WalkParams p) {
     double totalAbsorbed = 0;
     double totalPruned = 0;
 
+    // Coarse-grained grid: accumulates spinor amplitudes from pruned/absorbed sites
+    CoarseGrid cgrid;
+    bool useGrid = p.gridCell > 0;
+    if (useGrid) {
+        double cgridHalf = p.sigma * 6;  // grid covers ±6σ
+        cgrid = CoarseGrid.create(cgridHalf, p.gridCell);
+        stderr.writefln("  Coarse grid: cell=%.2f, %d³ = %d cells, extent=±%.1f",
+                        p.gridCell, cgrid.nCells, cgrid.nCells * cgrid.nCells * cgrid.nCells,
+                        cgridHalf);
+    }
+
     foreach (t; 0 .. p.nSteps + 1) {
         import core.time : MonoTime;
         auto tObsStart = MonoTime.currTime;
@@ -266,13 +300,14 @@ void run(WalkParams p) {
             // With HAS_COIN=false, applyCoin is a no-op (compiled out)
             applyCoin(lat, IS_L);
             auto tCoinL = MonoTime.currTime;
-            auto resL = applyShift(lat, IS_L, extThresh2, pruneThresh2);
+            auto gridPtr = useGrid ? &cgrid : null;
+            auto resL = applyShift(lat, IS_L, extThresh2, pruneThresh2, gridPtr);
             auto tShiftL = MonoTime.currTime;
             applyVmix(lat, IS_L, p.mixPhi);
             auto tVmixL = MonoTime.currTime;
             applyCoin(lat, IS_R);
             auto tCoinR = MonoTime.currTime;
-            auto resR = applyShift(lat, IS_R, extThresh2, pruneThresh2);
+            auto resR = applyShift(lat, IS_R, extThresh2, pruneThresh2, gridPtr);
             auto tShiftR = MonoTime.currTime;
             applyVmix(lat, IS_R, p.mixPhi);
             auto tVmixR = MonoTime.currTime;
@@ -306,6 +341,29 @@ void run(WalkParams p) {
                 break;
             }
         }
+    }
+
+    // Coarse grid output
+    if (useGrid) {
+        // Mode 1: "pruned only" — already accumulated during the walk
+        cgrid.writeToFile("/tmp/walk3d_grid_pruned.dat");
+        double gridPrunedProb = cgrid.totalProb();
+        stderr.writefln("  Coarse grid (pruned only): prob=%.6f", gridPrunedProb);
+
+        // Mode 2: "pruned + surviving" — add all remaining site amplitudes
+        foreach (s; 0 .. lat.nsites) {
+            double amp2 = 0;
+            foreach (a; 0 .. 4) {
+                amp2 += lat.psiRe[4*s+a]*lat.psiRe[4*s+a]
+                      + lat.psiIm[4*s+a]*lat.psiIm[4*s+a];
+            }
+            if (amp2 > 0)
+                cgrid.addAmplitude(lat.sites[s].pos,
+                                   &lat.psiRe[4*s], &lat.psiIm[4*s]);
+        }
+        cgrid.writeToFile("/tmp/walk3d_grid_all.dat");
+        double gridAllProb = cgrid.totalProb();
+        stderr.writefln("  Coarse grid (pruned + surviving): prob=%.6f", gridAllProb);
     }
 
     stderr.writefln("\nDone k0=(%.4f,%.4f,%.4f): %d sites, absorbed=%.6e, pruned=%.6e",

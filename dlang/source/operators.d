@@ -10,6 +10,7 @@ import std.math : sqrt, fabs, cos, sin, exp;
 import geometry : Vec3, dot, norm, chainCentroid;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, matVecSplit, alpha;
 import lattice : Lattice, IS_R, IS_L, isRamLow;
+import coarse_grid : CoarseGrid;
 
 // ---- Spinor helpers ----
 
@@ -76,7 +77,8 @@ private int tryExtendBwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
 
 ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                                      double thresh2,
-                                     double pruneThresh2 = 0) {
+                                     double pruneThresh2 = 0,
+                                     CoarseGrid* cgrid = null) {
     import core.thread : Thread;
     import std.parallelism : parallel, taskPool;
     alias ChainT = Lattice!hasCoin.ChainT;
@@ -185,6 +187,8 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                 if (nb == -2) result.nCapFull++;
                 foreach (a; 0 .. 4)
                     result.probAbsorbed += shRe[a]*shRe[a] + shIm[a]*shIm[a];
+                if (cgrid !is null)
+                    cgrid.addAmplitude(lat.sites[endSite].pos, shRe.ptr, shIm.ptr);
             }
         }
 
@@ -218,6 +222,8 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                 if (nb == -2) result.nCapFull++;
                 foreach (a; 0 .. 4)
                     result.probAbsorbed += shRe[a]*shRe[a] + shIm[a]*shIm[a];
+                if (cgrid !is null)
+                    cgrid.addAmplitude(lat.sites[endSite].pos, shRe.ptr, shIm.ptr);
             }
         }
     }
@@ -236,6 +242,9 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                 double amp2 = spinorNorm2!hasCoin(lat, s);
                 if (amp2 < pruneThresh2) {
                     result.probPruned += amp2;
+                    if (cgrid !is null)
+                        cgrid.addAmplitude(lat.sites[s].pos,
+                                           &lat.psiRe[4*s], &lat.psiIm[4*s]);
                     lat.psiRe[4*s .. 4*s+4] = 0;
                     lat.psiIm[4*s .. 4*s+4] = 0;
                     unlinkChainEnd!hasCoin(lat, s, isR, true);
@@ -251,6 +260,9 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                 double amp2 = spinorNorm2!hasCoin(lat, s);
                 if (amp2 < pruneThresh2) {
                     result.probPruned += amp2;
+                    if (cgrid !is null)
+                        cgrid.addAmplitude(lat.sites[s].pos,
+                                           &lat.psiRe[4*s], &lat.psiIm[4*s]);
                     lat.psiRe[4*s .. 4*s+4] = 0;
                     lat.psiIm[4*s .. 4*s+4] = 0;
                     unlinkChainEnd!hasCoin(lat, s, isR, false);

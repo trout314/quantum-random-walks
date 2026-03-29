@@ -14,6 +14,7 @@ sources = [
   'source/walk_main.d',
   'source/walk_1d.d',
   'source/symmetry.d',
+  'source/coarse_grid.d',
 ]
 
 lib = shared_library(
