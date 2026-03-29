@@ -271,39 +271,45 @@ struct ChainOrigin {
 /// Finds the rotation R such that R maps the standard initial exit direction
 /// to the chain's exit direction at its root, and R maps the standard
 /// initial centroid displacement pattern to the chain's displacement pattern.
+/// Cached standard reference directions for R and L chirality.
+/// Computed on first use, then reused by all subsequent calls.
+private bool _stdDirsComputed = false;
+private Vec3[4] _stdDirsR, _stdDirsL;
+
+private void ensureStdDirs() {
+    if (_stdDirsComputed) return;
+    foreach (chirality; 0 .. 2) {
+        double tSign = (chirality == 0) ? 1.0 : -1.0;
+        Vec3 c0 = Vec3(0, 0, 0);
+        Vec3[4] vStd;
+        foreach (k; 0 .. 4) {
+            double kd = cast(double) k;
+            Vec3 vf = Vec3(
+                R_VERTEX * cos(kd * THETA_BC * tSign),
+                R_VERTEX * sin(kd * THETA_BC * tSign),
+                kd * H_VERTEX);
+            vStd[k] = alignToWalkFrame(vf);
+            c0 = c0 + vStd[k];
+        }
+        c0 = c0 * 0.25;
+        Vec3[4]* target = (chirality == 0) ? &_stdDirsR : &_stdDirsL;
+        foreach (k; 0 .. 4) {
+            Vec3 d = vStd[k] - c0;
+            double nrm = norm(d);
+            if (nrm > NORM_TOL) (*target)[k] = d * (1.0 / nrm);
+        }
+    }
+    _stdDirsComputed = true;
+}
+
 ChainOrigin computeChainOrigin(Vec3 pos, Vec3[4] dirs, int face, bool isR) {
     ChainOrigin origin;
     origin.pos0 = pos;
     origin.tSign = isR ? 1.0 : -1.0;
 
-    // Compute standard reference directions for this chirality.
-    // For R-helix, use helixVertexDirs(0). For L-helix, compute with -θ.
-    Vec3[4] stdDirs;
-    {
-        // Build a temporary origin for the standard frame at the correct chirality
-        ChainOrigin tmpOrigin;
-        tmpOrigin.rot = Mat3.init;  // identity
-        tmpOrigin.pos0 = Vec3(0, 0, 0);
-        tmpOrigin.tSign = isR ? 1.0 : -1.0;
-        // Use aligned standard centroid as reference
-        Vec3 c0 = Vec3(0, 0, 0);
-        foreach (k; 0 .. 4)
-            c0 = c0 + alignToWalkFrame(Vec3(
-                R_VERTEX * cos(cast(double)(k) * THETA_BC * tmpOrigin.tSign),
-                R_VERTEX * sin(cast(double)(k) * THETA_BC * tmpOrigin.tSign),
-                cast(double)(k) * H_VERTEX));
-        c0 = c0 * 0.25;
-        foreach (k; 0 .. 4) {
-            Vec3 vf = Vec3(
-                R_VERTEX * cos(cast(double)(k) * THETA_BC * tmpOrigin.tSign),
-                R_VERTEX * sin(cast(double)(k) * THETA_BC * tmpOrigin.tSign),
-                cast(double)(k) * H_VERTEX);
-            Vec3 vStd = alignToWalkFrame(vf);
-            Vec3 d = vStd - c0;
-            double nrm = norm(d);
-            if (nrm > NORM_TOL) stdDirs[k] = d * (1.0 / nrm);
-        }
-    }
+    // Use cached standard reference directions for this chirality.
+    ensureStdDirs();
+    Vec3[4] stdDirs = isR ? _stdDirsR : _stdDirsL;
 
     // Chain dirs (already unit vectors in dirs[])
     // We need to find the permutation + rotation that maps stdDirs → dirs.
