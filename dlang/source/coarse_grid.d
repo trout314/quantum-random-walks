@@ -43,22 +43,28 @@ struct CoarseGrid {
         return (ix * nCells + iy) * nCells + iz;
     }
 
+    double runningProb = 0;  // incrementally tracked total probability
+
     /// Add a 4-component spinor amplitude to the grid cell at position pos.
+    /// Updates runningProb incrementally: delta = |φ+ψ|² - |φ|² = |ψ|² + 2Re(φ†ψ)
     void addAmplitude(Vec3 pos, const double* psiRe, const double* psiIm) {
         int ci = cellIndex(pos);
         if (ci < 0) return;
         foreach (a; 0 .. 4) {
-            re[4 * ci + a] += psiRe[a];
-            im[4 * ci + a] += psiIm[a];
+            double oldRe = re[4 * ci + a];
+            double oldIm = im[4 * ci + a];
+            double dRe = psiRe[a];
+            double dIm = psiIm[a];
+            // delta = |ψ|² + 2Re(φ†ψ) = dRe²+dIm² + 2(oldRe*dRe + oldIm*dIm)
+            runningProb += dRe*dRe + dIm*dIm + 2.0*(oldRe*dRe + oldIm*dIm);
+            re[4 * ci + a] = oldRe + dRe;
+            im[4 * ci + a] = oldIm + dIm;
         }
     }
 
-    /// Compute total probability in the grid: Σ |ψ_cell|²
+    /// Total probability (from running sum — no scan needed).
     double totalProb() const {
-        double p = 0;
-        foreach (i; 0 .. cast(int)(re.length))
-            p += re[i] * re[i] + im[i] * im[i];
-        return p;
+        return runningProb;
     }
 
     /// Write the grid to a file. Format: ix iy iz x y z |ψ|² re0 im0 re1 im1 re2 im2 re3 im3

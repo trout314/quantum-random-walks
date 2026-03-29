@@ -252,7 +252,7 @@ void run(WalkParams p) {
     writefln("# theta=%.4f sigma=%.1f n_steps=%d ext_thresh=%.1e prune_thresh=%.1e mix_phi=%.4f k0=(%.4f,%.4f,%.4f)",
              p.theta, p.sigma, p.nSteps, p.threshold, p.pruneThresh, p.mixPhi,
              k0.x, k0.y, k0.z);
-    writefln("# t norm xmean ymean zmean r2 x2 y2 z2 r95 nsites absorbed pruned");
+    writefln("# t norm xmean ymean zmean r2 x2 y2 z2 r95 nsites absorbed pruned gridprob total");
 
     double totalAbsorbed = 0;
     double totalPruned = 0;
@@ -274,10 +274,14 @@ void run(WalkParams p) {
         auto obs = computeObservables(lat);
         auto tObsEnd = MonoTime.currTime;
 
-        writefln("%d %.6f %.6f %.6f %.6f %.2f %.2f %.2f %.2f %.2f %d %.6e %.6e",
+        double gridProb = useGrid ? cgrid.totalProb() : 0;
+        double rawTotal = obs.totalProb + gridProb;
+        double normFactor = (rawTotal > 1e-30) ? 1.0 / rawTotal : 0;
+        writefln("%d %.6f %.6f %.6f %.6f %.2f %.2f %.2f %.2f %.2f %d %.6e %.6e %.6f %.6f",
                  t, obs.normPsi, obs.xMean, obs.yMean, obs.zMean,
                  obs.r2, obs.x2, obs.y2, obs.z2,
-                 obs.r95, obs.nsites, totalAbsorbed, totalPruned);
+                 obs.r95, obs.nsites, totalAbsorbed, totalPruned,
+                 gridProb, rawTotal);
         stdout.flush();
 
         if (t < p.nSteps) {
