@@ -49,6 +49,8 @@ private int tryExtendFwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
     int nb = lat.allocSite(p);
     if (nb < 0) return -2;  // lattice full
     lat.chainAppend(chainId, nb);
+    // Every site must be on both R and L chains. Create the cross-chain immediately.
+    lat.makeCrossChain(nb, !isR);
     return nb;
 }
 
@@ -68,6 +70,7 @@ private int tryExtendBwd(bool hasCoin)(ref Lattice!hasCoin lat, int s, bool isR,
     int nb = lat.allocSite(p);
     if (nb < 0) return -2;  // lattice full
     lat.chainPrepend(chainId, nb);
+    lat.makeCrossChain(nb, !isR);
     return nb;
 }
 
@@ -162,16 +165,21 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                         shRe.ptr, shIm.ptr);
             int nb = ramLow ? -2 : tryExtendFwd!hasCoin(lat, endSite, isR, shRe, shIm, thresh2);
             if (nb >= 0) {
+                // Zero new site's buffers (they may contain stale data)
+                lat.psiRe[4*nb .. 4*nb+4] = 0;
+                lat.psiIm[4*nb .. 4*nb+4] = 0;
+                lat.tmpRe[4*nb .. 4*nb+4] = 0;
+                lat.tmpIm[4*nb .. 4*nb+4] = 0;
+
                 auto newOp = lat.siteOps(endSite, isR);
                 double[4] resRe = 0, resIm = 0;
                 matVecSplit(newOp.fwdBlock, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
                             resRe.ptr, resIm.ptr);
                 foreach (a; 0 .. 4) {
-                    lat.tmpRe[4*nb + a] += resRe[a];
-                    lat.tmpIm[4*nb + a] += resIm[a];
+                    lat.tmpRe[4*nb + a] = resRe[a];
+                    lat.tmpIm[4*nb + a] = resIm[a];
                 }
                 result.nCreated++;
-                // Check RAM periodically during extensions (every 1024 creates)
                 if ((result.nCreated & 0x3FF) == 0 && isRamLow()) ramLow = true;
             } else {
                 if (nb == -2) result.nCapFull++;
@@ -190,13 +198,19 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                         shRe.ptr, shIm.ptr);
             int nb = ramLow ? -2 : tryExtendBwd!hasCoin(lat, endSite, isR, shRe, shIm, thresh2);
             if (nb >= 0) {
+                // Zero new site's buffers
+                lat.psiRe[4*nb .. 4*nb+4] = 0;
+                lat.psiIm[4*nb .. 4*nb+4] = 0;
+                lat.tmpRe[4*nb .. 4*nb+4] = 0;
+                lat.tmpIm[4*nb .. 4*nb+4] = 0;
+
                 auto newOp = lat.siteOps(endSite, isR);
                 double[4] resRe = 0, resIm = 0;
                 matVecSplit(newOp.bwdBlock, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
                             resRe.ptr, resIm.ptr);
                 foreach (a; 0 .. 4) {
-                    lat.tmpRe[4*nb + a] += resRe[a];
-                    lat.tmpIm[4*nb + a] += resIm[a];
+                    lat.tmpRe[4*nb + a] = resRe[a];
+                    lat.tmpIm[4*nb + a] = resIm[a];
                 }
                 result.nCreated++;
                 if ((result.nCreated & 0x3FF) == 0 && isRamLow()) ramLow = true;

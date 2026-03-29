@@ -475,6 +475,28 @@ struct Lattice(bool hasCoin) {
         return (isR ? sites[siteId].rChain : sites[siteId].lChain) >= 0;
     }
 
+    /// Create the perpendicular cross-chain at a site that already has one chain.
+    /// Uses the [1,3,0,2] vertex permutation to generate the perpendicular helix.
+    int makeCrossChain(int siteId, bool newIsR) {
+        bool existingIsR = !newIsR;
+        int chainId = existingIsR ? sites[siteId].rChain : sites[siteId].lChain;
+        int idx = existingIsR ? sites[siteId].rIdx : sites[siteId].lIdx;
+        int chainIdx = chains[chainId].rootIdx + idx;
+
+        Vec3 c = chainCentroid(&chains[chainId].origin, chainIdx);
+        Vec3[4] dirs = chainVertexDirs(&chains[chainId].origin, chainIdx);
+        Vec3[4] existingVerts;
+        foreach (k; 0 .. 4)
+            existingVerts[k] = Vec3(c.x + dirs[k].x, c.y + dirs[k].y, c.z + dirs[k].z);
+
+        auto perm = existingIsR ? CROSS_PERM : CROSS_PERM_INV;
+        Vec3[4] crossVerts;
+        foreach (k; 0 .. 4)
+            crossVerts[k] = existingVerts[perm[k]];
+
+        return makeChainFromVertices!hasCoin(this, siteId, newIsR, crossVerts);
+    }
+
     /// Get the SiteOps for a site on its chain.
     const(Ops)* siteOps(int siteId, bool isR) const {
         int chainId = isR ? sites[siteId].rChain : sites[siteId].lChain;
@@ -582,7 +604,7 @@ private immutable int[4] CROSS_PERM_INV = [2, 0, 3, 1];
 /// Create a new chain from 4 initial vertices in sequence order.
 /// The chain is a BC helix: tet 0 = {v[0],v[1],v[2],v[3]}, drops v[0] first.
 /// Returns the chain ID.
-private int makeChainFromVertices(bool hasCoin)(ref Lattice!hasCoin lat, int rootSite,
+package int makeChainFromVertices(bool hasCoin)(ref Lattice!hasCoin lat, int rootSite,
                                                 bool isR, Vec3[4] initialVerts) {
     // Compute ChainOrigin from initial vertices
     Vec3 c0 = (initialVerts[0] + initialVerts[1] + initialVerts[2] + initialVerts[3]) * 0.25;
@@ -624,34 +646,7 @@ private int makeChainFromVertices(bool hasCoin)(ref Lattice!hasCoin lat, int roo
     return chainId;
 }
 
-/// Create the perpendicular cross-chain at a site that already has one chain.
-/// Uses the [1,3,0,2] vertex permutation to generate the perpendicular helix.
-private int makeCrossChain(bool hasCoin)(ref Lattice!hasCoin lat, int siteId, bool newIsR) {
-    // Get the existing chain's vertex sequence at this site
-    bool existingIsR = !newIsR;
-    int chainId = existingIsR ? lat.sites[siteId].rChain : lat.sites[siteId].lChain;
-    int idx = existingIsR ? lat.sites[siteId].rIdx : lat.sites[siteId].lIdx;
-    auto ch = &lat.chains[chainId];
-    int chainIdx = ch.rootIdx + idx;
-
-    // Get the 4 vertices of the existing chain's tet at this site.
-    // Vertex k = centroid + direction * radius. We reconstruct from centroid + dirs.
-    Vec3 c = chainCentroid(&ch.origin, chainIdx);
-    Vec3[4] dirs = chainVertexDirs(&ch.origin, chainIdx);
-    // chainVertexDirs returns unit directions; vertices are at centroid + dir * radius
-    // where radius = distance from centroid to vertex = 1.0 (unit sphere tetrahedron)
-    Vec3[4] existingVerts;
-    foreach (k; 0 .. 4)
-        existingVerts[k] = Vec3(c.x + dirs[k].x, c.y + dirs[k].y, c.z + dirs[k].z);
-
-    // Apply the cross permutation: if going R→L use CROSS_PERM, L→R use inverse
-    auto perm = existingIsR ? CROSS_PERM : CROSS_PERM_INV;
-    Vec3[4] crossVerts;
-    foreach (k; 0 .. 4)
-        crossVerts[k] = existingVerts[perm[k]];
-
-    return makeChainFromVertices!hasCoin(lat, siteId, newIsR, crossVerts);
-}
+// makeCrossChain is defined as a Lattice method below (in the struct body).
 
 /// Per-site orbit membership.
 struct SiteOrbitInfo { int orbitIdx = -1; int memberIdx = -1; }
@@ -824,7 +819,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     Vec3[4] seedVerts;
     foreach (k; 0 .. 4) seedVerts[k] = helixVertex(k);
     int seedR = makeChainFromVertices!hasCoin(lat, origin, IS_R, seedVerts); nChains++;
-    int seedL = makeCrossChain!hasCoin(lat, origin, IS_L); nChains++;
+    int seedL = lat.makeCrossChain(origin, IS_L); nChains++;
 
     // Single-chain orbits for the seed (no A4 partners — just the canonical pair).
     // The growth loop will create A4 partner chains at the first extension sites.
@@ -960,7 +955,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         int canNewSite = newSites[0];
         assert(!lat.hasChain(canNewSite, !parentIsR), "New site already has cross-chain");
 
-        int canCross = makeCrossChain!hasCoin(lat, canNewSite, !parentIsR);
+        int canCross = lat.makeCrossChain(canNewSite, !parentIsR);
         nChains++;
 
         // Copy the canonical cross-chain origin before creating partners
