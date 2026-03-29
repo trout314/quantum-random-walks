@@ -674,11 +674,38 @@ struct OrbitMember { int siteId; int rotIdx; }
 /// An A4 orbit of sites.
 struct OrbitData { OrbitMember[12] members; int size; }
 
+/// Simple xorshift64 RNG for deterministic seed lattice generation.
+struct Xorshift64 {
+    ulong state;
+
+    this(ulong seed) { state = seed == 0 ? 0x12345678_9ABCDEF0 : seed; }
+
+    ulong next() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return state;
+    }
+
+    /// Returns a uniform double in [0, 1).
+    double uniform01() {
+        return (next() >> 11) * (1.0 / (1UL << 53));
+    }
+}
+
 int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double seedThresh,
-                  ref ProximityGrid grid) {
+                  ref ProximityGrid grid, ulong rngSeed = 0) {
     import std.math : sqrt;
     grid.sitesPtr = &lat.sites;
     auto a4rots = buildAllA4Rotations();
+
+    // RNG for jittering the priority queue. seed=0 means no jitter (deterministic).
+    bool useJitter = rngSeed != 0;
+    auto rng = Xorshift64(rngSeed);
+    // Jitter scale: fraction of step_length² — small enough to preserve radial order
+    // at large scale, but shuffle entries at similar distances.
+    import geometry : STEP_LEN;
+    enum double JITTER_SCALE = 0.01 * STEP_LEN * STEP_LEN;  // ~0.0044
     double mateTol = sqrt(grid.dMin2) * 0.5;
 
     // ---- Orbit tracking ----
@@ -935,6 +962,7 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
     }
 
     /// Add ALL extendable chain ends from a site orbit to the frontier.
+    /// Applies random jitter to the priority key for diversity (if rngSeed != 0).
     void addOrbitToFrontier(int orbitIdx) {
         auto orb = &orbits[orbitIdx];
         if (orb.size == 0) return;
@@ -947,12 +975,16 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
             if (idx == n - 1) {
                 int nextIdx = lat.chains[chainId].rootIdx + n;
                 Vec3 p = chainCentroid(&lat.chains[chainId].origin, nextIdx);
-                heapPush(FrontierEntry(orbitIdx, chainId, true, dot(p, p)));
+                double d2 = dot(p, p);
+                if (useJitter) d2 += JITTER_SCALE * rng.uniform01();
+                heapPush(FrontierEntry(orbitIdx, chainId, true, d2));
             }
             if (idx == 0) {
                 int prevIdx = lat.chains[chainId].rootIdx - 1;
                 Vec3 p = chainCentroid(&lat.chains[chainId].origin, prevIdx);
-                heapPush(FrontierEntry(orbitIdx, chainId, false, dot(p, p)));
+                double d2 = dot(p, p);
+                if (useJitter) d2 += JITTER_SCALE * rng.uniform01();
+                heapPush(FrontierEntry(orbitIdx, chainId, false, d2));
             }
         }
     }

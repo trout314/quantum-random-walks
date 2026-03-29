@@ -31,6 +31,7 @@ struct WalkParams {
     double seedThresh = 1e-4;  // amplitude cutoff for site generation
     double dMin = 0.35;        // min distance between sites (0 = no limit)
     double gridCell = 1.0;     // coarse grid cell size (0 = no grid)
+    ulong rngSeed = 0;        // seed lattice RNG seed (0 = no jitter)
     K0Vec[] kicks;             // momentum kick vectors
 }
 
@@ -225,7 +226,7 @@ void run(WalkParams p) {
 
     stderr.writefln("\n--- Chain-first site generation (dMin=%.3f, grid %d^3) ---",
                     p.dMin, grid.gridN);
-    int nChains = generateSites(lat, p.sigma, p.seedThresh, grid);
+    int nChains = generateSites(lat, p.sigma, p.seedThresh, grid, p.rngSeed);
 
     int noR = 0, noL = 0;
     foreach (s; 0 .. lat.nsites) {
