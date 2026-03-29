@@ -160,14 +160,14 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
         // Forward end
         {
             int endSite = ch.ops[n-1].siteId;
-            Mat4 tau = makeTau(lat.exitDirForSite(endSite, isR));
+            Vec3 exitDir = lat.exitDirForSite(endSite, isR);
+            Mat4 tau = makeTau(exitDir);
             Mat4 Pp = projPlus(tau);
             double[4] shRe = 0, shIm = 0;
             matVecSplit(Pp, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
                         shRe.ptr, shIm.ptr);
             int nb = ramLow ? -2 : tryExtendFwd!hasCoin(lat, endSite, isR, shRe, shIm, thresh2);
             if (nb >= 0) {
-                // Zero new site's buffers (they may contain stale data)
                 lat.psiRe[4*nb .. 4*nb+4] = 0;
                 lat.psiIm[4*nb .. 4*nb+4] = 0;
                 lat.tmpRe[4*nb .. 4*nb+4] = 0;
@@ -188,21 +188,21 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                 foreach (a; 0 .. 4)
                     result.probAbsorbed += shRe[a]*shRe[a] + shIm[a]*shIm[a];
                 if (cgrid !is null)
-                    cgrid.addAmplitude(lat.sites[endSite].pos, shRe.ptr, shIm.ptr);
+                    cgrid.addAmplitude(lat.sites[endSite].pos, shRe.ptr, shIm.ptr, exitDir);
             }
         }
 
         // Backward end
         {
             int endSite = ch.ops[0].siteId;
-            Mat4 tau = makeTau(lat.exitDirForSite(endSite, isR));
+            Vec3 exitDir = lat.exitDirForSite(endSite, isR);
+            Mat4 tau = makeTau(exitDir);
             Mat4 Pm = projMinus(tau);
             double[4] shRe = 0, shIm = 0;
             matVecSplit(Pm, &lat.psiRe[4*endSite], &lat.psiIm[4*endSite],
                         shRe.ptr, shIm.ptr);
             int nb = ramLow ? -2 : tryExtendBwd!hasCoin(lat, endSite, isR, shRe, shIm, thresh2);
             if (nb >= 0) {
-                // Zero new site's buffers
                 lat.psiRe[4*nb .. 4*nb+4] = 0;
                 lat.psiIm[4*nb .. 4*nb+4] = 0;
                 lat.tmpRe[4*nb .. 4*nb+4] = 0;
@@ -223,7 +223,7 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                 foreach (a; 0 .. 4)
                     result.probAbsorbed += shRe[a]*shRe[a] + shIm[a]*shIm[a];
                 if (cgrid !is null)
-                    cgrid.addAmplitude(lat.sites[endSite].pos, shRe.ptr, shIm.ptr);
+                    cgrid.addAmplitude(lat.sites[endSite].pos, shRe.ptr, shIm.ptr, exitDir);
             }
         }
     }
@@ -244,7 +244,8 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                     result.probPruned += amp2;
                     if (cgrid !is null)
                         cgrid.addAmplitude(lat.sites[s].pos,
-                                           &lat.psiRe[4*s], &lat.psiIm[4*s]);
+                                           &lat.psiRe[4*s], &lat.psiIm[4*s],
+                                           lat.exitDirForSite(s, isR));
                     lat.psiRe[4*s .. 4*s+4] = 0;
                     lat.psiIm[4*s .. 4*s+4] = 0;
                     unlinkChainEnd!hasCoin(lat, s, isR, true);
@@ -262,7 +263,8 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
                     result.probPruned += amp2;
                     if (cgrid !is null)
                         cgrid.addAmplitude(lat.sites[s].pos,
-                                           &lat.psiRe[4*s], &lat.psiIm[4*s]);
+                                           &lat.psiRe[4*s], &lat.psiIm[4*s],
+                                           lat.exitDirForSite(s, isR));
                     lat.psiRe[4*s .. 4*s+4] = 0;
                     lat.psiIm[4*s .. 4*s+4] = 0;
                     unlinkChainEnd!hasCoin(lat, s, isR, false);

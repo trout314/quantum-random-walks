@@ -357,15 +357,17 @@ void run(WalkParams p) {
         stderr.writefln("  Coarse grid (pruned only): prob=%.6f", gridPrunedProb);
 
         // Mode 2: "pruned + surviving" — add all remaining site amplitudes
+        // Frame-transport to cell reference using R-chain exit direction
         foreach (s; 0 .. lat.nsites) {
             double amp2 = 0;
             foreach (a; 0 .. 4) {
                 amp2 += lat.psiRe[4*s+a]*lat.psiRe[4*s+a]
                       + lat.psiIm[4*s+a]*lat.psiIm[4*s+a];
             }
-            if (amp2 > 0)
+            if (amp2 > 0 && lat.hasChain(s, true))
                 cgrid.addAmplitude(lat.sites[s].pos,
-                                   &lat.psiRe[4*s], &lat.psiIm[4*s]);
+                                   &lat.psiRe[4*s], &lat.psiIm[4*s],
+                                   lat.exitDirForSite(s, true));
         }
         cgrid.writeToFile("/tmp/walk3d_grid_all.dat");
         double gridAllProb = cgrid.totalProb();

@@ -16,9 +16,13 @@ struct CoarseGrid {
     double halfExtent;
 
     // Storage: 4 complex components per cell, flattened as [ix][iy][iz][component]
-    // Total: nCells^3 * 8 doubles (4 re + 4 im)
     double[] re;
     double[] im;
+
+    // Per-cell reference exit direction (set on first add, used for frame transport).
+    // refDirX/Y/Z[ci] = exit direction of the first spinor added to cell ci.
+    double[] refDirX, refDirY, refDirZ;
+    bool[] hasRef;  // true if cell has a reference direction set
 
     static CoarseGrid create(double halfExtent, double cellSize) {
         CoarseGrid g;
@@ -30,6 +34,10 @@ struct CoarseGrid {
         g.im = new double[4 * totalCells];
         g.re[] = 0;
         g.im[] = 0;
+        g.refDirX = new double[totalCells]; g.refDirX[] = 0;
+        g.refDirY = new double[totalCells]; g.refDirY[] = 0;
+        g.refDirZ = new double[totalCells]; g.refDirZ[] = 0;
+        g.hasRef = new bool[totalCells]; g.hasRef[] = false;
         return g;
     }
 
@@ -46,8 +54,50 @@ struct CoarseGrid {
     double runningProb = 0;  // incrementally tracked total probability
 
     /// Add a 4-component spinor amplitude to the grid cell at position pos.
-    /// Updates runningProb incrementally: delta = |φ+ψ|² - |φ|² = |ψ|² + 2Re(φ†ψ)
-    void addAmplitude(Vec3 pos, const double* psiRe, const double* psiIm) {
+    /// The spinor is frame-transported from its local exit direction to the
+    /// cell's reference direction before adding, ensuring correct interference
+    /// between branches arriving from different chains.
+    ///
+    /// exitDir: the exit direction (Vec3) at the source site.
+    void addAmplitude(Vec3 pos, const double* psiRe, const double* psiIm, Vec3 exitDir) {
+        import dirac : makeTau, frameTransport, matVecSplit;
+
+        int ci = cellIndex(pos);
+        if (ci < 0) return;
+
+        double[4] dRe = void, dIm = void;
+
+        if (!hasRef[ci]) {
+            // First spinor in this cell: set the reference direction, no transport needed
+            refDirX[ci] = exitDir.x;
+            refDirY[ci] = exitDir.y;
+            refDirZ[ci] = exitDir.z;
+            hasRef[ci] = true;
+            foreach (a; 0 .. 4) { dRe[a] = psiRe[a]; dIm[a] = psiIm[a]; }
+        } else {
+            // Frame-transport from source exit direction to cell's reference direction
+            import dirac : Mat4;
+            Vec3 refDir = Vec3(refDirX[ci], refDirY[ci], refDirZ[ci]);
+            Mat4 tauFrom = makeTau(exitDir);
+            Mat4 tauTo = makeTau(refDir);
+            Mat4 U = frameTransport(tauFrom, tauTo);
+
+            // Apply U to the spinor
+            dRe[] = 0; dIm[] = 0;
+            matVecSplit(U, psiRe, psiIm, dRe.ptr, dIm.ptr);
+        }
+
+        foreach (a; 0 .. 4) {
+            double oldRe = re[4 * ci + a];
+            double oldIm = im[4 * ci + a];
+            runningProb += dRe[a]*dRe[a] + dIm[a]*dIm[a] + 2.0*(oldRe*dRe[a] + oldIm*dIm[a]);
+            re[4 * ci + a] = oldRe + dRe[a];
+            im[4 * ci + a] = oldIm + dIm[a];
+        }
+    }
+
+    /// Add without frame transport (legacy interface, for surviving sites at end).
+    void addAmplitudeRaw(Vec3 pos, const double* psiRe, const double* psiIm) {
         int ci = cellIndex(pos);
         if (ci < 0) return;
         foreach (a; 0 .. 4) {
@@ -55,7 +105,6 @@ struct CoarseGrid {
             double oldIm = im[4 * ci + a];
             double dRe = psiRe[a];
             double dIm = psiIm[a];
-            // delta = |ψ|² + 2Re(φ†ψ) = dRe²+dIm² + 2(oldRe*dRe + oldIm*dIm)
             runningProb += dRe*dRe + dIm*dIm + 2.0*(oldRe*dRe + oldIm*dIm);
             re[4 * ci + a] = oldRe + dRe;
             im[4 * ci + a] = oldIm + dIm;
