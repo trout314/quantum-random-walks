@@ -562,13 +562,23 @@ struct Lattice(bool hasCoin) {
         auto ch = &chains[chainId];
         bool isR = ch.isR;
 
-        // Decrement rootIdx and link site BEFORE buildOps so exitDirForSite works.
-        // The new site at idx=0 has chain formula index = (rootIdx-1) + 0 = rootIdx-1,
-        // which is correct since it's one step before the old first element.
+        // Decrement rootIdx and link new site at idx=0.
+        // Formula index for new site = (rootIdx-1) + 0 = rootIdx-1. ✓
         ch.rootIdx--;
         if (isR) { sites[siteId].rChain = chainId; sites[siteId].rIdx = 0; }
         else     { sites[siteId].lChain = chainId; sites[siteId].lIdx = 0; }
 
+        // Shift existing site indices FIRST so that exitDirForSite returns
+        // the correct formula index for all sites.  After rootIdx-- and
+        // rIdx++, each existing site's formula index = (rootIdx-1) + (old_idx+1)
+        // = rootIdx + old_idx, which is unchanged. ✓
+        for (int i = 0; i < ch.ops.length; i++) {
+            int existingId = ch.ops[i].siteId;
+            if (isR) sites[existingId].rIdx++;
+            else     sites[existingId].lIdx++;
+        }
+
+        // Now all exitDirForSite calls return correct values.
         int nextSite = (ch.ops.length > 0) ? ch.ops[0].siteId : -1;
         auto op = buildOps(siteId, -1, nextSite, isR);
         ch.ops.pushFront(op);
@@ -579,14 +589,6 @@ struct Lattice(bool hasCoin) {
             Mat4 tauNext = makeTau(exitDirForSite(ns, isR));
             Mat4 tauNew = makeTau(exitDirForSite(siteId, isR));
             ch.ops[1].bwdBlock = mul(frameTransport(tauNext, tauNew), projMinus(tauNext));
-        }
-
-        // Shift existing indices (their chain formula index doesn't change,
-        // but their deque index increased by 1 due to pushFront)
-        for (int i = 1; i < ch.ops.length; i++) {
-            int existingId = ch.ops[i].siteId;
-            if (isR) sites[existingId].rIdx++;
-            else     sites[existingId].lIdx++;
         }
     }
 }
