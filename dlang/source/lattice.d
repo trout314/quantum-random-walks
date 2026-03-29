@@ -457,6 +457,8 @@ struct Lattice(bool hasCoin) {
         int chainId = isR ? sites[siteId].rChain : sites[siteId].lChain;
         int idx = isR ? sites[siteId].rIdx : sites[siteId].lIdx;
         if (chainId < 0 || idx <= 0) return -1;
+        assert(idx < chains[chainId].ops.length,
+               "chainPrev: site idx out of range");
         return chains[chainId].ops[idx - 1].siteId;
     }
 
@@ -805,91 +807,143 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         return orbitId;
     }
 
+    // Pre-allocate chains array to avoid reallocation during growth.
+    // Each site creates ~2 chains, and we expect at most initCap sites.
+    lat.chains.reserve(lat.capacity * 3);
+
     // ---- Seed: origin ----
 
     int origin = lat.allocSite(Vec3(0, 0, 0));
     grid.add(Vec3(0, 0, 0), origin);
     addOrbit([origin], [0], 1);
 
-    // Seed R-chain: the origin is A4-invariant, so all 12 rotated R-chains
-    // share the same root site (the origin). Each goes in a different direction.
+    // Seed R-chain: canonical chain through origin.
     Vec3[4] seedVerts;
     foreach (k; 0 .. 4) seedVerts[k] = helixVertex(k);
     int seedR = makeChainFromVertices!hasCoin(lat, origin, IS_R, seedVerts); nChains++;
-    // Copy the seed origin for rotating
     ChainOrigin seedROrigin = lat.chains[seedR].origin;
 
-    int[12] originSites;
-    originSites[] = origin;  // all 12 point to the single origin site
-    int seedROrbit = createChainOrbit(originSites, &seedROrigin, IS_R);
-    // The canonical chain (seedR) was already created; replace slot 0
-    chainOrbits[seedROrbit].chainIds[0] = seedR;
-    // Fix: the first makeRotatedChain for ri=0 created a duplicate; remove it
-    // Actually, createChainOrbit created 12 chains including ri=0, but seedR
-    // already exists. The site now has two R-chains. Let's fix by not using
-    // createChainOrbit for the seed — build it manually.
+    // Seed L-chain: canonical cross-chain through origin.
+    int seedL = makeCrossChain!hasCoin(lat, origin, IS_L); nChains++;
+    ChainOrigin seedLOrigin = lat.chains[seedL].origin;
 
-    // Simpler: build seed chain orbits manually since origin is special (A4-invariant)
-    // We already have seedR. Create the other 11 R-chains at the origin.
+    // The origin is A4-invariant, so 12 rotated copies of each chain pass through it.
+    // But the origin site can only belong to ONE R-chain and ONE L-chain.
+    // The other 11 chains of each chirality are "headless" — they have the correct
+    // ChainOrigin (for analytic geometry) but the origin site is NOT in their ops deque.
+    // When the growth loop extends them, their first site will be one step away
+    // from the origin, which is correct.
+
+    /// Create a headless chain: has an origin for analytic geometry but no sites.
+    int makeHeadlessChain(const ChainOrigin* templateOrigin, const Mat3* rot, bool isR) {
+        int chainId = cast(int) lat.chains.length;
+        Chain!hasCoin newChain;
+        newChain.isR = isR;
+        newChain.rootSite = -1;  // no root site
+        newChain.rootIdx = 0;
+        newChain.origin = rotateChainOrigin(templateOrigin, rot);
+        newChain.origin.pos0 = Vec3(0, 0, 0);  // origin position
+        lat.chains ~= newChain;
+        nChains++;
+        return chainId;
+    }
+
+    // Build seed R-chain orbit: canonical + 11 headless partners
     ChainOrbit seedRCO;
     seedRCO.count = 12;
     seedRCO.chainIds[0] = seedR;
-    foreach (ri; 1 .. 12) {
-        seedRCO.chainIds[ri] = makeRotatedChain!hasCoin(
-            lat, origin, &seedROrigin, &a4rots[ri], IS_R);
-        nChains++;
-    }
-    // Undo: origin.rChain was overwritten by the last makeRotatedChain.
-    // For the origin site, we assign it to the canonical R-chain (seedR).
-    lat.sites[origin].rChain = seedR;
-    lat.sites[origin].rIdx = 0;
+    foreach (ri; 1 .. 12)
+        seedRCO.chainIds[ri] = makeHeadlessChain(&seedROrigin, &a4rots[ri], IS_R);
     chainOrbits ~= seedRCO;
     int seedROrbitId = cast(int) chainOrbits.length - 1;
 
-    // Seed L-chain orbit: similarly, 12 L-chains through origin
-    int seedL = makeCrossChain!hasCoin(lat, origin, IS_L); nChains++;
-    ChainOrigin seedLOrigin = lat.chains[seedL].origin;
+    // Build seed L-chain orbit: canonical + 11 headless partners
     ChainOrbit seedLCO;
     seedLCO.count = 12;
     seedLCO.chainIds[0] = seedL;
-    foreach (ri; 1 .. 12) {
-        seedLCO.chainIds[ri] = makeRotatedChain!hasCoin(
-            lat, origin, &seedLOrigin, &a4rots[ri], IS_L);
-        nChains++;
-    }
-    lat.sites[origin].lChain = seedL;
-    lat.sites[origin].lIdx = 0;
+    foreach (ri; 1 .. 12)
+        seedLCO.chainIds[ri] = makeHeadlessChain(&seedLOrigin, &a4rots[ri], IS_L);
     chainOrbits ~= seedLCO;
     int seedLOrbitId = cast(int) chainOrbits.length - 1;
 
-    // ---- Frontier: chain ORBITS to extend ----
+    // ---- Frontier: priority queue ordered by distance from origin ----
+    // Sites closer to the origin are extended first, ensuring the interior
+    // fills before the boundary.
     struct FrontierEntry {
         int chainOrbitId;
         bool forward;
+        double dist2;  // |next position|² — smaller = higher priority
     }
-    FrontierEntry[] frontier;
 
-    frontier ~= FrontierEntry(seedROrbitId, true);
-    frontier ~= FrontierEntry(seedROrbitId, false);
-    frontier ~= FrontierEntry(seedLOrbitId, true);
-    frontier ~= FrontierEntry(seedLOrbitId, false);
+    // Min-heap by dist2
+    FrontierEntry[] heap;
+
+    void heapPush(FrontierEntry e) {
+        heap ~= e;
+        // Sift up
+        int i = cast(int) heap.length - 1;
+        while (i > 0) {
+            int parent = (i - 1) / 2;
+            if (heap[parent].dist2 <= heap[i].dist2) break;
+            auto tmp = heap[parent]; heap[parent] = heap[i]; heap[i] = tmp;
+            i = parent;
+        }
+    }
+
+    FrontierEntry heapPop() {
+        auto result = heap[0];
+        heap[0] = heap[heap.length - 1];
+        heap.length--;
+        // Sift down
+        int i = 0;
+        while (true) {
+            int left = 2 * i + 1, right = 2 * i + 2, smallest = i;
+            if (left < heap.length && heap[left].dist2 < heap[smallest].dist2)
+                smallest = left;
+            if (right < heap.length && heap[right].dist2 < heap[smallest].dist2)
+                smallest = right;
+            if (smallest == i) break;
+            auto tmp = heap[smallest]; heap[smallest] = heap[i]; heap[i] = tmp;
+            i = smallest;
+        }
+        return result;
+    }
+
+    /// Compute the next chain index for extension (handles headless chains).
+    int nextExtensionIdx(int chainId, bool forward) {
+        int n = lat.chains[chainId].ops.length;
+        if (n == 0) {
+            // Headless chain: start from index 1 (fwd) or -1 (bwd), skipping origin
+            return forward ? 1 : -1;
+        }
+        return forward
+            ? lat.chains[chainId].rootIdx + n
+            : lat.chains[chainId].rootIdx - 1;
+    }
+
+    /// Compute dist² for the next extension position of a chain orbit.
+    double extensionDist2(int chainOrbitId, bool forward) {
+        int canId = chainOrbits[chainOrbitId].chainIds[0];
+        int idx = nextExtensionIdx(canId, forward);
+        Vec3 p = chainCentroid(&lat.chains[canId].origin, idx);
+        return dot(p, p);
+    }
+
+    // Seed the frontier
+    heapPush(FrontierEntry(seedROrbitId, true,  extensionDist2(seedROrbitId, true)));
+    heapPush(FrontierEntry(seedROrbitId, false, extensionDist2(seedROrbitId, false)));
+    heapPush(FrontierEntry(seedLOrbitId, true,  extensionDist2(seedLOrbitId, true)));
+    heapPush(FrontierEntry(seedLOrbitId, false, extensionDist2(seedLOrbitId, false)));
 
     // ---- Main growth loop ----
-    // Process one frontier entry = extend all 12 chains in an orbit simultaneously.
-    int fIdx = 0;
-    while (fIdx < frontier.length) {
-        auto entry = frontier[fIdx++];
-        auto co = &chainOrbits[entry.chainOrbitId];
-
-        // Use the canonical chain (ri=0) to check envelope
-        int canChainId = co.chainIds[0];
-        // Re-fetch chain pointer each time (avoid dangling after realloc)
-        int canN = lat.chains[canChainId].ops.length;
-        if (canN == 0) continue;
-
-        int canNewIdx = entry.forward
-            ? lat.chains[canChainId].rootIdx + canN
-            : lat.chains[canChainId].rootIdx - 1;
+    // Process the closest-to-origin entry first.
+    while (heap.length > 0) {
+        auto entry = heapPop();
+        // Copy the orbit's chain IDs by value to avoid dangling references
+        // after lat.chains or chainOrbits realloc.
+        int[12] orbitChainIds = chainOrbits[entry.chainOrbitId].chainIds;
+        int canChainId = orbitChainIds[0];
+        int canNewIdx = nextExtensionIdx(canChainId, entry.forward);
         Vec3 canP = chainCentroid(&lat.chains[canChainId].origin, canNewIdx);
 
         // Gaussian envelope check on canonical position
@@ -907,13 +961,8 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         int newCount = 0;
 
         foreach (ri; 0 .. 12) {
-            int chainId = co.chainIds[ri];
-            int n = lat.chains[chainId].ops.length;
-            if (n == 0) continue;
-
-            int newIdx = entry.forward
-                ? lat.chains[chainId].rootIdx + n
-                : lat.chains[chainId].rootIdx - 1;
+            int chainId = orbitChainIds[ri];
+            int newIdx = nextExtensionIdx(chainId, entry.forward);
             Vec3 p = chainCentroid(&lat.chains[chainId].origin, newIdx);
 
             int newSite = lat.allocSite(p);
@@ -928,8 +977,9 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
 
         if (newCount == 0) continue;
 
-        // Add the parent orbit back to frontier (to continue extending)
-        frontier ~= FrontierEntry(entry.chainOrbitId, entry.forward);
+        // Add the parent orbit back to continue extending
+        heapPush(FrontierEntry(entry.chainOrbitId, entry.forward,
+                               extensionDist2(entry.chainOrbitId, entry.forward)));
 
         // Create cross-chains for all new sites (one per site = 12 new chains).
         // These form a new chain orbit.
@@ -974,9 +1024,11 @@ int generateSites(bool hasCoin)(ref Lattice!hasCoin lat, double sigma, double se
         int crossOrbitId = cast(int) chainOrbits.length;
         chainOrbits ~= crossCO;
 
-        // Add cross-chain orbit to frontier (both directions)
-        frontier ~= FrontierEntry(crossOrbitId, true);
-        frontier ~= FrontierEntry(crossOrbitId, false);
+        // Add cross-chain orbit (both directions)
+        heapPush(FrontierEntry(crossOrbitId, true,
+                               extensionDist2(crossOrbitId, true)));
+        heapPush(FrontierEntry(crossOrbitId, false,
+                               extensionDist2(crossOrbitId, false)));
 
         // Register site orbit
         if (newCount > 0) {
