@@ -15,6 +15,7 @@ sources = [
   'source/walk_1d.d',
   'source/symmetry.d',
   'source/coarse_grid.d',
+  'source/manifold_interop.d',
 ]
 
 lib = shared_library(

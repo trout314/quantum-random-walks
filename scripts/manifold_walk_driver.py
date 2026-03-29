@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""
+Manifold walk driver: build closed chains on a triangulated 3-manifold,
+run the walk in D, and coarse-grain the result in Python.
+"""
+import numpy as np
+import ctypes, os, sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+from triangulation import Triangulation
+from manifold_walk import make_tau, frame_transport, STD_DIRS, L_PERM
+
+
+# ---- Chain tracing through the manifold ----
+
+def trace_chain(tri, start_tet, start_perm):
+    """Trace a chain through the manifold until it loops.
+
+    At each step: drop vertex at window position 0 (cross opposite face),
+    shift window, pick up new vertex from neighbor tet.
+
+    Returns list of (tet_id, perm_tuple) states.  The chain loops when it
+    returns to (start_tet, start_perm).
+    """
+    chain = []
+    tet_id = start_tet
+    perm = list(start_perm)
+
+    while True:
+        state = (tet_id, tuple(perm))
+        if len(chain) > 0 and state == chain[0]:
+            break
+        chain.append(state)
+
+        # Drop vertex at window position 0
+        dropped = perm[0]
+        tet_verts = list(tri.tets[tet_id])
+        face_idx = tet_verts.index(dropped)
+        neighbor_id = tri.neighbors[tet_id][face_idx]
+        neighbor_verts = list(tri.tets[neighbor_id])
+        shared = set(tet_verts) - {dropped}
+        new_vert = [v for v in neighbor_verts if v not in shared][0]
+
+        # Shift window: drop position 0, append new vertex
+        perm = [perm[1], perm[2], perm[3], new_vert]
+        tet_id = neighbor_id
+
+    return chain
+
+
+def exit_direction_for_state(tri, tet_id, perm):
+    """Compute the exit direction for a site at (tet_id, perm).
+
+    The exit direction points toward vertex perm[0] (the one being dropped).
+    In the standard tetrahedral frame, this is STD_DIRS[k] where k is the
+    position of perm[0] in the sorted tet vertex list.
+    """
+    tet_verts = list(tri.tets[tet_id])
+    k = tet_verts.index(perm[0])
+    return STD_DIRS[k]
+
+
+def l_perm_of(r_perm):
+    """Apply L_PERM = [1,3,0,2] to an R-chain vertex permutation."""
+    return tuple(r_perm[k] for k in L_PERM)
+
+
+# ---- Build the full lattice ----
+
+def build_manifold_lattice(tri, start_tet=0):
+    """Build all closed R and L chains covering the manifold.
+
+    Each site is identified by its R-chain state (tet_id, r_perm).
+    The L-chain passing through the same site has state
+    (tet_id, l_perm_of(r_perm)).  Both chains share one site ID.
+
+    Returns:
+        sites: dict (tet_id, r_perm_tuple) → site_id
+        r_chains: list of lists of site_ids
+        l_chains: list of lists of site_ids
+        exit_dirs_r: dict site_id → ndarray(3,)
+        exit_dirs_l: dict site_id → ndarray(3,)
+    """
+    start_perm = tuple(tri.tets[start_tet])
+    sites = {}          # (tet_id, r_perm) → site_id
+    l_to_r = {}         # (tet_id, l_perm) → (tet_id, r_perm)
+    r_chains = []       # each is a list of site_ids
+    l_chains = []       # each is a list of site_ids
+    exit_dirs_r = {}
+    exit_dirs_l = {}
+    next_site_id = 0
+    inv_l = [2, 0, 3, 1]  # inverse of L_PERM
+
+    visited_r = set()   # R-chain states already on a chain
+    visited_l = set()   # L-chain states already on a chain
+
+    def get_or_create_site(tet_id, r_perm):
+        """Get or create a site from its R-chain state."""
+        nonlocal next_site_id
+        key = (tet_id, tuple(r_perm))
+        if key not in sites:
+            sid = next_site_id
+            next_site_id += 1
+            sites[key] = sid
+            # Also register the L-state → R-state mapping
+            l_perm = l_perm_of(r_perm)
+            l_to_r[(tet_id, l_perm)] = key
+        return sites[key]
+
+    def r_state_of_l_state(l_state):
+        """Convert an L-chain state to the corresponding R-chain state."""
+        tet_id, l_perm = l_state
+        r_perm = tuple(l_perm[k] for k in inv_l)
+        return (tet_id, r_perm)
+
+    r_chain_states_list = []  # parallel to r_chains, stores (tet, perm) states
+
+    def process_r_chain(start_t, start_p):
+        """Trace an R-chain if not already visited. Returns True if new."""
+        if (start_t, start_p) in visited_r:
+            return False
+        r_chain_states = trace_chain(tri, start_t, start_p)
+        for state in r_chain_states:
+            visited_r.add(state)
+        chain_sids = []
+        for state in r_chain_states:
+            sid = get_or_create_site(state[0], state[1])
+            chain_sids.append(sid)
+            exit_dirs_r[sid] = exit_direction_for_state(tri, *state)
+        r_chains.append(chain_sids)
+        r_chain_states_list.append(r_chain_states)
+        return True
+
+    def process_l_chain(start_t, start_p):
+        """Trace an L-chain if not already visited. Returns new R-states."""
+        if (start_t, start_p) in visited_l:
+            return []
+        l_chain_states = trace_chain(tri, start_t, start_p)
+        for state in l_chain_states:
+            visited_l.add(state)
+        chain_sids = []
+        new_r_states = []
+        for l_state in l_chain_states:
+            r_state = r_state_of_l_state(l_state)
+            sid = get_or_create_site(r_state[0], r_state[1])
+            chain_sids.append(sid)
+            exit_dirs_l[sid] = exit_direction_for_state(tri, *l_state)
+            if r_state not in visited_r:
+                new_r_states.append(r_state)
+        l_chains.append(chain_sids)
+        return new_r_states
+
+    # BFS: seed with first R-chain, discover L-chains, which may
+    # reveal new R-chain starting states
+    r_queue = [(start_tet, start_perm)]
+    while r_queue:
+        t, p = r_queue.pop(0)
+        if not process_r_chain(t, p):
+            continue
+        print(f"  R-chain {len(r_chains)-1}: period={len(r_chains[-1])}, "
+              f"sites={len(sites)}", flush=True)
+        # Trace L-chains at each R-chain site
+        for r_state in r_chain_states_list[-1]:
+            l_start = l_perm_of(r_state[1])
+            new_r = process_l_chain(r_state[0], l_start)
+            for rs in new_r:
+                if rs not in visited_r:
+                    r_queue.append(rs)
+
+    return sites, r_chains, l_chains, exit_dirs_r, exit_dirs_l
+
+
+# ---- D library interface ----
+
+def load_d_library():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    lib_path = os.path.join(script_dir, '..', 'dlang', 'build', 'quantum_walk.so')
+    lib = ctypes.CDLL(lib_path)
+
+    lib.manifold_create.argtypes = [ctypes.c_int]
+    lib.manifold_create.restype = None
+
+    lib.manifold_nsites.argtypes = []
+    lib.manifold_nsites.restype = ctypes.c_int
+
+    lib.manifold_nchains.argtypes = []
+    lib.manifold_nchains.restype = ctypes.c_int
+
+    lib.manifold_alloc_site.argtypes = [ctypes.c_double]*3
+    lib.manifold_alloc_site.restype = ctypes.c_int
+
+    lib.manifold_add_closed_chain.argtypes = [
+        ctypes.POINTER(ctypes.c_int),    # siteIds
+        ctypes.POINTER(ctypes.c_double), # exitDirs
+        ctypes.c_int,                    # nSites
+        ctypes.c_bool,                   # isR
+    ]
+    lib.manifold_add_closed_chain.restype = ctypes.c_int
+
+    lib.manifold_set_psi.argtypes = [
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_double),
+    ]
+    lib.manifold_set_psi.restype = None
+
+    lib.manifold_get_psi.argtypes = [
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_double),
+    ]
+    lib.manifold_get_psi.restype = None
+
+    lib.manifold_norm2.argtypes = []
+    lib.manifold_norm2.restype = ctypes.c_double
+
+    lib.manifold_step.argtypes = [ctypes.c_double]
+    lib.manifold_step.restype = ctypes.c_double
+
+    lib.manifold_run.argtypes = [
+        ctypes.c_int,
+        ctypes.c_double,
+        ctypes.POINTER(ctypes.c_double),
+    ]
+    lib.manifold_run.restype = None
+
+    return lib
+
+
+def send_lattice_to_d(lib, sites, r_chains, l_chains, exit_dirs_r, exit_dirs_l):
+    """Allocate sites and create closed chains in D."""
+    nsites = len(sites)
+    lib.manifold_create(nsites + 1000)  # small headroom
+
+    # Allocate sites (in order of site ID)
+    state_by_id = {v: k for k, v in sites.items()}
+    for sid in range(nsites):
+        # Position: use (0,0,0) — we don't need spatial positions for
+        # the manifold walk (the topology is in the chain structure)
+        lib.manifold_alloc_site(0.0, 0.0, 0.0)
+
+    # Create R-chains (r_chains are already lists of site IDs)
+    for chain_sids in r_chains:
+        n = len(chain_sids)
+        ids = (ctypes.c_int * n)(*chain_sids)
+        dirs = (ctypes.c_double * (3*n))()
+        for i, sid in enumerate(chain_sids):
+            d = exit_dirs_r[sid]
+            dirs[3*i], dirs[3*i+1], dirs[3*i+2] = d[0], d[1], d[2]
+        lib.manifold_add_closed_chain(ids, dirs, n, True)
+
+    # Create L-chains
+    for chain_sids in l_chains:
+        n = len(chain_sids)
+        ids = (ctypes.c_int * n)(*chain_sids)
+        dirs = (ctypes.c_double * (3*n))()
+        for i, sid in enumerate(chain_sids):
+            d = exit_dirs_l[sid]
+            dirs[3*i], dirs[3*i+1], dirs[3*i+2] = d[0], d[1], d[2]
+        lib.manifold_add_closed_chain(ids, dirs, n, False)
+
+    print(f"  D lattice: {lib.manifold_nsites()} sites, {lib.manifold_nchains()} chains")
+
+
+# ---- Coarse-graining ----
+
+def coarse_grain(sites, psi_re, psi_im, exit_dirs_r):
+    """Sum spinor amplitudes at each manifold tet with frame transport.
+
+    Returns dict: tet_id → complex spinor (4,).
+    """
+    # Group sites by manifold tet
+    tet_sites = {}  # tet_id → list of (site_id, exit_dir, spinor)
+    state_by_id = {v: k for k, v in sites.items()}
+    for sid in range(len(psi_re) // 4):
+        state = state_by_id.get(sid)
+        if state is None:
+            continue
+        tet_id = state[0]
+        spinor = psi_re[4*sid:4*sid+4] + 1j * psi_im[4*sid:4*sid+4]
+        if np.linalg.norm(spinor) < 1e-30:
+            continue
+        d = exit_dirs_r.get(sid)
+        if d is None:
+            continue
+        if tet_id not in tet_sites:
+            tet_sites[tet_id] = []
+        tet_sites[tet_id].append((d, spinor))
+
+    # For each tet, pick first site's frame as reference, transport others
+    manifold_psi = {}
+    for tet_id, site_list in tet_sites.items():
+        ref_dir = site_list[0][0]
+        tau_ref = make_tau(ref_dir)
+        total = site_list[0][1].copy()
+
+        for d, spinor in site_list[1:]:
+            tau_s = make_tau(d)
+            U = frame_transport(tau_s, tau_ref)
+            total += U @ spinor
+
+        manifold_psi[tet_id] = total
+
+    return manifold_psi
+
+
+# ---- Main ----
+
+def main():
+    tri_path = os.path.expanduser(
+        '~/Desktop/Discrete-Differential-Geometry/'
+        'standard_triangulations/equilibrated_200.mfd')
+    tri = Triangulation.load(tri_path)
+    print(f"Manifold: {tri.n_tets} tets, {tri.n_verts} verts")
+
+    # Build closed chains
+    print("Tracing chains through manifold...")
+    sites, r_chains, l_chains, exit_dirs_r, exit_dirs_l = build_manifold_lattice(tri)
+    print(f"  {len(sites)} sites, {len(r_chains)} R-chains, {len(l_chains)} L-chains")
+
+    # Chain length statistics
+    r_lens = [len(c) for c in r_chains]
+    l_lens = [len(c) for c in l_chains]
+    print(f"  R-chain lengths: min={min(r_lens)}, max={max(r_lens)}, "
+          f"mean={np.mean(r_lens):.1f}, total={sum(r_lens)}")
+    print(f"  L-chain lengths: min={min(l_lens)}, max={max(l_lens)}, "
+          f"mean={np.mean(l_lens):.1f}, total={sum(l_lens)}")
+
+    # Check coverage: every site should be on exactly one R and one L chain
+    r_coverage = set()
+    for rc in r_chains:
+        r_coverage.update(rc)
+    l_coverage = set()
+    for lc in l_chains:
+        l_coverage.update(lc)
+    print(f"  R-coverage: {len(r_coverage)}/{len(sites)} sites")
+    print(f"  L-coverage: {len(l_coverage)}/{len(sites)} sites")
+
+    # Load D library and build lattice
+    print("\nBuilding D lattice...")
+    lib = load_d_library()
+    send_lattice_to_d(lib, sites, r_chains, l_chains, exit_dirs_r, exit_dirs_l)
+
+    # Initial condition: balanced spinor (1, 0, i, 0)/√2 at one site
+    ic_re = np.array([1/np.sqrt(2), 0, 0, 0], dtype=np.float64)
+    ic_im = np.array([0, 0, 1/np.sqrt(2), 0], dtype=np.float64)
+    lib.manifold_set_psi(0,
+                         ic_re.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                         ic_im.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
+
+    # Walk parameters
+    n_steps = 200
+    mix_phi = 0.05
+    nsites = lib.manifold_nsites()
+
+    print(f"\nWalk: {n_steps} steps, φ_mix={mix_phi}, {nsites} sites")
+    print(f"{'t':>5} {'norm':>12} {'n_tets':>8} {'grid_norm':>12}")
+
+    # Run walk and observe
+    psi_re = np.zeros(4 * nsites, dtype=np.float64)
+    psi_im = np.zeros(4 * nsites, dtype=np.float64)
+
+    for t in range(n_steps + 1):
+        norm2 = lib.manifold_norm2()
+
+        # Coarse-grain every 10 steps (or first/last few)
+        if t <= 5 or t % 10 == 0 or t == n_steps:
+            lib.manifold_get_psi(
+                psi_re.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                psi_im.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
+            mpsi = coarse_grain(sites, psi_re, psi_im, exit_dirs_r)
+            grid_norm = sum(np.real(np.vdot(p, p)) for p in mpsi.values())
+            n_active_tets = len(mpsi)
+            print(f"{t:5d} {np.sqrt(norm2):12.9f} {n_active_tets:8d} {grid_norm:12.9f}")
+        else:
+            print(f"{t:5d} {np.sqrt(norm2):12.9f}")
+
+        if t < n_steps:
+            lib.manifold_step(mix_phi)
+
+
+if __name__ == '__main__':
+    main()

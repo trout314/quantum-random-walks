@@ -100,17 +100,21 @@ PureShiftResult pureShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR) {
             int s = ch.ops[i].siteId;
             double[4] accRe = 0, accIm = 0;
 
-            if (i > 0) {
-                int prev = ch.ops[i-1].siteId;
-                matVecSplit(ch.ops[i-1].fwdBlock,
+            // Gather from predecessor
+            int prevIdx = (i > 0) ? i - 1 : (ch.isClosed ? n - 1 : -1);
+            if (prevIdx >= 0) {
+                int prev = ch.ops[prevIdx].siteId;
+                matVecSplit(ch.ops[prevIdx].fwdBlock,
                             &lat.psiRe[4*prev], &lat.psiIm[4*prev],
                             accRe.ptr, accIm.ptr);
             }
 
-            if (i < n - 1) {
-                int next = ch.ops[i+1].siteId;
+            // Gather from successor
+            int nextIdx = (i < n - 1) ? i + 1 : (ch.isClosed ? 0 : -1);
+            if (nextIdx >= 0) {
+                int next = ch.ops[nextIdx].siteId;
                 double[4] bRe = 0, bIm = 0;
-                matVecSplit(ch.ops[i+1].bwdBlock,
+                matVecSplit(ch.ops[nextIdx].bwdBlock,
                             &lat.psiRe[4*next], &lat.psiIm[4*next],
                             bRe.ptr, bIm.ptr);
                 foreach (a; 0 .. 4) {
@@ -132,6 +136,7 @@ PureShiftResult pureShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR) {
 
     foreach (idx, ci; result.activeChains) {
         auto ch = &lat.chains[ci];
+        if (ch.isClosed) continue;  // closed chains have no overflow
         int n = ch.ops.length;
 
         // Forward end: P+ @ psi[last]
@@ -309,6 +314,7 @@ ShiftResult applyShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR,
     if (pruneThresh2 > 0) {
         foreach (ci; shift.activeChains) {
             auto ch = &lat.chains[ci];
+            if (ch.isClosed) continue;  // closed chains have no ends to prune
             if (ch.ops.length <= 1) continue;
 
             // Forward end

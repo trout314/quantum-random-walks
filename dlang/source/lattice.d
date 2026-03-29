@@ -146,6 +146,7 @@ Mat4 buildCoinMatrix(double[3] d, double ct, double st) {
 /// A helix chain: a deque of SiteOps entries.
 struct Chain(bool hasCoin) {
     bool isR;
+    bool isClosed;        /// true for periodic chains (manifold walk)
     int rootSite;
     int rootIdx;
     Deque!(SiteOps!hasCoin) ops;
@@ -590,6 +591,29 @@ struct Lattice(bool hasCoin) {
             Mat4 tauNew = makeTau(exitDirForSite(siteId, isR));
             ch.ops[1].bwdBlock = mul(frameTransport(tauNext, tauNew), projMinus(tauNext));
         }
+    }
+
+    /// Close a chain into a loop: connect the last site to the first.
+    /// Sets isClosed=true and computes the wrap-around fwdBlock/bwdBlock.
+    void closeChain(int chainId) {
+        auto ch = &chains[chainId];
+        int n = ch.ops.length;
+        assert(n >= 2, "Cannot close a chain with fewer than 2 sites");
+
+        ch.isClosed = true;
+
+        // Last site's fwdBlock → wraps to first site
+        int lastSite = ch.ops[n-1].siteId;
+        int firstSite = ch.ops[0].siteId;
+        bool isR = ch.isR;
+
+        Mat4 tauLast = makeTau(exitDirForSite(lastSite, isR));
+        Mat4 tauFirst = makeTau(exitDirForSite(firstSite, isR));
+
+        ch.ops[n-1].fwdBlock = mul(frameTransport(tauLast, tauFirst), projPlus(tauLast));
+
+        // First site's bwdBlock → wraps to last site
+        ch.ops[0].bwdBlock = mul(frameTransport(tauFirst, tauLast), projMinus(tauFirst));
     }
 }
 
