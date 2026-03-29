@@ -300,7 +300,7 @@ struct Lattice(bool hasCoin) {
     // Coin parameters (only meaningful when hasCoin)
     double coinCt = 1, coinSt = 0;
 
-    enum int INIT_CAPACITY = 1024;
+    enum int INIT_CAPACITY = 2 * 1024 * 1024;  // 2M sites
 
     static Lattice create(int initCap = INIT_CAPACITY) {
         Lattice lat;

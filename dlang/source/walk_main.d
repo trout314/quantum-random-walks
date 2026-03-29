@@ -293,8 +293,8 @@ void run(WalkParams p) {
                     ms(tVmixL, tCoinR), ms(tCoinR, tShiftR), nPruned);
             }
 
-            if (totalAbsorbed > 0.05) {
-                stderr.writefln("  step %d: absorbed norm %.4f > 5%%, stopping",
+            if (totalAbsorbed > 0.95) {
+                stderr.writefln("  step %d: absorbed norm %.4f > 95%%, stopping",
                                 t, totalAbsorbed);
                 break;
             }
