@@ -165,7 +165,8 @@ void initWavepacket(ref Lattice!HAS_COIN lat, double sigma,
             lat.psiRe[4*n + a] = w * (phRe * rr - phIm * ri);
             lat.psiIm[4*n + a] = w * (phRe * ri + phIm * rr);
         }
-        norm2 += w * w;  // |w * e^{ik} * ref|^2 = w^2 * |ref|^2 = w^2 (ref is unit)
+        if (visited[n])
+            norm2 += w * w;  // only count sites with nonzero spinor
     }
     double nf = 1.0 / sqrt(norm2);
     foreach (i; 0 .. 4 * ns) {
