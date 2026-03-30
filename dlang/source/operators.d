@@ -567,6 +567,87 @@ PruneResult pruneChainEnds(bool hasCoin)(ref Lattice!hasCoin lat, double thresh2
     return total;
 }
 
+// ---- Wavepacket initialization ----
+
+/// Initialize a Gaussian wavepacket with momentum kick on any Lattice.
+///
+/// 1. Sets the balanced spinor (1,0,i,0)/√2 at originSite.
+/// 2. BFS through chain neighbors, frame-transporting the spinor.
+/// 3. Applies Gaussian envelope exp(-|r-r₀|²/2σ²) centered at originSite.
+/// 4. Applies momentum kick exp(i k·r).
+/// 5. Normalizes.
+///
+/// Works for both open (flat-space) and closed (manifold) lattices.
+void initWavepacket(bool hasCoin)(ref Lattice!hasCoin lat, int originSite,
+                                  double sigma, double k0x, double k0y, double k0z) {
+    int ns = lat.nsites;
+
+    auto refRe = new double[4 * ns];  refRe[] = 0;
+    auto refIm = new double[4 * ns];  refIm[] = 0;
+    auto visited = new bool[ns];      visited[] = false;
+
+    // Balanced IC: (1, 0, i, 0)/√2
+    refRe[4*originSite + 0] = 1.0 / sqrt(2.0);
+    refIm[4*originSite + 2] = 1.0 / sqrt(2.0);
+    visited[originSite] = true;
+
+    // BFS frame transport
+    int[] queue;
+    queue.reserve(ns);
+    queue ~= originSite;
+    int qHead = 0;
+
+    while (qHead < queue.length) {
+        int s = queue[qHead++];
+
+        foreach (isR; [true, false]) {
+            if (!lat.hasChain(s, isR)) continue;
+            Mat4 tauS = makeTau(lat.exitDirForSite(s, isR));
+
+            foreach (dir; 0 .. 2) {
+                int nb = (dir == 0) ? lat.chainNext(s, isR) : lat.chainPrev(s, isR);
+                if (nb < 0 || visited[nb]) continue;
+
+                Mat4 tauNb = makeTau(lat.exitDirForSite(nb, isR));
+                Mat4 U = frameTransport(tauS, tauNb);
+
+                double[4] outRe = 0, outIm = 0;
+                matVecSplit(U, &refRe[4*s], &refIm[4*s], outRe.ptr, outIm.ptr);
+                refRe[4*nb .. 4*nb+4] = outRe[];
+                refIm[4*nb .. 4*nb+4] = outIm[];
+
+                visited[nb] = true;
+                queue ~= nb;
+            }
+        }
+    }
+
+    // Apply Gaussian envelope and momentum kick
+    Vec3 r0 = lat.sites[originSite].pos;
+    double norm2 = 0;
+    foreach (n; 0 .. ns) {
+        Vec3 p = lat.sites[n].pos;
+        double dx = p.x - r0.x, dy = p.y - r0.y, dz = p.z - r0.z;
+        double r2 = dx*dx + dy*dy + dz*dz;
+        double w = exp(-r2 / (2 * sigma * sigma));
+        double phase = k0x * dx + k0y * dy + k0z * dz;
+        double phRe = cos(phase), phIm = sin(phase);
+
+        foreach (a; 0 .. 4) {
+            double rr = refRe[4*n + a], ri = refIm[4*n + a];
+            lat.psiRe[4*n + a] = w * (phRe * rr - phIm * ri);
+            lat.psiIm[4*n + a] = w * (phRe * ri + phIm * rr);
+        }
+        if (visited[n])
+            norm2 += w * w;
+    }
+    double nf = 1.0 / sqrt(norm2);
+    foreach (i; 0 .. 4 * ns) {
+        lat.psiRe[i] *= nf;
+        lat.psiIm[i] *= nf;
+    }
+}
+
 // ---- D unit tests ----
 
 unittest {

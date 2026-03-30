@@ -6,10 +6,10 @@
  */
 module manifold_interop;
 
-import geometry : Vec3;
+import geometry : Vec3, ChainOrigin, computeChainOrigin, chainCentroid;
 import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, matVecSplit;
 import lattice : Lattice;
-import operators : pureShift, applyVmix;
+import operators : pureShift, applyVmix, initWavepacket;
 
 /// Opaque handle for the lattice.  We store a heap-allocated pointer
 /// so the GC keeps it alive across C calls.
@@ -146,6 +146,97 @@ double manifold_site_probs(double* outProbs) {
     }
     return ipr;
 }
+
+/// Initialize a Gaussian wavepacket using the shared initWavepacket.
+/// BFS frame-transports the balanced spinor (1,0,i,0)/√2 from originSite,
+/// applies Gaussian envelope centered at originSite and momentum kick.
+export extern(C)
+void manifold_init_wavepacket(int originSite, double sigma,
+                              double kx, double ky, double kz) {
+    initWavepacket!false(*gLat, originSite, sigma, kx, ky, kz);
+}
+
+/// Get site positions (3 doubles per site: x, y, z).
+export extern(C)
+void manifold_get_site_positions(double* outPos) {
+    int ns = gLat.nsites;
+    foreach (s; 0 .. ns) {
+        outPos[3*s]   = gLat.sites[s].pos.x;
+        outPos[3*s+1] = gLat.sites[s].pos.y;
+        outPos[3*s+2] = gLat.sites[s].pos.z;
+    }
+}
+
+/// Compute ⟨x⟩, ⟨y⟩, ⟨z⟩, ⟨r²⟩ weighted by |ψ|².
+export extern(C)
+void manifold_mean_position(double* out4) {
+    int ns = gLat.nsites;
+    double sumP = 0, sumX = 0, sumY = 0, sumZ = 0, sumR2 = 0;
+    foreach (s; 0 .. ns) {
+        double prob = 0;
+        foreach (a; 0 .. 4) {
+            double re = gLat.psiRe[4*s+a];
+            double im = gLat.psiIm[4*s+a];
+            prob += re*re + im*im;
+        }
+        Vec3 p = gLat.sites[s].pos;
+        sumP  += prob;
+        sumX  += prob * p.x;
+        sumY  += prob * p.y;
+        sumZ  += prob * p.z;
+        sumR2 += prob * (p.x*p.x + p.y*p.y + p.z*p.z);
+    }
+    double inv = 1.0 / sumP;
+    out4[0] = sumX * inv;
+    out4[1] = sumY * inv;
+    out4[2] = sumZ * inv;
+    out4[3] = sumR2 * inv;
+}
+
+/// Run a wavepacket kick test in 3D. Init from originSite with frame-transported
+/// balanced spinor, Gaussian envelope, and momentum kick (kx,ky,kz).
+/// Run nSteps, record ⟨x⟩,⟨y⟩,⟨z⟩,⟨r²⟩ at each step.
+/// out: 4*(nSteps+1) doubles, row-major [t][xyzr2].
+export extern(C)
+void manifold_kick_run_3d(int originSite,
+                          double sigma, double kx, double ky, double kz,
+                          double mixPhi, int nSteps, double* out4) {
+    manifold_init_wavepacket(originSite, sigma, kx, ky, kz);
+
+    double[4] obs = 0;
+    manifold_mean_position(obs.ptr);
+    out4[0..4] = obs[];
+
+    foreach (t; 1 .. nSteps + 1) {
+        manifold_step(mixPhi);
+        manifold_mean_position(obs.ptr);
+        out4[4*t .. 4*t+4] = obs[];
+    }
+}
+
+/// Compute mean and variance of a per-site observable weighted by |ψ|².
+/// coords[s] = observable value at site s.
+/// Returns: outMean[0] = ⟨x⟩, outMean[1] = ⟨x²⟩ (for computing spread).
+export extern(C)
+void manifold_mean_coord(const(double)* coords, double* outMean) {
+    int ns = gLat.nsites;
+    double sumP = 0, sumPX = 0, sumPX2 = 0;
+    foreach (s; 0 .. ns) {
+        double p = 0;
+        foreach (a; 0 .. 4) {
+            double re = gLat.psiRe[4*s+a];
+            double im = gLat.psiIm[4*s+a];
+            p += re*re + im*im;
+        }
+        double x = coords[s];
+        sumP += p;
+        sumPX += p * x;
+        sumPX2 += p * x * x;
+    }
+    outMean[0] = sumPX / sumP;    // ⟨d⟩
+    outMean[1] = sumPX2 / sumP;   // ⟨d²⟩
+}
+
 
 /// Compute return probability |⟨ψ(t)|ψ(0)⟩|² for initial state at site 0.
 /// Assumes IC was (1,0,i,0)/√2 at site 0.
@@ -302,6 +393,23 @@ private Vec3 exitDir(MState s) {
     assert(false, "perm[0] not found in tet vertices");
 }
 
+/// Get all 4 vertex directions for a state.
+/// dirs[window_pos] = STD_DIRS[tet_pos] where tet_pos is the sorted
+/// position of perm[window_pos] in the tet vertex list.
+private Vec3[4] vertexDirs(MState s) {
+    int[] tetVerts = gTri.tets[s.tetId];
+    Vec3[4] dirs;
+    foreach (w; 0 .. 4) {
+        foreach (k; 0 .. 4) {
+            if (tetVerts[k] == s.perm[w]) {
+                dirs[w] = Vec3(STD_DIRS[k][0], STD_DIRS[k][1], STD_DIRS[k][2]);
+                break;
+            }
+        }
+    }
+    return dirs;
+}
+
 /// Convert R-state to L-state at the same site.
 private MState rToL(MState r) {
     MState l;
@@ -330,7 +438,6 @@ int manifold_build_lattice() {
 
     // Site registry: R-state → site ID
     int[MState] siteOf;
-    // Exit directions per site per chirality
     Vec3[] rExitDirs;   // indexed by site ID
     Vec3[] lExitDirs;
 
@@ -341,12 +448,10 @@ int manifold_build_lattice() {
         if (p) return *p;
         int sid = nextSid++;
         siteOf[rState] = sid;
-        // Grow arrays
         if (rExitDirs.length <= sid) {
             rExitDirs.length = sid + 1;
             lExitDirs.length = sid + 1;
         }
-        // Record tet mapping
         if (gSiteTet.length <= sid)
             gSiteTet.length = sid + 1;
         gSiteTet[sid] = rState.tetId;
@@ -358,13 +463,18 @@ int manifold_build_lattice() {
     bool[MState] visitedL;
     MState[] rQueue;
 
-    // Collected chains: (siteIds[], exitDirs[], isR)
+    // Collected chains: (siteIds[], exitDirs[], isR, origin for position computation)
     struct ChainData {
         int[] sids;
         Vec3[] dirs;
         bool isR;
+        ChainOrigin origin;
     }
     ChainData[] allChains;
+
+    // Position storage: set when a site is first encountered
+    Vec3[] sitePositions;
+    bool[] positionSet;
 
     // Seed with tet 0
     MState startR;
@@ -383,7 +493,7 @@ int manifold_build_lattice() {
         foreach (ref st; rChain)
             visitedR[st] = true;
 
-        // Assign sites and collect R exit dirs
+        // Assign sites, collect R exit dirs, compute positions
         ChainData rcd;
         rcd.isR = true;
         rcd.sids = new int[rChain.length];
@@ -394,6 +504,35 @@ int manifold_build_lattice() {
             rcd.dirs[i] = exitDir(st);
             rExitDirs[sid] = rcd.dirs[i];
         }
+
+        // Compute ChainOrigin for this R-chain using the first site's geometry.
+        // If the first site already has a position (from another chain), use it;
+        // otherwise start at origin.
+        {
+            int firstSid = rcd.sids[0];
+            if (sitePositions.length <= firstSid) {
+                sitePositions.length = firstSid + 1;
+                positionSet.length = firstSid + 1;
+            }
+            Vec3 startPos = positionSet[firstSid] ? sitePositions[firstSid] : Vec3(0, 0, 0);
+            Vec3[4] vdirs = vertexDirs(rChain[0]);
+            // face = 0: exit direction is always at window position 0
+            rcd.origin = computeChainOrigin(startPos, vdirs, 0, true);
+
+            // Set positions for all sites on this chain
+            foreach (i; 0 .. rChain.length) {
+                int sid = rcd.sids[i];
+                if (sitePositions.length <= sid) {
+                    sitePositions.length = sid + 1;
+                    positionSet.length = sid + 1;
+                }
+                if (!positionSet[sid]) {
+                    sitePositions[sid] = chainCentroid(&rcd.origin, cast(int) i);
+                    positionSet[sid] = true;
+                }
+            }
+        }
+
         allChains ~= rcd;
 
         stderr.writefln("  R-chain %d: period=%d, sites=%d",
@@ -419,21 +558,45 @@ int manifold_build_lattice() {
                 lcd.dirs[i] = exitDir(ls);
                 lExitDirs[sid] = lcd.dirs[i];
 
-                // Queue new R-states
                 if (rEquiv !in visitedR)
                     rQueue ~= rEquiv;
             }
+
+            // Compute L-chain origin and positions
+            {
+                int firstSid = lcd.sids[0];
+                if (sitePositions.length <= firstSid) {
+                    sitePositions.length = firstSid + 1;
+                    positionSet.length = firstSid + 1;
+                }
+                Vec3 startPos = positionSet[firstSid] ? sitePositions[firstSid] : Vec3(0, 0, 0);
+                Vec3[4] vdirs = vertexDirs(lChain[0]);
+                lcd.origin = computeChainOrigin(startPos, vdirs, 0, false);
+
+                foreach (i; 0 .. lChain.length) {
+                    int sid = lcd.sids[i];
+                    if (sitePositions.length <= sid) {
+                        sitePositions.length = sid + 1;
+                        positionSet.length = sid + 1;
+                    }
+                    if (!positionSet[sid]) {
+                        sitePositions[sid] = chainCentroid(&lcd.origin, cast(int) i);
+                        positionSet[sid] = true;
+                    }
+                }
+            }
+
             allChains ~= lcd;
         }
     }
 
     stderr.writefln("  Chain tracing done: %d sites, %d chains", nextSid, allChains.length);
 
-    // Create the D lattice
+    // Create the D lattice with computed positions
     gLat = new Lattice!false;
     *gLat = Lattice!false.create(nextSid + 100);
     foreach (i; 0 .. nextSid)
-        gLat.allocSite(Vec3(0, 0, 0));
+        gLat.allocSite(sitePositions[i]);
 
     // Create closed chains
     foreach (ref cd; allChains) {

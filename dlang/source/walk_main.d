@@ -12,7 +12,7 @@ import std.stdio : writef, writefln, stderr, stdout;
 import geometry : Vec3, dot, STEP_LEN;
 import lattice : Lattice, ProximityGrid, generateSites, IS_R, IS_L, isRamLow, freeRamBytes;
 import dirac : Mat4, makeTau, frameTransport, matVecSplit, projPlus, projMinus;
-import operators : applyShift, applyCoin, applyVmix, ShiftResult;
+import operators : applyShift, applyCoin, applyVmix, ShiftResult, initWavepacket;
 import observables : computeObservables, Observables;
 import symmetry : checkA4Symmetry;
 import coarse_grid : CoarseGrid;
@@ -82,129 +82,7 @@ WalkParams parseArgs(string[] args) {
     return p;
 }
 
-/// Compute frame-transport tau for site s on chain type isR.
-private Mat4 siteTau(ref Lattice!HAS_COIN lat, int s, bool isR) {
-    return makeTau(lat.exitDirForSite(s, isR));
-}
-
-void initWavepacket(ref Lattice!HAS_COIN lat, double sigma,
-                    double k0x, double k0y, double k0z) {
-    int ns = lat.nsites;
-
-    // BFS to compute frame-transported reference spinor at each site.
-    // refRe/refIm[4*n..4*n+4] holds U(origin→n) · (1,0,0,0).
-    auto refRe = new double[4 * ns];  refRe[] = 0;
-    auto refIm = new double[4 * ns];  refIm[] = 0;
-    auto visited = new bool[ns];      visited[] = false;
-
-    // Build fully balanced reference spinor at the origin.
-    // Find ψ with <β>=0 and <α_i>=0 for all i, which gives <τ_a>=0 for all 4
-    // tetrahedral faces. This ensures zero net current in every direction.
-    //
-    // Method: β and α_i are 4 Hermitian matrices. We need ψ in the intersection
-    // of their zero-expectation surfaces. Since τ = νβ + (3/4)(d·α), the
-    // conditions <β>=0 and <α_i>=0 automatically give <τ_a>=0 for all a.
-    //
-    // <β>=0 means |ψ₀|²+|ψ₁|² = |ψ₂|²+|ψ₃|² (equal upper/lower weight).
-    // <α_i>=0 gives 3 more real constraints. With 8 real parameters (4 complex)
-    // minus normalization and global phase = 6 DOF, we have 6-4=2 free parameters.
-    {
-        // Dirac matrices (matching dirac.d)
-        // β = diag(1,1,-1,-1)
-        // α₁: (0,3)↔1, (1,2)↔1
-        // α₂: (0,3)↔-i, (1,2)↔i
-        // α₃: (0,2)↔1, (1,3)↔-1
-
-        // Represent ψ = (a, b, c, d) with a,b,c,d complex.
-        // <β> = |a|²+|b|²-|c|²-|d|² = 0  →  |a|²+|b|² = |c|²+|d|² = 1/2
-        // <α₁> = 2Re(a*conj(d) + b*conj(c)) = 0
-        // <α₂> = 2Re(i*a*conj(d) - i*b*conj(c)) = 2Im(-a*conj(d) + b*conj(c)) = 0
-        // <α₃> = 2Re(a*conj(c) - b*conj(d)) = 0
-        //
-        // A simple solution: set b=d=0, then <β>=0 requires |a|=|c|.
-        // <α₁> = 0 (both terms zero since b=d=0).
-        // <α₂> = 0 (same).
-        // <α₃> = 2Re(a*conj(c)) = 0, so a and c must be 90° out of phase.
-        // Solution: a = 1/√2, c = i/√2.
-
-        refRe[0] = 1.0 / sqrt(2.0);  refIm[0] = 0;
-        refRe[1] = 0;                 refIm[1] = 0;
-        refRe[2] = 0;                 refIm[2] = 1.0 / sqrt(2.0);
-        refRe[3] = 0;                 refIm[3] = 0;
-
-        // Verify balance
-        double expBeta = refRe[0]*refRe[0] + refIm[0]*refIm[0]
-                       + refRe[1]*refRe[1] + refIm[1]*refIm[1]
-                       - refRe[2]*refRe[2] - refIm[2]*refIm[2]
-                       - refRe[3]*refRe[3] - refIm[3]*refIm[3];
-        stderr.writefln("  IC: fully balanced (1,0,i,0)/√2  <β>=%.6f", expBeta);
-    }
-    visited[0] = true;
-
-    // BFS queue
-    int[] queue;
-    queue.reserve(ns);
-    queue ~= 0;
-    int qHead = 0;
-
-    while (qHead < queue.length) {
-        int s = queue[qHead++];
-
-        // Try all 4 chain neighbors: R-next, R-prev, L-next, L-prev
-        static immutable bool[2] chiralities = [true, false];
-        foreach (isR; chiralities) {
-            if (!lat.hasChain(s, isR)) continue;
-            Mat4 tauS = siteTau(lat, s, isR);
-
-            foreach (dir; 0 .. 2) {  // 0=next, 1=prev
-                int nb = (dir == 0) ? lat.chainNext(s, isR) : lat.chainPrev(s, isR);
-                if (nb < 0 || visited[nb]) continue;
-
-                // Compute U(s→nb) and apply to ref spinor at s
-                Mat4 tauNb = siteTau(lat, nb, isR);
-                Mat4 U = frameTransport(tauS, tauNb);
-
-                double[4] outRe = 0, outIm = 0;
-                matVecSplit(U, &refRe[4*s], &refIm[4*s], outRe.ptr, outIm.ptr);
-                refRe[4*nb .. 4*nb+4] = outRe[];
-                refIm[4*nb .. 4*nb+4] = outIm[];
-
-                visited[nb] = true;
-                queue ~= nb;
-            }
-        }
-    }
-
-    int nVisited = 0;
-    foreach (v; visited[0 .. ns]) if (v) nVisited++;
-    stderr.writefln("  IC transport: %d/%d sites reached from origin", nVisited, ns);
-
-    // Apply Gaussian envelope and momentum kick to transported spinors
-    double norm2 = 0;
-    foreach (n; 0 .. ns) {
-        double r2 = dot(lat.sites[n].pos, lat.sites[n].pos);
-        double w = exp(-r2 / (2 * sigma * sigma));
-        double phase = k0x * lat.sites[n].pos.x
-                     + k0y * lat.sites[n].pos.y
-                     + k0z * lat.sites[n].pos.z;
-        double phRe = cos(phase);
-        double phIm = sin(phase);
-
-        // psi = w * e^{ik·r} * ref_spinor  (complex multiply)
-        foreach (a; 0 .. 4) {
-            double rr = refRe[4*n + a], ri = refIm[4*n + a];
-            lat.psiRe[4*n + a] = w * (phRe * rr - phIm * ri);
-            lat.psiIm[4*n + a] = w * (phRe * ri + phIm * rr);
-        }
-        if (visited[n])
-            norm2 += w * w;  // only count sites with nonzero spinor
-    }
-    double nf = 1.0 / sqrt(norm2);
-    foreach (i; 0 .. 4 * ns) {
-        lat.psiRe[i] *= nf;
-        lat.psiIm[i] *= nf;
-    }
-}
+// initWavepacket is now in operators.d (shared with manifold walk)
 
 void run(WalkParams p) {
     double extThresh2 = p.threshold * p.threshold;
@@ -246,7 +124,7 @@ void run(WalkParams p) {
     foreach (ki, k0; p.kicks) {
     lat.restoreSnapshot(snap);
 
-    initWavepacket(lat, p.sigma, k0.x, k0.y, k0.z);
+    initWavepacket(lat, 0, p.sigma, k0.x, k0.y, k0.z);  // origin = site 0
     stderr.writefln("\n--- Run %d/%d: k0=(%.4f,%.4f,%.4f) ---",
                     ki + 1, p.kicks.length, k0.x, k0.y, k0.z);
 
