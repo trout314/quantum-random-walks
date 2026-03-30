@@ -164,6 +164,22 @@ void manifold_init_wavepacket(int originSite, double sigma,
     initWavepacket!false(*gLat, originSite, sigma, kx, ky, kz);
 }
 
+/// Query chain neighbors for a site.
+export extern(C)
+int manifold_chain_next(int siteId, bool isR) {
+    return gLat.chainNext(siteId, isR);
+}
+
+export extern(C)
+int manifold_chain_prev(int siteId, bool isR) {
+    return gLat.chainPrev(siteId, isR);
+}
+
+export extern(C)
+bool manifold_has_chain(int siteId, bool isR) {
+    return gLat.hasChain(siteId, isR);
+}
+
 /// Get site positions (3 doubles per site: x, y, z).
 export extern(C)
 void manifold_get_site_positions(double* outPos) {
