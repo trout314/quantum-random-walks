@@ -1,0 +1,36 @@
+# Memory Index
+
+- [user_profile.md](user_profile.md) — User has math physics background, comfortable with spinors/Dirac/representation theory
+- [project_tau_approach.md](project_tau_approach.md) — Core approach: τ operators rewrite Dirac Hamiltonian in tetrahedral coords; open problem is unitarity
+- [feedback_no_negated_directions.md](feedback_no_negated_directions.md) — Only 4 tetrahedral directions per site; -e_a is never available; direction sets change site to site
+- [feedback_commit_changes.md](feedback_commit_changes.md) — Always commit and push changes to GitHub without being asked
+- [project_shift_operator_approaches.md](project_shift_operator_approaches.md) — Three candidate approaches for shift operators: split-step, paired-site swaps, staggered
+- [project_bc_helix_walk.md](project_bc_helix_walk.md) — Chosen walk scheme: BC helix decomposition into disjoint L/R spirals, W = S_R · S_L
+- [project_key_results.md](project_key_results.md) — Summary of all key results: τ ops, reflections, anti-conjugation, BC helix, perpendicular pairs, disjointness
+- [project_two_slit.md](project_two_slit.md) — Open question: unique walker paths (Świerczkowski) and two-slit interference implications
+- [project_validation_tests.md](project_validation_tests.md) — Comprehensive test list for demonstrating Dirac equation correspondence
+- [project_manifold_goal.md](project_manifold_goal.md) — Long-term goal: walk on triangulated 3-manifolds; multiple paths restore interference
+- [feedback_no_loops.md](feedback_no_loops.md) — Never violate the no-loops property when reasoning; each site has exactly one R-chain and one L-chain
+- [feedback_show_graph_paths.md](feedback_show_graph_paths.md) — Always print file paths of generated graphs so user can open them
+- [project_1d_helix_results.md](project_1d_helix_results.md) — Summary of all 1D helix walk observations: dispersion, symmetry, frame transport mixing, mass mechanism
+- [project_walk_parameters.md](project_walk_parameters.md) — Independent walk parameters and their settings, known results for each combination
+- [project_pruning_plan.md](project_pruning_plan.md) — Plan for periodic chain-end pruning with free-list ID reuse to reclaim low-amplitude sites
+- [project_symmetric_ic_plan.md](project_symmetric_ic_plan.md) — Plan for 1/12 site reduction using A4-symmetric wedge seeding with virtual density counting
+- [feedback_sym_no_factors.md](feedback_sym_no_factors.md) — Sym mode: all 12 images are independent sites, no factors of 12 anywhere in thresholds/density/probability
+- [feedback_chain_extension_uniqueness.md](feedback_chain_extension_uniqueness.md) — New sites at BC chain ends are guaranteed distinct; all paths to them go through the new step
+- [project_precomputed_blocks.md](project_precomputed_blocks.md) — Next optimization: precompute shift blocks per chain link using deque-style ChainBuffer
+- [reference_dlang_toolchain.md](reference_dlang_toolchain.md) — ldc2 at ~/dlang/ldc-1.41.0/bin/ldc2; not on default PATH; build with ninja -C dlang/build
+- [feedback_checkpoint_memories.md](feedback_checkpoint_memories.md) — Save project memory at checkpoints so sessions survive crashes
+- [project_current_thread.md](project_current_thread.md) — A4-symmetric seed; depths 0-3 symmetric; chain-sharing blocks deeper symmetry
+- [feedback_no_void_init.md](feedback_no_void_init.md) — Never use void initialization in D code; always zero-initialize
+- [project_u2_gauge_results.md](project_u2_gauge_results.md) — U(2)×U(2) gauge exploration: diagonal P+ phase gives 18% L1 improvement; mixing angle negligible
+- [feedback_chain_quasicrystal.md](feedback_chain_quasicrystal.md) — Chain is a quasicrystal: no translational/screw symmetry, no unit cell, Bloch inapplicable
+- [project_bc_helix_cut_and_project.md](project_bc_helix_cut_and_project.md) — BC helix as 1D quasicrystal via cut-and-project from triangular lattice on S³; periodic in 600-cell
+- [project_quasi_bloch_results.md](project_quasi_bloch_results.md) — Quasi-Bloch ansatz confirmed: e^{ikn} F_{n mod 4}(nθ mod 2π); F≈const bulk, smooth at band edges
+- [project_quasi_bloch_ic.md](project_quasi_bloch_ic.md) — Walk-Dirac comparison: 3.6% RMS at φ=0.10; mass m=0.878×φ; P±-sym IC best
+- [project_1d_scaling_rules.md](project_1d_scaling_rules.md) — Seven scaling conditions for Dirac correspondence: 1/N << φ << 1 << σ << N
+- [project_lattice_redesign.md](project_lattice_redesign.md) — R/L chains cross at single sites (FIXED). Old overlapping design was wrong.
+- [project_3d_walk_progress.md](project_3d_walk_progress.md) — 3D walk running: balanced IC (1,0,i,0)/√2, isotropic spreading, perpendicular chains verified
+- [project_unitarity_findings.md](project_unitarity_findings.md) — Shift exactly unitary on closed chains; chainPrepend index bug was root cause; shift refactored
+- [project_manifold_walk_results.md](project_manifold_walk_results.md) — Manifold walk: A4 cover, unitarity, spectrum (flat DOS), wavepacket tests, open questions
+- [project_cpt_symmetries.md](project_cpt_symmetries.md) — Full CPT: AZ class CII at φ=0; C_std=-i·T_AZ; P broken (helix); CPT not restored in continuum
