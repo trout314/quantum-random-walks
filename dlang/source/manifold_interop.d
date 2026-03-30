@@ -96,6 +96,14 @@ int manifold_add_closed_chain(const(int)* siteIds, const(double)* exitDirs,
 
 // ---- Wavefunction access ----
 
+/// Zero the entire wavefunction.
+export extern(C)
+void manifold_zero_psi() {
+    int n4 = 4 * gLat.nsites;
+    gLat.psiRe[0 .. n4] = 0;
+    gLat.psiIm[0 .. n4] = 0;
+}
+
 /// Set spinor at site s: psi[s] = (re[0]+i*im[0], ..., re[3]+i*im[3])
 export extern(C)
 void manifold_set_psi(int siteId, const(double)* re, const(double)* im) {

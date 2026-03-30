@@ -60,13 +60,13 @@ def main():
     print(f"Position range: x=[{pos[:,0].min():.1f}, {pos[:,0].max():.1f}]")
     print(f"Max |r| from site 0: {r_from_origin.max():.1f}")
 
-    # Walk parameters
+    # Walk parameters — small σ and k ~ m = 0.878*φ for visible dispersion
     mix_phi = 0.05
-    n_steps = 60
-    sigma = r_from_origin.max() / 6
+    n_steps = 40
+    sigma = 4.0  # comparable to Compton wavelength 1/m ≈ 23
 
-    # Kick along x-axis with various momenta
-    k_values = [0.0, 0.5, 1.0, 1.5, 2.0]
+    # Kick along x-axis with k ~ m ≈ 0.044
+    k_values = [0.0, 0.02, 0.05, 0.10, 0.20]
 
     print(f"\nσ={sigma:.1f}, φ_mix={mix_phi}, {n_steps} steps")
     print(f"Origin site: 0 at ({pos[0,0]:.1f}, {pos[0,1]:.1f}, {pos[0,2]:.1f})")
@@ -102,21 +102,26 @@ def main():
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
 
+    # Subtract k=0 baseline to isolate kick effect
+    base_x, base_y, base_z = results[0.0][:3]
     for k in k_values:
         mean_x, mean_y, mean_z, vx, vy, vz = results[k]
         t = np.arange(n_steps + 1)
-        axes[0].plot(t, mean_x, label=f'k={k:.1f}')
-        disp = np.sqrt((mean_x - mean_x[0])**2 + (mean_y - mean_y[0])**2 + (mean_z - mean_z[0])**2)
-        axes[1].plot(t, disp, label=f'k={k:.1f}')
+        axes[0].plot(t, mean_x - base_x, label=f'k={k:.2f}')
+        dx = mean_x - base_x
+        dy = mean_y - base_y
+        dz = mean_z - base_z
+        disp = np.sqrt(dx**2 + dy**2 + dz**2)
+        axes[1].plot(t, disp, label=f'k={k:.2f}')
 
     axes[0].set_xlabel('Step')
-    axes[0].set_ylabel('⟨x⟩')
-    axes[0].set_title('Wavepacket Center (x)')
+    axes[0].set_ylabel('⟨x⟩ − ⟨x⟩_{k=0}')
+    axes[0].set_title('Kick Effect (x, baseline subtracted)')
     axes[0].legend(fontsize=8)
 
     axes[1].set_xlabel('Step')
-    axes[1].set_ylabel('|⟨r⟩ - ⟨r⟩₀|')
-    axes[1].set_title('Displacement from Start')
+    axes[1].set_ylabel('|Δ⟨r⟩ − Δ⟨r⟩_{k=0}|')
+    axes[1].set_title('Kick Displacement (baseline subtracted)')
     axes[1].legend(fontsize=8)
 
     ks = sorted(results.keys())
