@@ -111,6 +111,14 @@ void manifold_set_psi(int siteId, const(double)* re, const(double)* im) {
     gLat.psiIm[4*siteId .. 4*siteId+4] = im[0..4];
 }
 
+/// Set entire wavefunction from caller-provided buffers (4*nsites doubles each).
+export extern(C)
+void manifold_set_psi_bulk(const(double)* inRe, const(double)* inIm) {
+    int n4 = 4 * gLat.nsites;
+    gLat.psiRe[0 .. n4] = inRe[0 .. n4];
+    gLat.psiIm[0 .. n4] = inIm[0 .. n4];
+}
+
 /// Read all psi into caller-provided buffers (4*nsites doubles each).
 export extern(C)
 void manifold_get_psi(double* outRe, double* outIm) {

@@ -61,7 +61,6 @@ struct PureShiftResult {
  * This function calls swapBuffers internally.
  */
 PureShiftResult pureShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR) {
-    import std.parallelism : parallel;
     alias ChainT = Lattice!hasCoin.ChainT;
 
     int ns = lat.nsites;
@@ -89,10 +88,11 @@ PureShiftResult pureShift(bool hasCoin)(ref Lattice!hasCoin lat, bool isR) {
             chainIds[nci++] = cast(int) ci;
     result.activeChains = chainIds[0 .. nci].dup;
 
-    // ---- Interior gather (parallel across chains) ----
-    enum BATCH_DIVISOR = 16;
-    int batchSize = (nci > BATCH_DIVISOR) ? nci / BATCH_DIVISOR : 1;
-    foreach (ci; parallel(result.activeChains, batchSize)) {
+    // ---- Interior gather (serial across chains) ----
+    // Note: std.parallelism deadlocks when D runtime is loaded as a shared
+    // library from Python ctypes, so we use serial iteration.  With typical
+    // chain counts (≤12 on manifold) the overhead is negligible.
+    foreach (ci; result.activeChains) {
         auto ch = &lat.chains[ci];
         int n = ch.ops.length;
 
