@@ -464,8 +464,16 @@ private Vec3 chainHelixVertex(const ChainOrigin* origin, int k) {
     Vec3 vf = Vec3(R_VERTEX * cos(angle), R_VERTEX * sin(angle), kd * H_VERTEX);
     // Transform to standard walk frame
     Vec3 vStd = alignToWalkFrame(vf);
-    // Subtract standard centroid(0) to get displacement from origin
-    Vec3 c0Std = helixCentroid(0);
+    // Subtract centroid(0) for THIS chirality to get displacement from origin.
+    // Must use the chain's tSign, not the hardcoded R-helix helixCentroid(0).
+    Vec3 c0Std = Vec3(0, 0, 0);
+    foreach (j; 0 .. 4) {
+        double jd = cast(double) j;
+        double a0 = jd * THETA_BC * origin.tSign;
+        Vec3 v0 = Vec3(R_VERTEX * cos(a0), R_VERTEX * sin(a0), jd * H_VERTEX);
+        c0Std = c0Std + alignToWalkFrame(v0);
+    }
+    c0Std = c0Std * 0.25;
     Vec3 delta = vStd - c0Std;
     // Rotate to chain frame and translate
     return origin.rot.apply(delta) + origin.pos0;
