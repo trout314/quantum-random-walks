@@ -11,6 +11,7 @@ sources = [
   'source/lattice.d',
   'source/site_container.d',
   'source/triangulation_walk.d',
+  'source/manifold_walk_op.d',
   'source/operators.d',
   'source/observables.d',
   'source/walk_main.d',

@@ -11,6 +11,11 @@ import dirac : Mat4, makeTau, projPlus, projMinus, frameTransport, mul, matVecSp
 import lattice : Lattice;
 import operators : pureShift, applyVmix, initWavepacket;
 
+// New separated modules
+import triangulation_walk : TriangulationWalk, Triangulation_ = Triangulation,
+    buildFromTriangulation;
+import manifold_walk_op : ManifoldWalkState, manifoldStep;
+
 /// Opaque handle for the lattice.  We store a heap-allocated pointer
 /// so the GC keeps it alive across C calls.
 private Lattice!false* gLat;
@@ -665,4 +670,119 @@ int manifold_build_lattice() {
                     gLat.nsites, gLat.chains.length);
 
     return nextSid;
+}
+
+// =====================================================================
+//  New API: separated site container + walk operator
+// =====================================================================
+
+private TriangulationWalk* gTW;
+private ManifoldWalkState* gWS;
+
+/// Build the lattice using the new separated architecture.
+/// Each site gets a unique ID with correct R³ position.
+/// Returns number of sites.
+export extern(C)
+int manifold_build_lattice_v2() {
+    import std.stdio : stderr;
+
+    // Build triangulation struct for the new module
+    Triangulation_ tri2;
+    tri2.nTets = gTri.nTets;
+    tri2.tets = gTri.tets;
+    tri2.neighbors = gTri.neighbors;
+
+    gTW = new TriangulationWalk;
+    *gTW = buildFromTriangulation(tri2);
+
+    gWS = new ManifoldWalkState;
+    *gWS = ManifoldWalkState.create(gTW.sites.nsites);
+
+    // Also populate gSiteTet for compatibility
+    if (gSiteTet.length < gTW.sites.nsites)
+        gSiteTet.length = gTW.sites.nsites;
+    gSiteTet[0 .. gTW.sites.nsites] = gTW.siteTet[0 .. gTW.sites.nsites];
+
+    stderr.writefln("  v2 lattice: %d sites, %d chains, %d redirects",
+                    gTW.sites.nsites, gTW.sites.chains.length, gTW.redirects.length);
+    return gTW.sites.nsites;
+}
+
+/// Walk step using the new architecture.
+export extern(C)
+double manifold_step_v2(double mixPhi) {
+    return manifoldStep(*gTW, *gWS, mixPhi);
+}
+
+/// Get number of sites (v2).
+export extern(C)
+int manifold_nsites_v2() {
+    return gTW.sites.nsites;
+}
+
+/// Get site positions (v2).
+export extern(C)
+void manifold_get_site_positions_v2(double* outPos) {
+    int ns = gTW.sites.nsites;
+    foreach (s; 0 .. ns) {
+        outPos[3*s]   = gTW.sites.sites[s].pos.x;
+        outPos[3*s+1] = gTW.sites.sites[s].pos.y;
+        outPos[3*s+2] = gTW.sites.sites[s].pos.z;
+    }
+}
+
+/// Get site-to-tet mapping (v2).
+export extern(C)
+void manifold_get_site_tets_v2(int* outTets) {
+    int ns = gTW.sites.nsites;
+    outTets[0 .. ns] = gTW.siteTet[0 .. ns];
+}
+
+/// Get psi (v2).
+export extern(C)
+void manifold_get_psi_v2(double* outRe, double* outIm) {
+    int n4 = 4 * gTW.sites.nsites;
+    outRe[0 .. n4] = gWS.psiRe[0 .. n4];
+    outIm[0 .. n4] = gWS.psiIm[0 .. n4];
+}
+
+/// Set psi (v2).
+export extern(C)
+void manifold_set_psi_v2(const(double)* inRe, const(double)* inIm) {
+    int n4 = 4 * gTW.sites.nsites;
+    gWS.psiRe[0 .. n4] = inRe[0 .. n4];
+    gWS.psiIm[0 .. n4] = inIm[0 .. n4];
+}
+
+/// Zero psi (v2).
+export extern(C)
+void manifold_zero_psi_v2() {
+    gWS.zero();
+}
+
+/// Norm² (v2).
+export extern(C)
+double manifold_norm2_v2() {
+    return gWS.norm2();
+}
+
+/// Chain navigation (v2).
+export extern(C)
+int manifold_chain_next_v2(int siteId, bool isR) {
+    return gTW.sites.chainNext(siteId, isR);
+}
+
+export extern(C)
+int manifold_chain_prev_v2(int siteId, bool isR) {
+    return gTW.sites.chainPrev(siteId, isR);
+}
+
+export extern(C)
+bool manifold_has_chain_v2(int siteId, bool isR) {
+    return gTW.sites.hasChain(siteId, isR);
+}
+
+export extern(C)
+int manifold_nchains_v2() {
+    return cast(int) gTW.sites.chains.length;
 }

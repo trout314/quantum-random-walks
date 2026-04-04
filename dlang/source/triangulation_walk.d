@@ -157,208 +157,199 @@ private MState lToR(MState l) {
 
 /// Build a TriangulationWalk from a triangulation.
 ///
-/// Algorithm:
-/// 1. Trace all manifold chains to discover the topology.
-/// 2. BFS-build the site container: for each manifold chain, grow from
-///    an existing site, creating new sites via chainAppend. When a chain
-///    step would revisit a manifold state already in the container,
-///    record a redirect and keep extending (other states may be new).
-/// 3. Every cross-chain stub gets extended into its full manifold chain.
+/// Algorithm: true BFS growth from the origin site. At each step,
+/// extend every chain that has an extendable end by one site.
+/// When a chain extension would create a site at a manifold state
+/// that already has a site, record a redirect instead.
+/// Continue until all 7200 manifold states have sites.
 TriangulationWalk buildFromTriangulation(ref const Triangulation tri) {
     import std.stdio : stderr;
 
     TriangulationWalk tw;
 
-    // ---- Phase 1: Trace all manifold chains ----
-    struct MChain {
-        MState[] states;
-        bool isR;
-    }
-    MChain[] mChains;
-
-    bool[MState] visitedR, visitedL;
-    MState[] rQueue;
-
+    // Count total manifold states for capacity estimate
+    // (BFS traversal of manifold chains from tet 0)
+    bool[MState] allR, allL;
+    MState[] rq;
     MState startR;
     startR.tetId = 0;
     foreach (k; 0 .. 4) startR.perm[k] = tri.tets[0][k];
-    rQueue ~= startR;
-
-    while (rQueue.length > 0) {
-        MState rs = rQueue[$ - 1];
-        rQueue.length--;
-        if (rs in visitedR) continue;
-
-        MState[] rStates = traceChain(tri, rs);
-        foreach (ref st; rStates) visitedR[st] = true;
-        mChains ~= MChain(rStates, true);
-
+    rq ~= startR;
+    while (rq.length > 0) {
+        MState rs = rq[$ - 1]; rq.length--;
+        if (rs in allR) continue;
+        auto rStates = traceChain(tri, rs);
+        foreach (ref st; rStates) allR[st] = true;
         foreach (ref st; rStates) {
-            MState lStart = rToL(st);
-            if (lStart in visitedL) continue;
-
-            MState[] lStates = traceChain(tri, lStart);
-            foreach (ref ls; lStates) visitedL[ls] = true;
-            mChains ~= MChain(lStates, false);
-
-            foreach (ref ls; lStates) {
-                MState rEquiv = lToR(ls);
-                if (rEquiv !in visitedR) rQueue ~= rEquiv;
+            MState ls = rToL(st);
+            if (ls in allL) continue;
+            auto lStates = traceChain(tri, ls);
+            foreach (ref l2; lStates) allL[l2] = true;
+            foreach (ref l2; lStates) {
+                MState re = lToR(l2);
+                if (re !in allR) rq ~= re;
             }
         }
     }
-
-    stderr.writefln("  Traced %d manifold chains", mChains.length);
-
-    // ---- Phase 2: Build site container ----
-
-    // Map each manifold state (as R-state) to which R/L manifold chain it's on
-    int[MState] rChainOf, lChainOf;
-    foreach (ci, ref mc; mChains) {
-        foreach (ref st; mc.states) {
-            MState rState = mc.isR ? st : lToR(st);
-            if (mc.isR) rChainOf[rState] = cast(int) ci;
-            else        lChainOf[rState] = cast(int) ci;
-        }
-    }
-
-    // Estimate total sites
-    int totalStates = 0;
-    foreach (ref mc; mChains) totalStates += cast(int) mc.states.length;
+    int totalStates = cast(int) allR.length;
+    stderr.writefln("  Total manifold states: %d", totalStates);
 
     tw.sites = SiteContainer.create(totalStates + 100);
     tw.siteTet = new int[totalStates + 100];
     tw.redirects.length = 0;
 
-    bool[] chainBuilt = new bool[mChains.length];
-    int[] buildQueue;
+    // ---- BFS growth ----
+    // Each site in the tree is on one R-chain and one L-chain.
+    // A "frontier" is a chain that can be extended (its manifold successor
+    // state doesn't have a site yet, or needs a redirect recorded).
+    //
+    // We track, for each lattice chain, which manifold state comes next
+    // if we extend it forward.
 
-    // Helper: get the R-state for a manifold chain state
-    MState toRState(ref const MChain mc, int i) {
-        return mc.isR ? mc.states[i] : lToR(mc.states[i]);
+    // Per lattice chain: the manifold state sequence and current extension index.
+    struct ChainInfo {
+        MState[] mStates;   // full manifold cycle for this chain's chirality
+        int entryIdx;       // which position in mStates is the chain root
+        int extended;       // how many sites beyond root have been created
+        bool isR;
+    }
+    ChainInfo[] chainInfos;
+
+    /// Create the origin site and its two chains (R + L).
+    int originSite = tw.sites.allocSite(Vec3(0, 0, 0));
+    tw.siteOf[startR] = originSite;
+    tw.siteTet[originSite] = startR.tetId;
+
+    // Helper: get the R-state for a manifold state on a chain
+    MState toRState(MState st, bool isR) {
+        return isR ? st : lToR(st);
     }
 
-    // Helper: build one manifold chain into the site container.
-    // Returns the lattice chain ID.
-    int buildOneChain(int mci) {
-        auto mc = &mChains[mci];
-        int period = cast(int) mc.states.length;
+    // Helper: trace the manifold chain containing a given state
+    // and return (states[], index of the given state in the cycle).
+    auto traceAndFind(MState st, bool isR) {
+        auto states = traceChain(tri, st);
+        int idx = -1;
+        foreach (j, ref s; states)
+            if (s == st) { idx = cast(int) j; break; }
+        struct Result { MState[] states; int idx; }
+        return Result(states, idx);
+    }
 
-        // Find entry point: which state already has a site?
-        int entryIdx = -1;
-        int rootSite = -1;
-        foreach (j; 0 .. period) {
-            MState rSt = toRState(*mc, j);
-            auto p = rSt in tw.siteOf;
-            if (p) { entryIdx = j; rootSite = *p; break; }
-        }
-        if (entryIdx < 0) return -1;
-
-        // Create chain from entry point
-        Vec3[4] vdirs = vertexDirs(tri, mc.states[entryIdx]);
-        Vec3 c0 = tw.sites.sites[rootSite].pos;
+    // Create origin's R-chain
+    {
+        auto mf = traceAndFind(startR, true);
+        Vec3[4] vdirs = vertexDirs(tri, startR);
         Vec3[4] rootVerts;
         foreach (k; 0 .. 4)
-            rootVerts[k] = Vec3(c0.x + vdirs[k].x, c0.y + vdirs[k].y, c0.z + vdirs[k].z);
+            rootVerts[k] = Vec3(vdirs[k].x, vdirs[k].y, vdirs[k].z); // pos=(0,0,0)
+        int cid = tw.sites.makeChain(originSite, true, rootVerts);
+        chainInfos ~= ChainInfo(mf.states, mf.idx, 0, true);
+    }
+    // Create origin's L-chain
+    {
+        MState lStart = rToL(startR);
+        auto mf = traceAndFind(lStart, false);
+        Vec3[4] vdirs = vertexDirs(tri, lStart);
+        Vec3[4] rootVerts;
+        foreach (k; 0 .. 4)
+            rootVerts[k] = Vec3(vdirs[k].x, vdirs[k].y, vdirs[k].z);
+        int cid = tw.sites.makeChain(originSite, false, rootVerts);
+        chainInfos ~= ChainInfo(mf.states, mf.idx, 0, false);
+    }
 
-        int chainId = tw.sites.makeChain(rootSite, mc.isR, rootVerts);
+    // BFS loop: extend every chain by one site, round-robin, until done.
+    int nCreated = 1;  // origin
+    int round = 0;
+    while (nCreated < totalStates) {
+        int createdThisRound = 0;
+        int nChains = cast(int) chainInfos.length;
 
-        // Extend forward through the cycle
-        foreach (j; 1 .. period) {
-            int i = (entryIdx + j) % period;
-            MState rSt = toRState(*mc, i);
+        foreach (ci; 0 .. nChains) {
+            auto info = &chainInfos[ci];
+            int period = cast(int) info.mStates.length;
 
-            auto pExisting = rSt in tw.siteOf;
+            // How many more can we extend?
+            if (info.extended >= period - 1) continue;  // fully extended
+
+            // Next manifold state
+            int nextJ = (info.entryIdx + info.extended + 1) % period;
+            MState nextMState = info.mStates[nextJ];
+            MState nextR = toRState(nextMState, info.isR);
+
+            auto pExisting = nextR in tw.siteOf;
             if (pExisting) {
-                // This state already has a site — record redirect
+                // Redirect — this chain can't grow further
                 Redirect rd;
-                rd.chainId = chainId;
+                rd.chainId = ci;
                 rd.isFwd = true;
                 rd.targetSite = *pExisting;
                 tw.redirects ~= rd;
-
-                // But DON'T break — we can't extend past a redirect because
-                // the chain position formula needs continuity.
-                // Instead, start a NEW chain segment from the existing site.
-                // Actually: we must stop this chain here. The remaining
-                // states will be covered when we build the chain starting
-                // from the existing site's cross-chain.
-                break;
+                info.extended = period;  // mark as done
+                continue;
             }
 
-            // New site
-            int newSite = tw.sites.chainAppend(chainId);
-            tw.siteTet[newSite] = mc.states[i].tetId;
-            tw.siteOf[rSt] = newSite;
+            // Create new site
+            int newSite = tw.sites.chainAppend(ci);
+            tw.siteTet[newSite] = nextMState.tetId;
+            tw.siteOf[nextR] = newSite;
+            info.extended++;
+            nCreated++;
+            createdThisRound++;
 
-            // Create cross-chain stub
-            tw.sites.makeCrossChain(newSite, !mc.isR);
+            // Create cross-chain at new site
+            tw.sites.makeCrossChain(newSite, !info.isR);
+            // The cross-chain stub is a new lattice chain — register it.
+            int crossChainId = cast(int) tw.sites.chains.length - 1;
 
-            // Queue the cross manifold chain
-            MState rSt_i = toRState(*mc, i);
-            auto pCross = mc.isR ? (rSt_i in lChainOf) : (rSt_i in rChainOf);
-            if (pCross && !chainBuilt[*pCross])
-                buildQueue ~= *pCross;
+            // Find the manifold chain for this cross-chain
+            MState crossMState = info.isR ? rToL(nextMState) : nextMState;
+            bool crossIsR = !info.isR;
+            // If cross is L, the manifold state is the L-state; trace from there
+            // If cross is R, the manifold state is the R-state = nextR
+            MState crossTrace = crossIsR ? nextR : rToL(info.mStates[nextJ]);
+            // Actually for the cross chain: if we built an R-chain site,
+            // its cross is an L-chain. The L-state at this site is rToL(R-state).
+            if (info.isR) {
+                auto mf = traceAndFind(rToL(info.mStates[nextJ]), false);
+                chainInfos ~= ChainInfo(mf.states, mf.idx, 0, false);
+            } else {
+                // Built an L-chain site, cross is R-chain.
+                // The R-state is lToR(L-state) = nextR (already computed above
+                // for L-chains: nextR = lToR(nextMState))
+                auto mf = traceAndFind(lToR(info.mStates[nextJ]), true);
+                chainInfos ~= ChainInfo(mf.states, mf.idx, 0, true);
+            }
         }
 
-        // Backward redirect: the state before the entry point
-        int bwdIdx = (entryIdx - 1 + period) % period;
-        MState bwdRSt = toRState(*mc, bwdIdx);
-        auto pBwd = bwdRSt in tw.siteOf;
+        round++;
+        if (round % 10 == 0 || createdThisRound == 0)
+            stderr.writefln("  Round %d: %d sites, %d chains, %d redirects",
+                            round, nCreated, chainInfos.length, tw.redirects.length);
+
+        if (createdThisRound == 0) break;  // no progress — all chains done or redirected
+    }
+
+    // ---- Add backward redirects for every chain ----
+    // Each chain's backward end (before its root) connects to the previous
+    // manifold state, which should have a site by now.
+    foreach (ci_u, ref info; chainInfos) {
+        int ci = cast(int) ci_u;
+        int period = cast(int) info.mStates.length;
+        int bwdIdx = (info.entryIdx - 1 + period) % period;
+        MState bwdR = toRState(info.mStates[bwdIdx], info.isR);
+        auto pBwd = bwdR in tw.siteOf;
         if (pBwd) {
             Redirect rd;
-            rd.chainId = chainId;
+            rd.chainId = ci;
             rd.isFwd = false;
             rd.targetSite = *pBwd;
             tw.redirects ~= rd;
         }
-
-        return chainId;
     }
 
-    // Seed: create origin site, build first R-chain
-    int originSite = tw.sites.allocSite(Vec3(0, 0, 0));
-    MState originR = mChains[0].states[0];
-    tw.siteOf[originR] = originSite;
-    tw.siteTet[originSite] = originR.tetId;
-
-    buildQueue ~= 0;
-
-    // Iterate until all reachable chains are built
-    bool progress = true;
-    while (progress) {
-        progress = false;
-
-        // Process queued chains
-        while (buildQueue.length > 0) {
-            int mci = buildQueue[$ - 1];
-            buildQueue.length--;
-            if (chainBuilt[mci]) continue;
-            chainBuilt[mci] = true;
-            progress = true;
-
-            buildOneChain(mci);
-        }
-
-        // Check for unbuilt chains that now have reachable entry points
-        foreach (ci, ref mc; mChains) {
-            if (chainBuilt[ci]) continue;
-            foreach (ref st; mc.states) {
-                MState rSt = mc.isR ? st : lToR(st);
-                if (rSt in tw.siteOf) {
-                    buildQueue ~= cast(int) ci;
-                    break;
-                }
-            }
-        }
-
-        if (buildQueue.length > 0) progress = true;
-    }
-
-    int nBuilt = 0;
-    foreach (b; chainBuilt) if (b) nBuilt++;
-    stderr.writefln("  Built %d/%d chains, %d sites, %d redirects",
-                    nBuilt, mChains.length, tw.sites.nsites, tw.redirects.length);
+    stderr.writefln("  Build done: %d sites, %d chains, %d redirects",
+                    tw.sites.nsites, tw.sites.chains.length, tw.redirects.length);
 
     return tw;
 }
