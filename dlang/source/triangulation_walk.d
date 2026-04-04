@@ -299,8 +299,10 @@ TriangulationWalk buildFromTriangulation(ref const Triangulation tri) {
 
             // Create cross-chain at new site
             tw.sites.makeCrossChain(newSite, !info.isR);
-            // The cross-chain stub is a new lattice chain — register it.
             int crossChainId = cast(int) tw.sites.chains.length - 1;
+            // Verify sync between sc.chains and chainInfos
+            assert(crossChainId == cast(int) chainInfos.length,
+                   "chain index mismatch: sc.chains and chainInfos out of sync");
 
             // Find the manifold chain for this cross-chain
             MState crossMState = info.isR ? rToL(nextMState) : nextMState;

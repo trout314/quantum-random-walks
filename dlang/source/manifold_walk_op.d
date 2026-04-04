@@ -224,10 +224,12 @@ void applyRedirects(ref const SiteContainer sc,
 }
 
 /// Apply V-mixing (coin) for one chirality.
+/// Uses complex Gram-Schmidt to extract P± eigenspace bases,
+/// then applies V = cos(φ)I + i sin(φ) M where M swaps eigenspaces.
 void applyVmix(ref const SiteContainer sc, ref ManifoldWalkState ws,
                bool isR, double mixPhi)
 {
-    import std.math : cos, sin;
+    import std.math : cos, sin, sqrt;
     if (mixPhi == 0) return;
 
     double cp = cos(mixPhi), sp = sin(mixPhi);
@@ -240,93 +242,85 @@ void applyVmix(ref const SiteContainer sc, ref ManifoldWalkState ws,
         Mat4 Pp = projPlus(tau);
         Mat4 Pm = projMinus(tau);
 
-        // Build mixing operator: V = cos(φ)I + i sin(φ) M
-        // where M = Σ_j (|p_j⟩⟨m_j| + |m_j⟩⟨p_j|)
-        // For the 4×4 case with rank-2 projectors, we extract bases
-        // and build M explicitly.
-
-        // Simpler: V ψ = cos(φ) ψ + i sin(φ) (Pm @ Pp + Pp @ Pm) ψ
-        // Since Pp + Pm = I and Pp Pm = 0:
-        // (Pm Pp + Pp Pm) = 0... that's not right.
-        // Actually M swaps the eigenspaces: M = Σ_j |pm_j⟩⟨pp_j| + |pp_j⟩⟨pm_j|
-
-        // Use the direct approach: find orthonormal bases for P+ and P- eigenspaces,
-        // then construct M.
-        double[4][2] ppBasis, pmBasis;
-        int npf = 0, nmf = 0;
-
+        // Complex Gram-Schmidt for P+ and P- eigenspace bases
+        double[2][4] ppBRe = 0, ppBIm = 0, pmBRe = 0, pmBIm = 0;
+        int npFound = 0, nmFound = 0;
         foreach (col; 0 .. 4) {
-            if (npf < 2) {
-                double[4] v;
-                foreach (a; 0 .. 4) v[a] = Pp.re[4*a + col];
-                // Orthogonalize against previous
-                foreach (j; 0 .. npf) {
-                    double d = 0;
-                    foreach (a; 0 .. 4) d += ppBasis[j][a] * v[a];
-                    foreach (a; 0 .. 4) v[a] -= d * ppBasis[j][a];
+            if (npFound >= 2 && nmFound >= 2) break;
+            if (npFound < 2) {
+                double[4] vRe = 0, vIm = 0;
+                foreach (a; 0 .. 4) { vRe[a] = Pp.re[4*a+col]; vIm[a] = Pp.im[4*a+col]; }
+                foreach (j; 0 .. npFound) {
+                    double dRe = 0, dIm = 0;
+                    foreach (a; 0 .. 4) {
+                        dRe += ppBRe[a][j]*vRe[a] + ppBIm[a][j]*vIm[a];
+                        dIm += ppBRe[a][j]*vIm[a] - ppBIm[a][j]*vRe[a];
+                    }
+                    foreach (a; 0 .. 4) {
+                        vRe[a] -= dRe*ppBRe[a][j] - dIm*ppBIm[a][j];
+                        vIm[a] -= dRe*ppBIm[a][j] + dIm*ppBRe[a][j];
+                    }
                 }
                 double nm = 0;
-                foreach (a; 0 .. 4) nm += v[a] * v[a];
+                foreach (a; 0 .. 4) nm += vRe[a]*vRe[a] + vIm[a]*vIm[a];
                 if (nm > 1e-10) {
-                    nm = 1.0 / sqrt(nm);
-                    foreach (a; 0 .. 4) ppBasis[npf][a] = v[a] * nm;
-                    npf++;
+                    double inv = 1.0 / sqrt(nm);
+                    foreach (a; 0 .. 4) { ppBRe[a][npFound]=inv*vRe[a]; ppBIm[a][npFound]=inv*vIm[a]; }
+                    npFound++;
                 }
             }
-            if (nmf < 2) {
-                double[4] v;
-                foreach (a; 0 .. 4) v[a] = Pm.re[4*a + col];
-                foreach (j; 0 .. nmf) {
-                    double d = 0;
-                    foreach (a; 0 .. 4) d += pmBasis[j][a] * v[a];
-                    foreach (a; 0 .. 4) v[a] -= d * pmBasis[j][a];
+            if (nmFound < 2) {
+                double[4] vRe = 0, vIm = 0;
+                foreach (a; 0 .. 4) { vRe[a] = Pm.re[4*a+col]; vIm[a] = Pm.im[4*a+col]; }
+                foreach (j; 0 .. nmFound) {
+                    double dRe = 0, dIm = 0;
+                    foreach (a; 0 .. 4) {
+                        dRe += pmBRe[a][j]*vRe[a] + pmBIm[a][j]*vIm[a];
+                        dIm += pmBRe[a][j]*vIm[a] - pmBIm[a][j]*vRe[a];
+                    }
+                    foreach (a; 0 .. 4) {
+                        vRe[a] -= dRe*pmBRe[a][j] - dIm*pmBIm[a][j];
+                        vIm[a] -= dRe*pmBIm[a][j] + dIm*pmBRe[a][j];
+                    }
                 }
                 double nm = 0;
-                foreach (a; 0 .. 4) nm += v[a] * v[a];
+                foreach (a; 0 .. 4) nm += vRe[a]*vRe[a] + vIm[a]*vIm[a];
                 if (nm > 1e-10) {
-                    nm = 1.0 / sqrt(nm);
-                    foreach (a; 0 .. 4) pmBasis[nmf][a] = v[a] * nm;
-                    nmf++;
+                    double inv = 1.0 / sqrt(nm);
+                    foreach (a; 0 .. 4) { pmBRe[a][nmFound]=inv*vRe[a]; pmBIm[a][nmFound]=inv*vIm[a]; }
+                    nmFound++;
                 }
             }
         }
 
-        // V = cos(φ) I + i sin(φ) M, where M = Σ_j (|pm_j⟩⟨pp_j| + |pp_j⟩⟨pm_j|)
-        // Apply to psi at site s:
-        // V ψ = cos(φ) ψ + i sin(φ) Σ_j (⟨pp_j|ψ⟩ |pm_j⟩ + ⟨pm_j|ψ⟩ |pp_j⟩)
-
-        double[4] psiR = ws.psiRe[4*s .. 4*s+4];
-        double[4] psiI = ws.psiIm[4*s .. 4*s+4];
-
-        // Compute projections
-        double[2] ppDotR = 0, ppDotI = 0, pmDotR = 0, pmDotI = 0;
-        foreach (j; 0 .. 2) {
-            foreach (a; 0 .. 4) {
-                ppDotR[j] += ppBasis[j][a] * psiR[a];
-                ppDotI[j] += ppBasis[j][a] * psiI[a];
-                pmDotR[j] += pmBasis[j][a] * psiR[a];
-                pmDotI[j] += pmBasis[j][a] * psiI[a];
+        // Build V = cos(φ)I + i sin(φ) M as a 4×4 matrix, then apply.
+        // M = Σ_j (|pm_j⟩⟨pp_j| + |pp_j⟩⟨pm_j|)
+        Mat4 V;
+        foreach (j; 0 .. 2)
+            foreach (a; 0 .. 4)
+                foreach (b; 0 .. 4) {
+                    int ab = 4*a+b;
+                    V.re[ab] += pmBRe[a][j]*ppBRe[b][j] + pmBIm[a][j]*ppBIm[b][j];
+                    V.im[ab] += pmBIm[a][j]*ppBRe[b][j] - pmBRe[a][j]*ppBIm[b][j];
+                    V.re[ab] += ppBRe[a][j]*pmBRe[b][j] + ppBIm[a][j]*pmBIm[b][j];
+                    V.im[ab] += ppBIm[a][j]*pmBRe[b][j] - ppBRe[a][j]*pmBIm[b][j];
+                }
+        // V_final = cos(φ) I + i sin(φ) M → re part: cos(φ) δ_ab - sin(φ) M.im
+        //                                  → im part: sin(φ) M.re
+        foreach (a; 0 .. 4)
+            foreach (b; 0 .. 4) {
+                int ab = 4*a+b;
+                double mRe = V.re[ab], mIm = V.im[ab];
+                V.re[ab] = (a == b ? cp : 0.0) + sp * (-mIm);
+                V.im[ab] = sp * mRe;
             }
-        }
 
-        // V ψ = cos(φ) ψ + i sin(φ) Σ_j (ppDot_j |pm_j⟩ + pmDot_j |pp_j⟩)
-        // The "i sin(φ)" multiplies: i*(a+ib) = -b + ia
-        foreach (a; 0 .. 4) {
-            double mRe = 0, mIm = 0;
-            foreach (j; 0 .. 2) {
-                mRe += ppDotR[j] * pmBasis[j][a] + pmDotR[j] * ppBasis[j][a];
-                mIm += ppDotI[j] * pmBasis[j][a] + pmDotI[j] * ppBasis[j][a];
-            }
-            // i * sin(φ) * (mRe + i mIm) = sin(φ) * (-mIm + i mRe)
-            ws.psiRe[4*s + a] = cp * psiR[a] + sp * (-mIm);
-            ws.psiIm[4*s + a] = cp * psiI[a] + sp * mRe;
-        }
+        // Apply V to psi at this site
+        double[4] outRe = 0, outIm = 0;
+        matVec4(V, &ws.psiRe[4*s], &ws.psiIm[4*s], outRe.ptr, outIm.ptr);
+        ws.psiRe[4*s .. 4*s+4] = outRe[];
+        ws.psiIm[4*s .. 4*s+4] = outIm[];
     }
-}
-
-private double sqrt(double x) {
-    import std.math : sqrt;
-    return sqrt(x);
 }
 
 /// One full walk step: S_L → V_L → S_R → V_R with redirect handling.
