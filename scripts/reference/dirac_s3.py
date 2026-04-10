@@ -170,10 +170,9 @@ def compare_walk_dirac(walk_data, R, L_max=30, mass=0.0):
 
 def main():
     """Run the walk on the 600-cell and compare to Dirac on S³."""
-    import ctypes, os, sys
+    import ctypes, os
     from collections import deque
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
-    from triangulation import Triangulation
+    from src.triangulation import Triangulation
 
     tri = Triangulation.load('data/600cell.mfd')
     print(f"600-cell: {tri.n_tets} tets, {tri.n_verts} verts")

@@ -27,11 +27,7 @@ Truncating at |ℓ| ≤ L gives a 4(2L+1) × 4(2L+1) eigenvalue problem.
 
 import numpy as np
 import time
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from src.helix_geometry import THETA_BC, R_VERTEX, H_VERTEX, _R_ALIGN, _SCALE
+from src.helix_geometry import THETA_BC, R_VERTEX, H_VERTEX
 from src.walk import make_tau_from_dir, frame_transport, I4
 
 
@@ -48,9 +44,8 @@ def exit_direction_continuous(xi):
     dy = R_VERTEX * (0.75 * np.sin(xi) - 0.25 * sin_sum)
     dz = -1.5 * H_VERTEX
 
-    d_formula = np.array([dx, dy, dz])
-    d_walk = _SCALE * _R_ALIGN @ d_formula
-    return d_walk / np.linalg.norm(d_walk)
+    d = np.array([dx, dy, dz])
+    return d / np.linalg.norm(d)
 
 
 def compute_AB_fourier(M_fft=1024):

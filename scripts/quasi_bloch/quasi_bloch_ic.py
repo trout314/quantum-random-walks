@@ -19,15 +19,12 @@ This script:
 4. Exports the quasi-Bloch IC for use in simulations
 """
 import numpy as np
+import sys
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import sys, os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.helix_geometry import build_taus
-
-BETA = np.diag([1.0, 1.0, -1.0, -1.0]).astype(complex)
+from src.dirac import beta as BETA
 
 def proj_plus(tau):
     return 0.5 * (np.eye(4) + tau)

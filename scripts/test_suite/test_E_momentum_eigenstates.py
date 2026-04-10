@@ -15,12 +15,10 @@ This script:
      (participation ratio in the eigenbasis)
 """
 import numpy as np
+import sys
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import sys, os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.walk import build_shift_operator, build_helix_taus, I4, frame_transport
 
 

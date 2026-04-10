@@ -12,21 +12,14 @@ are new.
 
 import numpy as np
 from itertools import combinations
-from triangulation import Triangulation
+from src.triangulation import Triangulation
+from src.dirac import alpha as ALPHA, beta as BETA
+from src.tau_operators import NU
 
 
 def make_tau(d):
     """Construct τ from a unit direction vector."""
-    ALPHA = [
-        np.array([[0,0,0,1],[0,0,1,0],[0,1,0,0],[1,0,0,0]], dtype=complex),
-        np.array([[0,0,0,-1j],[0,0,1j,0],[0,-1j,0,0],[1j,0,0,0]], dtype=complex),
-        np.array([[0,0,1,0],[0,0,0,-1],[1,0,0,0],[0,-1,0,0]], dtype=complex),
-    ]
-    nu = np.sqrt(7) / 4
-    tau = np.diag([nu, nu, -nu, -nu]).astype(complex)
-    for a in range(3):
-        tau += 0.75 * d[a] * ALPHA[a]
-    return tau
+    return NU * BETA + 0.75 * sum(d[a] * ALPHA[a] for a in range(3))
 
 
 def frame_transport(tau_from, tau_to):

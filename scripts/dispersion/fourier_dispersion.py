@@ -10,12 +10,10 @@ No translational symmetry assumed — the BC helix has irrational
 screw angle, so there is no unit cell.
 """
 import numpy as np
+import sys
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import sys, os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.helix_geometry import build_taus, centroid
 
 # ---- Dirac algebra ----

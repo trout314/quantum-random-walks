@@ -9,10 +9,8 @@ This isolates the shift operator from boundary effects (absorption, pruning,
 extension) to check if the core walk step is unitary.
 """
 import numpy as np
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
-from helix_geometry import build_taus, centroid, exit_direction, vertex
-from manifold_walk import make_tau, frame_transport
+from src.helix_geometry import build_taus, centroid, exit_direction, vertex
+from src.manifold_walk import make_tau, frame_transport
 
 def proj_plus(tau):
     return 0.5 * (np.eye(4, dtype=complex) + tau)

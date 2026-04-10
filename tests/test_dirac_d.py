@@ -5,9 +5,9 @@ import numpy as np
 import pytest
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-from walk import make_tau_from_dir, frame_transport as py_frame_transport, ALPHA, BETA, I4
-from tetrahedron import vertices
+from src.dirac import alpha as ALPHA, beta as BETA, I4
+from src.walk import make_tau_from_dir, frame_transport as py_frame_transport
+from src.tetrahedron import vertices
 
 _dp = ctypes.POINTER(ctypes.c_double)
 

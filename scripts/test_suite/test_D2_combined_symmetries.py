@@ -15,9 +15,8 @@ We also compare with the AZ operators found in Test D:
 For each candidate, test whether it maps W to W, W†, -W, or -W†.
 """
 import numpy as np
-import sys, os
+import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.helix_geometry import build_taus
 
 # ---- Dirac algebra ----

@@ -11,12 +11,10 @@ and measure the CPT residual in that subspace.
 Also test: how the residual scales with N (lattice refinement).
 """
 import numpy as np
+import sys
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import sys, os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.helix_geometry import build_taus
 
 # ---- Dirac algebra ----

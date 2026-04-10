@@ -10,5 +10,9 @@ build/
 *.txt
 *.log
 
+# Generated data
+*.npz
+*.dat
+
 # D build artifacts
 dlang/build/

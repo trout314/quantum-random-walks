@@ -20,7 +20,6 @@ _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 sys.path.insert(0, os.path.join(_root, 'scripts', 'reference'))
 from dirac_1d_4comp import solve_dirac_1d_4comp
 
-sys.path.insert(0, _root)
 from src.helix_geometry import build_taus, build_entry_taus, make_tau
 
 THETA_BC = np.arccos(-2/3)

@@ -6,9 +6,8 @@ run the walk in D, and coarse-grain the result in Python.
 import numpy as np
 import ctypes, os, sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
-from triangulation import Triangulation
-from manifold_walk import make_tau, frame_transport, STD_DIRS, L_PERM
+from src.triangulation import Triangulation
+from src.manifold_walk import make_tau, frame_transport, STD_DIRS, L_PERM
 
 
 # ---- Chain tracing through the manifold ----

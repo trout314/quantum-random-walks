@@ -16,7 +16,7 @@ Construction rule:
 """
 
 import numpy as np
-from helix_geometry import vertex, centroid, THETA_BC, _R_ALIGN, _SCALE, R_VERTEX, H_VERTEX, _T_ALIGN
+from src.helix_geometry import vertex, centroid, THETA_BC, R_VERTEX, H_VERTEX
 
 
 def find_fourth_vertex(v0, v1, v2, v_old):
@@ -88,35 +88,37 @@ class Chain:
         return d / np.linalg.norm(d)
 
     def axis(self, n_steps=None):
-        """Compute exact helix axis from the chain's rotation matrix.
+        """Compute helix axis from the chain's vertex positions.
 
-        The BC helix axis in the formula frame is (0,0,1). The chain's
-        rotation R maps this to the actual axis: axis = R @ (R_ALIGN @ [0,0,1]).
+        The BC helix axis in the formula frame is (0,0,1). We find the
+        rotation R mapping the reference tet to this chain's initial tet
+        via the isotropy relation R = (3/4) Σ d_chain[k] ⊗ d_ref[k].
         """
-        z_walk = _R_ALIGN @ np.array([0, 0, 1])
-
-        # Compute chain rotation R via Kabsch on initial vertices
-        # Standard reference directions for this chirality
-        t_sign = -1 if not self.is_r else 1
-        std_verts = []
+        # Reference tet vertex directions in formula frame
+        t_sign = 1 if self.is_r else -1
+        ref_verts = []
         for k in range(4):
             angle = k * THETA_BC * t_sign
-            vf = np.array([R_VERTEX * np.cos(angle), R_VERTEX * np.sin(angle), k * H_VERTEX])
-            std_verts.append(_SCALE * (_R_ALIGN @ vf) + _T_ALIGN)
-        std_c = np.mean(std_verts, axis=0)
-        std_dirs = [(v - std_c) / np.linalg.norm(v - std_c) for v in std_verts]
+            ref_verts.append(np.array([
+                R_VERTEX * np.cos(angle),
+                R_VERTEX * np.sin(angle),
+                k * H_VERTEX,
+            ]))
+        ref_c = np.mean(ref_verts, axis=0)
+        ref_dirs = [(v - ref_c) / np.linalg.norm(v - ref_c) for v in ref_verts]
 
         init_verts = [self._vertices[k] for k in range(4)]
         init_c = np.mean(init_verts, axis=0)
         init_dirs = [(v - init_c) / np.linalg.norm(v - init_c) for v in init_verts]
 
-        # R = (3/4) Σ init_dirs[k] ⊗ std_dirs[k] (exact for tet isotropy)
+        # R = (3/4) Σ init_dirs[k] ⊗ ref_dirs[k] (exact for tet isotropy)
         H = np.zeros((3, 3))
         for k in range(4):
-            H += np.outer(init_dirs[k], std_dirs[k])
+            H += np.outer(init_dirs[k], ref_dirs[k])
         R = 0.75 * H
 
-        return R @ z_walk
+        # Helix axis is (0,0,1) in the formula frame
+        return R @ np.array([0, 0, 1])
 
 
 class Site:

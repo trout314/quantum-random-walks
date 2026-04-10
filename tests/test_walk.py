@@ -1,8 +1,5 @@
 """Tests for walk operators."""
 
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
 import numpy as np
 from src.walk import (
     build_shift_operator, build_helix_taus, analyze_spectrum,

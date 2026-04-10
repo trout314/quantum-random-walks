@@ -21,12 +21,10 @@ Truncating to M quasiperiodic harmonics gives a matrix of size
 For M=1: 48×48.  For M=2: 80×80.  Compare to full: 4N×4N = 1600×1600.
 """
 import numpy as np
+import sys
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import sys, os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.helix_geometry import build_taus
 
 def proj_plus(tau):

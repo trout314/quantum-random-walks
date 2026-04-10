@@ -5,8 +5,7 @@ Adapted from manifold_kick_test.py with parameters scaled for 1.2M sites.
 """
 import ctypes, numpy as np, os, sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src'))
-from triangulation import Triangulation
+from src.triangulation import Triangulation
 
 
 def load_lib():

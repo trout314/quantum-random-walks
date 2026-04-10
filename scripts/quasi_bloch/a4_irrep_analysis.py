@@ -14,13 +14,12 @@ If no, the trivial-sector C⁴ suffices (coarse-graining is exact).
 """
 import ctypes, numpy as np, os, sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
-from triangulation import Triangulation
+from src.triangulation import Triangulation
 
 
 def load_lib():
     lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            '..', 'dlang', 'build', 'quantum_walk.so')
+                            '..', '..', 'dlang', 'build', 'quantum_walk.so')
     lib = ctypes.CDLL(lib_path)
     c_dp = ctypes.POINTER(ctypes.c_double)
     c_ip = ctypes.POINTER(ctypes.c_int)

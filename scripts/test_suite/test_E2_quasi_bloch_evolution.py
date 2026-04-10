@@ -16,13 +16,11 @@ This script visualizes this structure:
   - Spinor-resolved structure of the envelope
 """
 import numpy as np
+import sys
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-import sys, os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.helix_geometry import build_taus
 
 THETA_BC = np.arccos(-2/3)

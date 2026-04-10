@@ -18,7 +18,6 @@ import matplotlib.pyplot as plt
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'dispersion'))
 from fourier_dispersion import build_walk_operator
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.helix_geometry import build_taus
 
 

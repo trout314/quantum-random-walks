@@ -39,11 +39,15 @@ Result:
   τ_a = ±(√7/4) β + (3/4)(e_a · α)
 """
 
+import numpy as np
 import sympy as sp
 from sympy import Matrix, Rational, sqrt, simplify, eye, zeros, I
 
-from src.dirac import alpha, beta, gamma_5, I4
+from src.dirac import alpha_sym, beta_sym, gamma_5_sym, _I4_sym as I4
 from src.tetrahedron import vertices
+
+# β component of the τ operator: ν = √7/4
+NU = np.sqrt(7) / 4
 
 
 def construct_tau(sign=1):
@@ -63,8 +67,8 @@ def construct_tau(sign=1):
     taus = []
     for a in range(4):
         e = vertices[a]
-        tau_a = nu * beta + Rational(3, 4) * sum(
-            (e[i] * alpha[i] for i in range(3)), zeros(4)
+        tau_a = nu * beta_sym + Rational(3, 4) * sum(
+            (e[i] * alpha_sym[i] for i in range(3)), zeros(4)
         )
         taus.append(tau_a.applyfunc(simplify))
     return taus
@@ -77,7 +81,7 @@ def verify_dirac_correspondence(taus):
         lhs = sum(
             (vertices[a][i] * taus[a] for a in range(4)), zeros(4)
         ).applyfunc(simplify)
-        diff = (lhs - alpha[i]).applyfunc(simplify)
+        diff = (lhs - alpha_sym[i]).applyfunc(simplify)
         results[f'direction_{i+1}'] = diff == zeros(4)
     return results
 

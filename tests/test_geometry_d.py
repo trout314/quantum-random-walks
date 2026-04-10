@@ -5,8 +5,7 @@ import numpy as np
 import pytest
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-from tetrahedron import vertices, reflect_directions, position_after_path
+from src.tetrahedron import vertices, reflect_directions, position_after_path
 
 _dp = ctypes.POINTER(ctypes.c_double)
 

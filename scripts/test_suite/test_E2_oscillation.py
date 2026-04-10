@@ -5,12 +5,10 @@ oscillating in time.  Since ψ(t) = e^{-iEt} ψ(0), the real part swings
 sinusoidally while the envelope stays fixed.
 """
 import numpy as np
+import sys
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import sys, os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.helix_geometry import build_taus
 
 THETA_BC = np.arccos(-2/3)

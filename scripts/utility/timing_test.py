@@ -3,8 +3,7 @@
 import numpy as np
 import ctypes, os, sys, time, glob
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
-from triangulation import Triangulation
+from src.triangulation import Triangulation
 
 SEEDS_DIR = os.path.expanduser('~/Desktop/Discrete-Differential-Geometry/seeds')
 

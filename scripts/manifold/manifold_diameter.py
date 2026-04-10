@@ -4,8 +4,7 @@ import numpy as np
 import os, sys, glob
 from collections import deque
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
-from triangulation import Triangulation
+from src.triangulation import Triangulation
 
 SEEDS_DIR = os.path.expanduser('~/Desktop/Discrete-Differential-Geometry/seeds')
 SIZES = ['1e2', '178', '316', '562', '1778', '3162', '5623', '17783', '31623', '56234']

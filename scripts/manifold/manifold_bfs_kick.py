@@ -6,8 +6,7 @@ Compares k=0 baseline with several kick values.
 import ctypes, numpy as np, os, sys
 from collections import deque
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src'))
-from triangulation import Triangulation
+from src.triangulation import Triangulation
 
 
 def load_lib():

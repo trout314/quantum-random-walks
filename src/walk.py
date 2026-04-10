@@ -6,16 +6,8 @@ with frame transport to ensure unitarity.
 """
 
 import numpy as np
-
-# Dirac matrices (numerical, Dirac representation)
-ALPHA = [
-    np.array([[0,0,0,1],[0,0,1,0],[0,1,0,0],[1,0,0,0]], dtype=complex),
-    np.array([[0,0,0,-1j],[0,0,1j,0],[0,-1j,0,0],[1j,0,0,0]], dtype=complex),
-    np.array([[0,0,1,0],[0,0,0,-1],[1,0,0,0],[0,-1,0,0]], dtype=complex),
-]
-BETA = np.diag([1, 1, -1, -1]).astype(complex)
-NU = np.sqrt(7) / 4
-I4 = np.eye(4, dtype=complex)
+from src.dirac import alpha as ALPHA, beta as BETA, I4
+from src.tau_operators import NU
 
 BC_HELIX_R = [1, 3, 0, 2]
 BC_HELIX_L = [0, 1, 2, 3]

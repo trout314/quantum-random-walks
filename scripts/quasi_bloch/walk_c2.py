@@ -12,7 +12,6 @@ import sys, os, numpy as np
 import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.helix_geometry import exit_direction
 
 # Pauli matrices

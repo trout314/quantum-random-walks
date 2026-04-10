@@ -1,11 +1,8 @@
 """Tests for Dirac algebra infrastructure."""
 
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
 from src.dirac import (
     verify_clifford_algebra, verify_alpha_properties,
-    alpha, beta, gamma, gamma_5, I4,
+    alpha_sym, beta_sym, gamma_sym, gamma_5_sym, _I4_sym,
     spinor_rotation_generator,
 )
 from sympy import zeros, simplify, I, eye
@@ -25,20 +22,20 @@ def test_alpha_properties():
 
 def test_gamma5_squared():
     """gamma_5^2 = I_4"""
-    result = (gamma_5 * gamma_5).applyfunc(simplify)
-    assert result == I4
+    result = (gamma_5_sym * gamma_5_sym).applyfunc(simplify)
+    assert result == _I4_sym
 
 
 def test_gamma5_anticommutes_with_gamma():
     """Check {gamma_5, gamma^mu} = 0 for all mu."""
     for mu in range(4):
-        anticomm = (gamma_5 * gamma[mu] + gamma[mu] * gamma_5).applyfunc(simplify)
+        anticomm = (gamma_5_sym * gamma_sym[mu] + gamma_sym[mu] * gamma_5_sym).applyfunc(simplify)
         assert anticomm == zeros(4), f"gamma_5 does not anticommute with gamma_{mu}"
 
 
 def test_beta_squared():
     """beta^2 = I_4"""
-    assert (beta * beta).applyfunc(simplify) == I4
+    assert (beta_sym * beta_sym).applyfunc(simplify) == _I4_sym
 
 
 def test_spinor_rotation_generators_antisymmetric():

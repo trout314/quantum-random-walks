@@ -20,6 +20,7 @@ from quasi_bloch_l1 import (build_chain_taus, build_full_walk,
     make_transported_ic, proj_plus, proj_minus, compute_density, frame_transport)
 
 
+
 def make_pp_spinor(taus, center):
     tau0 = taus[center]
     Pp0 = 0.5 * (np.eye(4) + tau0)

@@ -19,10 +19,8 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'reference'))
 from dirac_1d_4comp import solve_dirac_1d_4comp
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.helix_geometry import build_taus
-
-BETA = np.diag([1, 1, -1, -1]).astype(complex)
+from src.dirac import beta as BETA
 
 def proj_plus(tau):
     return 0.5 * (np.eye(4) + tau)
